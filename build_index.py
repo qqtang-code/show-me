@@ -54,7 +54,7 @@ def render_readme(entries: list[dict]) -> str:
             link += f" ({extra})"
         date = e["date"]
         sid = e.get("session_id") or ""
-        src = f"`{sid[:19]}`" if sid else "—"
+        src = f"`{sid}`" if sid else "—"
         lines.append(f"| {date} | {link} | {e['category']} | {tags} | {e['one_liner']} | {src} |")
     table = "\n".join(lines)
 
