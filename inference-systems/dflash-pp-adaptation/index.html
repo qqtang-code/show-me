@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>PP 适配 DFlash · 伪造单例 PP 组 + 两条跨阶段数据流</title>
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --line:#dde3ee;
+    --fg:#131c2e; --dim:#4a5871; --dim2:#657389; --accent:#17509e; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px}
+  .wrap{max-width:900px;margin:0 auto}
+  .top{margin-bottom:26px}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:10px}
+  .crumb a{color:var(--accent);text-decoration:none}
+  h1{font-size:25px;line-height:1.4;margin:0 0 10px;letter-spacing:-.01em}
+  h2{font-size:19px;margin:34px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);color:#0d1526}
+  h3{font-size:16px;margin:24px 0 8px;color:#0d1526}
+  p{margin:10px 0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font:12px var(--mono);color:var(--dim2)}
+  .meta .tag{background:#eef2f9;border:1px solid #dbe2ee;border-radius:999px;padding:4px 9px;color:#3f4c63}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;padding:11px 14px;
+        font-size:13.5px;color:#4a3a1c;margin:16px 0}
+  pre{background:#f3f6fb;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.7 var(--mono);color:#28374f;margin:12px 0}
+  pre.diff .add{color:#0b6b3f;font-weight:600}
+  pre.diff .del{color:#a3231f;font-weight:600}
+  code{font-family:var(--mono);font-size:12.5px;background:#e8eefb;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre code{background:none;color:inherit;padding:0}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;background:#f4f7fc;text-transform:uppercase}
+  blockquote{margin:12px 0;padding:8px 14px;border-left:3px solid var(--line);color:var(--dim);font-size:14px}
+  .final{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:26px;
+         box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .final strong{color:#0d1526}
+  .mermaid{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:14px 0;text-align:center}
+  footer{color:var(--dim2);font:11.5px/1.75 var(--mono);text-align:center;margin-top:30px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="crumb"><a href="../../index.html">← show-me 知识库</a> / inference-systems / dflash-pp-adaptation</div>
+    <h1>PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</h1>
+    <div class="meta">
+      <span class="tag">2026-09-16</span>
+      <span class="tag">SGLang</span><span class="tag">流水并行</span><span class="tag">DFlash</span>
+      <span class="tag">投机解码</span><span class="tag">跨阶段通信</span><span class="tag">正确性 bug</span>
+    </div>
+  </div>
+
+  <div class="note">归档说明：2026-09-16 用 show-me 问「PP 适配 DFlash 做了什么改动」时只给了聊天回答，没有落盘。本页由会话记录 <code>sess_0255fd71</code> 重建，代码片段与结论未改动；Markdown 原文见 <a href="notes.md">notes.md</a>。</div>
+
+  <h2>一、要解决的根本矛盾</h2>
+  <p>上游 SGLang <strong>硬性禁止</strong> DFlash 与 PP 共存，三道护栏都在启动期直接报错：</p>
+<pre><code># speculative_hook.py
+if cfg.pp_size != 1:
+    raise ValueError("Currently DFLASH speculative decoding only supports pp_size == 1.")
+
+# server_args.py
+assert (cfg.disable_overlap_schedule and cfg.speculative_algorithm is None), \
+    "Pipeline parallelism is not compatible with overlap schedule, speculative decoding"
+
+# layer_setup.py — 推测层的选取条件里没有 DFlash 分支</code></pre>
+  <p>而即使放开护栏，DFlash 的数据流仍假设「只有一个 rank」：草稿模型是个独立的小模型、需要目标模型多个中间层的 hidden state、还需要 LM head。这些在 PP4 下<strong>分散在四个阶段上</strong>。</p>
+
+  <h2>二、改动分四块</h2>
+
+  <h3>A. 放开护栏（全部门控在 <code>HZY_DFLASH_PP_INIT_PROBE=1</code> 下）</h3>
+  <p>三个文件各 1~4 行，都是 <code>and os.environ.get("HZY_DFLASH_PP_INIT_PROBE") == "1"</code> 形式的条件放宽。<strong>没有改算法，只是把禁入改成可入</strong>，且保留开关随时可退回。</p>
+
+  <h3>B. 草稿模型不切分——伪造单例 PP 组</h3>
+  <p><code>dflash_pp_scope.py</code>（新增，1.5 KB）是整个适配的钥匙：</p>
+<pre><code>def create_singleton_pp_group():
+    # 每个 rank 建一个 world_size=1 的"PP 组"（集合操作，全 rank 同序参与）
+    return ps.init_model_parallel_group(group_ranks=[[rank] for rank in range(world_size)], ...)
+
+@contextmanager
+def draft_pp_scope(group):
+    ps._PP = group                                  # 临时替换全局 PP 组
+    with get_parallel().override(pp_size=1, pp_rank=0, pp_group=group):
+        yield                                       # 世界对草稿模型来说退化成 PP=1</code></pre>
+  <p>worker 侧对应地把 <code>ps</code> 替换后构建，并把 forward 也包进同一个 scope：</p>
+<pre><code>self._draft_pp_group = create_singleton_pp_group() if ps.pp_size > 1 else None
+with self._draft_scope():
+    bundle = build_draft_tp_worker(ps=replace(ps, pp_rank=0, pp_size=1), ...)
+...
+with torch.inference_mode(), self._draft_scope():
+    draft_out = self.draft_model_runner.forward(forward_batch)</code></pre>
+  <p><strong>关键点：6 层的草稿模型整体跑在 PP0 上，不参与流水切分。</strong>构造和 forward 都必须进 scope，因为两者都读并行状态。</p>
+
+  <h3>C. 两股跨阶段数据流（这是真正的工作量）</h3>
+  <div class="mermaid">
+sequenceDiagram
+    participant P0 as PP0 · target 层 0-15<br/>＋DFlash draft
+    participant P1 as PP1 · 层 16-30
+    participant P2 as PP2 · 层 31-45
+    participant P3 as PP3 · 层 46-61
+    Note over P0,P3: ① 去程 · aux hidden 沿 PP ring 前向累积
+    P0->>P1: hidden ＋ dflash_aux_hidden
+    P1->>P2: hidden ＋ 累积后的 aux_hidden
+    P2->>P3: hidden ＋ 累积后的 aux_hidden
+    Note over P3: project_target_hidden() 只在这一段跑<br/>（最终 hidden 只有末段才有）
+    Note over P0,P3: ② 回程 · 投影后的 context 走 PP output ring
+    P3-->>P0: dflash_result/context
+    Note over P0: take_projected_context() 后立刻 del<br/>中间段不再携带这个张量
+  </div>
+  <p><strong>去程</strong>：DFlash 需要 <code>layers_to_capture</code> 这几层的 hidden state，而它们散落在四个阶段。每个阶段只打包<strong>本地</strong>的捕获：</p>
+<pre><code>local_capture_count = (sum(self.start_layer &lt;= i &lt; self.end_layer for i in self.layers_to_capture)
+                       if dflash_pp_capture else len(self.layers_to_capture))</code></pre>
+  <p>然后把 <code>dflash_aux_hidden</code>（形状 <code>[rows, preceding*hidden]</code>）挂进 PP ring 往下传，每段校验 shape/dtype/device 后追加自己那份。</p>
+  <p><strong>回程</strong>：投影必须发生在<strong>末段</strong>，然后结果沿 output ring 绕回 PP0。所以有了 <code>dflash_pp_result.py</code>——一个带 <code>dflash_result/</code> 前缀的信封，装 bonus token、seq_len、block_size、commit_len。里面每处都 <code>.clone()</code>，注释说明了原因：</p>
+  <blockquote>Queued PP outputs must survive subsequent graph/static-buffer reuse.</blockquote>
+  <p>即 PP ring 会把包<strong>跨微批排队</strong>，而 worker 的 buffer 会被复用（CUDA graph 静态缓冲），所以必须存快照而非引用。</p>
+
+  <h3>D. PP0 缺的东西要补</h3>
+  <p><code>dflash_pp_lm_head.py</code>（新增）——PP0 上没有 LM head（它只在末段），所以<strong>直接从 checkpoint 单独加载一份不带量化的、按 TP 切分的 <code>lm_head.weight</code></strong>，注释开头就写明了 "for drafting on the <strong>first PP stage</strong>"。同时 <code>_resolve_dflash_embedding_module</code> 会优先用这份副本。</p>
+
+  <h2>三、一个容易漏掉的正确性 bug</h2>
+<pre class="diff"><span class="del">- return PPProxyTensors({k: v[: self.bs] for k, v in output.tensors.items()})</span>
+<span class="add">+ return PPProxyTensors({k: v[: self.raw_num_token] for k, v in output.tensors.items()})</span></pre>
+  <p><strong>投机解码下一条请求产生 <code>block_size</code> 个 token 行，按请求数 <code>bs</code> 切片会丢行。</strong>以及 verify 的图预规划：</p>
+<pre><code>if pp_proxy_tensors is not None:
+    # Verify planning precedes receipt of the preceding PP stage.
+    # Refresh its activations now, even when attention metadata is ready.</code></pre>
+  <p>——<strong>这和 GLM 工作区里 PP+MTP 的 r37 补丁是同一类 bug</strong>（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一个坑在 MTP 和 DFlash 上各踩了一次。</p>
+
+  <h2>四、配套的调度改动</h2>
+  <table>
+    <thead><tr><th>文件</th><th>改动</th><th>目的</th></tr></thead>
+    <tbody>
+      <tr><td><code>scheduler.py</code> (+24/-17)</td><td>DFlash+PP 时不再原地更新 batch 状态，改由 output ring 完成</td><td>"PP completion is handled on the output ring instead"</td></tr>
+      <tr><td><code>scheduler_pp_mixin.py</code> (+94/-22)</td><td>加 <code>dflash_append_plan</code>；收发两侧挂 <code>add_result</code>/<code>restore_result</code>；信封一致性校验</td><td>携带 draft 状态穿过 ring</td></tr>
+      <tr><td>↳ 时序优化</td><td><strong>提前发 proxy</strong>："KV release can synchronize the host. Send the current proxy first so the peer can launch its forward before that wait."</td><td>让下游段早启动</td></tr>
+      <tr><td><code>base_runner.py</code> (+14/-2)</td><td><code>residual_shape</code> 从 <code>(max_bs, hidden)</code> 改为 <code>(max_num_token, hidden)</code>；autotune 时伪造 aux 张量</td><td>verify 每请求多行</td></tr>
+      <tr><td><code>decode_cuda_graph_runner.py</code> (+17/-1)</td><td>图内预分配 <code>dflash_aux_hidden</code> 缓冲</td><td>图捕获需要静态形状</td></tr>
+    </tbody>
+  </table>
+
+  <h2>五、明确未接通的部分（能力边界）</h2>
+<pre><code>if batch.is_extend_in_batch and not batch.forward_mode.is_extend():
+    raise RuntimeError('DFlash PP mixed decode/prefill is not connected')
+if forward_batch.can_run_tbo or is_cp_v2_active(...):
+    raise NotImplementedError("DFlash PP capture requires unsharded eager rows")</code></pre>
+  <p><strong>混合 decode/prefill 微批不支持、TBO/CP 不支持</strong>，加上 <code>--cuda-graph-backend-prefill disabled</code> —— 这些正好对应 profile 里看到的 prefill attention 0% 图覆盖。</p>
+
+  <div class="final">
+    <p><strong>一句话概括</strong>：这次适配没碰 DFlash 的算法，而是（1）放开三道禁入护栏，（2）用一个伪造的单例 PP 组让草稿模型在 PP0 上以 PP=1 的视角独立运行，（3）新设计两条跨阶段数据通道——aux hidden 沿 ring 前向累积、投影 context 沿 output ring 绕回——并把 draft 状态装进信封穿环传递，同时补上 PP0 缺失的 LM head 副本。</p>
+    <p>代价也清楚：草稿模型集中在一个阶段，<strong>PP0 因此比其他段忙</strong>（profile 里 PP0 busy 25.98s vs PP1-3 的 21.8~23.3s），且 prefill 放弃了图捕获。</p>
+  </div>
+
+  <footer>show-me 知识库 · inference-systems/dflash-pp-adaptation · 重建自会话 sess_0255fd71</footer>
+</div>
+<script type="module">
+  // mermaid 从 CDN 加载;离线时保留源码块可读(降级不报错)
+  const el = document.querySelector('.mermaid');
+  try {
+    const mermaid = (await import('https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs')).default;
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+    await mermaid.run({ nodes: [el] });
+  } catch (e) {
+    const pre = document.createElement('pre');
+    pre.textContent = el.textContent.trim();
+    pre.style.textAlign = 'left';
+    el.replaceWith(pre);
+  }
+</script>
+</body>
+</html>

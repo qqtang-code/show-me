@@ -1,0 +1,16 @@
+{
+  "title": "PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流",
+  "slug": "dflash-pp-adaptation",
+  "category": "inference-systems",
+  "date": "2026-09-16",
+  "tags": ["SGLang", "流水并行", "DFlash", "投机解码", "跨阶段通信", "正确性 bug"],
+  "one_liner": "上游 SGLang 有三道护栏硬性禁止 DFlash 与 PP 共存；适配没有碰算法，而是用一个 world_size=1 的伪造 PP 组让草稿模型整体跑在 PP0，并设计 aux hidden 去程累积、投影 context 回程两条通道穿过 PP ring。",
+  "artifact": "index.html",
+  "extra_files": ["notes.md"],
+  "session_id": "sess_0255fd71-2740-4760-8543-294de23e9fc5",
+  "cwd": "/Users/qqtang/Desktop/research/是石科技/GLM 5.2测试指南",
+  "sources": [
+    "从会话记录重建：当时 show-me 只给了聊天回答，未落盘（notes.md 为原始文本，index.html 为渲染版）"
+  ],
+  "visibility": "internal"
+}

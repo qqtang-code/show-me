@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>show-me 知识库 · 图解与概念解释合集</title>
+<style>
+  :root{--bg:#f5f7fb;--panel:#fff;--panel2:#f8fafc;--line:#dde3ee;--fg:#131c2e;--dim:#4a5871;
+        --dim2:#657389;--accent:#17509e;--chip:#eef2f9;--chipb:#dbe2ee;
+        --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:44px 20px 80px}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:28px;margin:0 0 8px;letter-spacing:-.01em}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 24px}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+  #q{flex:1;min-width:220px;padding:11px 14px;border:1px solid var(--line);border-radius:10px;
+     font-size:14.5px;background:var(--panel);color:var(--fg)}
+  #q:focus{outline:2px solid #c7d7f5;border-color:#a8c0e8}
+  .count{font:12px var(--mono);color:var(--dim2)}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 26px}
+  .chip{font:12px var(--mono);background:var(--chip);border:1px solid var(--chipb);color:#3f4c63;
+        border-radius:999px;padding:5px 11px;cursor:pointer;user-select:none}
+  .chip[aria-pressed="true"]{background:#17509e;border-color:#17509e;color:#fff}
+  h2.cat{font-size:16px;margin:30px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--line);
+         display:flex;align-items:baseline;gap:9px;color:#0d1526}
+  h2.cat span{font:11.5px var(--mono);color:var(--dim2)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}body{padding:26px 14px 60px}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+        box-shadow:0 1px 2px rgba(16,24,40,.04);display:flex;flex-direction:column;gap:9px}
+  .card h3{margin:0;font-size:16px;line-height:1.45}
+  .card h3 a{color:#0d1526;text-decoration:none}
+  .card h3 a:hover{color:var(--accent);text-decoration:underline}
+  .card .one{color:var(--dim);font-size:13.5px;margin:0}
+  .card .tags{display:flex;flex-wrap:wrap;gap:6px}
+  .card .tags span{font:11.5px var(--mono);background:var(--chip);border:1px solid var(--chipb);
+                   border-radius:999px;padding:3px 8px;color:#3f4c63}
+  .card .foot{margin-top:auto;display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+              font:11.5px var(--mono);color:var(--dim2);border-top:1px solid #eef2f8;padding-top:10px}
+  .card .foot a{color:var(--accent);text-decoration:none}
+  .card .foot a:hover{text-decoration:underline}
+  .empty{color:var(--dim2);font:13px var(--mono);padding:30px 0;text-align:center}
+  footer{color:var(--dim2);font:11.5px/1.75 var(--mono);text-align:center;margin-top:44px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>show-me 知识库</h1>
+  <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
+
+  <div class="controls">
+    <input id="q" type="search" placeholder="搜索标题、标签、一句话…" autocomplete="off">
+    <span class="count" id="count"></span>
+  </div>
+  <div class="chips" id="chips"></div>
+
+  <div id="list"></div>
+
+  <footer>由 build_index.py 从各目录 meta.json 生成 · 仓库私有，内容含未公开工程细节</footer>
+</div>
+<script>
+const ENTRIES = [
+  {
+    "title": "PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流",
+    "slug": "dflash-pp-adaptation",
+    "category": "inference-systems",
+    "date": "2026-09-16",
+    "tags": [
+      "SGLang",
+      "流水并行",
+      "DFlash",
+      "投机解码",
+      "跨阶段通信",
+      "正确性 bug"
+    ],
+    "one_liner": "上游 SGLang 有三道护栏硬性禁止 DFlash 与 PP 共存；适配没有碰算法，而是用一个 world_size=1 的伪造 PP 组让草稿模型整体跑在 PP0，并设计 aux hidden 去程累积、投影 context 回程两条通道穿过 PP ring。",
+    "artifact": "index.html",
+    "session_id": "sess_0255fd71-2740-4760-8543-294de23e9fc5",
+    "_dir": "inference-systems/dflash-pp-adaptation",
+    "extra_files": [
+      "notes.md"
+    ]
+  },
+  {
+    "title": "L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么",
+    "slug": "hicache-mooncake",
+    "category": "inference-systems",
+    "date": "2026-09-18",
+    "tags": [
+      "KV Cache",
+      "HiCache",
+      "Mooncake",
+      "SGLang",
+      "分层缓存",
+      "前缀复用",
+      "PD 分离"
+    ],
+    "one_liner": "用存储层级的容量/带宽阶梯解释 decode 为什么是纯访存瓶颈；SGLang HiCache 把 radix 树从 HBM 延伸到主机与集群，Mooncake 是其中一种 L3 实现（同时还是 PD 分离的默认传输后端），二者是策略层与数据面的正交关系。",
+    "artifact": "index.html",
+    "session_id": "sess_028051f7-061f-4ed4-ae09-2e0f7bd6f263",
+    "_dir": "inference-systems/hicache-mooncake",
+    "extra_files": []
+  },
+  {
+    "title": "1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节",
+    "slug": "allreduce-1stage-vs-2stage",
+    "category": "comm-parallel",
+    "date": "2026-09-15",
+    "tags": [
+      "AllReduce",
+      "张量并行",
+      "通信优化",
+      "PCIe",
+      "投机解码",
+      "Amdahl"
+    ],
+    "one_liner": "GLM-5.3 TP8 上把 AllReduce 从广播式改成 reduce-scatter + all-gather，单次归约 907 → 222.6 µs；收益全部来自「少搬 4 倍字节」，端到端 +60% 对 Amdahl 上限 +76% 的兑现率 91%。",
+    "artifact": "index.html",
+    "session_id": "sess_0255fd71-2740-4760-8543-294de23e9fc5",
+    "_dir": "comm-parallel/allreduce-1stage-vs-2stage",
+    "extra_files": [
+      "allreduce-infographic.png"
+    ]
+  }
+];
+const CATS = {"inference-systems": "推理系统", "comm-parallel": "通信与并行"};
+const state = { q: "", tag: null };
+
+function matches(e) {
+  if (state.tag && !e.tags.includes(state.tag)) return false;
+  if (!state.q) return true;
+  const hay = [e.title, e.one_liner, e.category, ...(e.tags || [])].join(" ").toLowerCase();
+  return hay.includes(state.q.toLowerCase());
+}
+
+function render() {
+  const list = document.getElementById("list");
+  const shown = ENTRIES.filter(matches);
+  const total = ENTRIES.length;
+  document.getElementById("count").textContent = `${shown.length} / ${total} 篇`;
+
+  if (!shown.length) {
+    list.innerHTML = '<div class="empty">没有匹配的条目</div>';
+    return;
+  }
+  const byCat = new Map();
+  for (const e of shown) {
+    if (!byCat.has(e.category)) byCat.set(e.category, []);
+    byCat.get(e.category).push(e);
+  }
+  let html = "";
+  for (const [cat, items] of byCat) {
+    html += `<h2 class="cat">${CATS[cat] || cat}<span>${cat} · ${items.length}</span></h2><div class="grid">`;
+    for (const e of items) {
+      const tags = (e.tags || []).map(t => `<span>${t}</span>`).join("");
+      const extras = (e.extra_files || []).map(f => `<a href="${e._dir}/${f}">${f}</a>`).join("");
+      html += `<div class="card">
+        <h3><a href="${e._dir}/${e.artifact}">${e.title}</a></h3>
+        <p class="one">${e.one_liner}</p>
+        <div class="tags">${tags}</div>
+        <div class="foot"><span>${e.date}</span>${extras}<a href="${e._dir}/meta.json">meta.json</a></div>
+      </div>`;
+    }
+    html += "</div>";
+  }
+  list.innerHTML = html;
+}
+
+function renderChips() {
+  const tags = [...new Set(ENTRIES.flatMap(e => e.tags || []))].sort();
+  const box = document.getElementById("chips");
+  box.innerHTML = tags.map(t => `<button class="chip" data-tag="${t}" aria-pressed="${state.tag === t}">${t}</button>`).join("");
+  box.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => {
+    state.tag = state.tag === c.dataset.tag ? null : c.dataset.tag;
+    renderChips(); render();
+  }));
+}
+
+document.getElementById("q").addEventListener("input", ev => { state.q = ev.target.value; render(); });
+renderChips(); render();
+</script>
+</body>
+</html>

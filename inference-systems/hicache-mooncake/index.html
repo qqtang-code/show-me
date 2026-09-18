@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>L1–L4 缓存 · KV 分层 · HiCache vs Mooncake (SGLang)</title>
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:#ffffff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --dim:#4a5871; --dim2:#657389;
+    --gpu:#0f7a48; --host:#175fc4; --store:#8b2fc9; --warn:#a35a06;
+    --c1:#0b7a45; --c2:#1d5fd0; --c3:#8b2fc9; --c4:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    padding:40px 20px 80px;
+  }
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:27px;line-height:1.4;margin:0 0 8px;letter-spacing:-.01em;color:#0d1526}
+  h2{font-size:17.5px;margin:0 0 4px;color:#0d1526}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 32px}
+  .sub code{font-family:var(--mono);font-size:12.5px;color:#12489c;background:#e8eefb;padding:1.5px 6px;border-radius:5px}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 26px;margin-bottom:22px;
+          box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .tag{display:inline-block;font:600 10.5px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+       color:#3f4c63;background:#eef2f9;border:1px solid #dbe2ee;border-radius:999px;padding:6px 10px;margin-bottom:12px}
+  p{margin:10px 0}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:#0d1526}
+
+  /* --- ladder --- */
+  .ladder{display:flex;flex-direction:column;gap:10px;margin-top:16px}
+  .rung{display:grid;grid-template-columns:118px 1fr 208px;gap:14px;align-items:center}
+  .rung .name{font:600 13px var(--mono);color:#1b2740}
+  .rung .name span{display:block;font:400 11px var(--mono);color:var(--dim2);margin-top:2px}
+  .bar{height:32px;border-radius:8px;position:relative;overflow:hidden;background:#f2f5fa;border:1px solid var(--line)}
+  .bar i{position:absolute;top:0;bottom:0;left:0;width:var(--w);border-radius:7px 0 0 7px}
+  .bar b{position:absolute;left:11px;top:0;line-height:30px;font:600 11.5px var(--mono);color:#0b1220;z-index:2}
+  .rung .meta{font:11.5px/1.55 var(--mono);color:#526078}
+  .rung .meta em{color:#12489c;font-style:normal;font-weight:600}
+  .l1 i{background:linear-gradient(90deg,#5fd39a,#a8ecc4)}
+  .l2 i{background:linear-gradient(90deg,#7db3f0,#b8d8fb)}
+  .l3 i{background:linear-gradient(90deg,#d0a6f0,#e9d2fb)}
+  .l4 i{background:linear-gradient(90deg,#f3c168,#fbe0ab)}
+
+  /* --- tiers --- */
+  .tier{border:1px solid var(--line);border-left:4px solid var(--tier);border-radius:10px;background:var(--panel2);
+        padding:14px 17px}
+  .tier h3{margin:0 0 3px;font-size:14.5px;color:#0d1526}
+  .tier .where{font:11.5px var(--mono);color:var(--dim2);margin-bottom:8px}
+  .tier ul{margin:0;padding-left:18px;font-size:13.5px;color:#3b4860}
+  .tier li{margin:4px 0}
+  .tier code{font-family:var(--mono);font-size:12px;color:#12489c;background:#e8eefb;padding:1.5px 5px;border-radius:4px}
+  .gpu{--tier:var(--gpu)} .host{--tier:var(--host)} .store{--tier:var(--store)}
+  .arrowrow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 0 10px 8px;font:12px var(--mono);color:var(--dim)}
+  .arrowrow .up{color:#0b6b3f;font-weight:600} .arrowrow .dn{color:#17509e;font-weight:600}
+  .arrowrow .sp{color:var(--dim2)}
+  .pathA{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}
+  .lane{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+        font:12.5px/1.85 var(--mono);color:#334155;white-space:pre-wrap;overflow-x:auto}
+  .lane h4{margin:0 0 9px;font:600 12px var(--mono);letter-spacing:.04em;color:#0d1526}
+  .hit{color:#0b6b3f;font-weight:600} .miss{color:#9a4d06;font-weight:600} .k{color:#6b21a8;font-weight:600}
+  @media(max-width:760px){
+    body{padding:24px 14px 60px}
+    .pathA{grid-template-columns:1fr}
+    .rung{grid-template-columns:100px 1fr;gap:10px}
+    .rung .meta{grid-column:1/-1;padding-left:110px}
+  }
+
+  /* --- compare --- */
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:13.5px}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td:first-child{color:#3b4860;white-space:nowrap;font:600 12px var(--mono)}
+  .hicache{color:#17509e} .mooncake{color:#7a22b8}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:15px 17px}
+  .card h3{margin:0 0 9px;font-size:14.5px}
+  .card ul{margin:0;padding-left:18px;font-size:13.5px;color:#3b4860}
+  .card li{margin:5px 0}
+  .one{font-size:14px;color:#26334a;border-left:3px solid var(--warn);background:#fdf7ec;
+       padding:12px 14px;border-radius:0 8px 8px 0;margin-top:16px}
+  footer{color:var(--dim2);font:11.5px/1.75 var(--mono);text-align:center;margin-top:28px}
+  @media(max-width:760px){.split{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>L1–L4 缓存 与 LLM 推理的 KV 分层<br>HiCache / Mooncake 在 SGLang 里各管什么</h1>
+  <p class="sub">同一个思想在两个尺度上的外推：离计算越近 → 越贵、越小、越快。硬件层面是 <code>SMEM/L1 → L2 → L3(LLC) → DRAM/NVMe</code>；推理系统层面是 <code>HBM → Host DRAM → 分布式存储</code>。</p>
+
+  <section>
+    <span class="tag">A · 为什么推理关心缓存层级</span>
+    <h2>逐 token 解码是纯访存瓶颈</h2>
+    <p class="hint">decode 一个 token 必须把「全部权重 + 该请求全部 KV」从存储里搬一遍，算术强度只有 ~1–2 FLOP/Byte，而 H100 的 roofline 拐点在 ~295 FLOP/Byte。所以优化只有三条路：<b>少搬字节</b>（量化/GQA/MLA）、<b>少算一次</b>（前缀复用）、<b>把字节放到更近的层</b>（KV 分层）。后两条正是 HiCache / Mooncake 的地盘。</p>
+    <div class="ladder">
+      <div class="rung l1"><div class="name">寄存器 / SMEM<span>on-chip SRAM</span></div>
+        <div class="bar"><i style="--w:3%"></i><b>~0.2 MB · 20 TB/s · ~10 ns</b></div>
+        <div class="meta"><em>FlashAttention</em> 把 K/V 分块喂到这里，每块只从 HBM 读一次</div></div>
+      <div class="rung l1"><div class="name">GPU HBM ← 推理 L1<span>device KV pool</span></div>
+        <div class="bar"><i style="--w:9%"></i><b>~80–192 GB · 2–8 TB/s · ~0.5 µs</b></div>
+        <div class="meta">RadixAttention 前缀树 + 在跑的 KV 都住这里，容量最紧张</div></div>
+      <div class="rung l2"><div class="name">Host DRAM ← 推理 L2<span>pinned host pool</span></div>
+        <div class="bar"><i style="--w:34%"></i><b>~0.5–2 TB · 0.1–0.3 TB/s · ~0.1 µs</b></div>
+        <div class="meta">PCIe Gen5 ×16 = 64 GB/s/向；GH200 NVLink-C2C 900 GB/s</div></div>
+      <div class="rung l3"><div class="name">远端 DRAM / SSD ← L3<span>cluster store</span></div>
+        <div class="bar"><i style="--w:70%"></i><b>集群级 · 25–50 GB/s/网卡 · 5–100 µs</b></div>
+        <div class="meta">RDMA 400 Gb/s ≈ 50 GB/s；NVMe 3–7 GB/s/盘，延迟 ~100 µs</div></div>
+      <div class="rung l4"><div class="name">对象存储 / 冷盘 ← L4<span>offline</span></div>
+        <div class="bar"><i style="--w:100%"></i><b>无限 · GB/s · ms 级</b></div>
+        <div class="meta">只适合跨天复用；Mooncake 自身内部也是 DRAM+SSD 两级</div></div>
+    </div>
+    <p class="hint" style="margin-top:14px">注意两个「L2」不是一回事：<b>GPU 硬件 L2</b> 是片上 40–50 MB SRAM（FlashAttention 关心的那层）；<b>推理语境里的 L2</b> 指主机 DRAM 缓存层。本文其余部分都用后者。</p>
+  </section>
+
+  <section>
+    <span class="tag">B · SGLang 的三层落地</span>
+    <h2>HiCache：把 radix 树从 HBM 延伸到主机与集群</h2>
+    <div class="tier gpu">
+      <h3>L1 · GPU HBM</h3>
+      <div class="where">radix_cache.py / hiradix_cache.py · --mem-fraction-static</div>
+      <ul><li>前缀树节点直接持有设备 KV 页；<code>match_prefix</code> 命中即直接进 prefill 的 <code>extend</code></li>
+      <li>容量最小、价值最高：只有这里的数据能真的省算力</li></ul>
+    </div>
+    <div class="arrowrow"><span class="up">▲ load_back</span><span class="sp">（L2→L1，命中后先把页搬进设备再算）</span>
+      <span class="dn">▼ write / demote</span><span class="sp">（L1→L2，写策略决定何时写）</span></div>
+    <div class="tier host">
+      <h3>L2 · Host DRAM</h3>
+      <div class="where">pool_host/{mha,mla,dsa}.py · --hicache-ratio / --hicache-size · layout page_first</div>
+      <ul><li>pinned 内存池，按页与设备池一一对应；<code>HiCacheController</code> 用 kernel/direct IO 做整页搬运</li>
+      <li><code>--hicache-host-memory-mode cache</code> 是真缓存层；<code>buffer_only</code> 只当 L3 的暂存区</li></ul>
+    </div>
+    <div class="arrowrow"><span class="up">▲ prefetch</span><span class="sp">（L3→L2，miss 时异步预取，best_effort / wait_complete / timeout）</span>
+      <span class="dn">▼ backup</span><span class="sp">（L2 淘汰时回写 L3）</span></div>
+    <div class="tier store">
+      <h3>L3 · 共享存储（可插拔后端）</h3>
+      <div class="where">hicache_storage.py 接口 · --hicache-storage-backend mooncake|hf3fs|nixl|file|aibrix|mori|eic|simm|shm</div>
+      <ul><li>统一 <code>get/set/exists/batch_*</code> + 分组语义；实现零拷贝注册缓冲区（Mooncake 用 RDMA 直取）</li>
+      <li>跨实例共享：同一份系统提示 / RAG 文档在集群里只算一次</li></ul>
+    </div>
+
+    <div class="pathA">
+      <div class="lane"><h4>命中路径（省算力）</h4><span class="k">match_prefix</span>
+  L1 命中 → <span class="hit">直接 serve，零搬运</span>
+  L1 未命中 → 查 L2 前缀
+    ├ L2 命中 → <span class="hit">load_back 到 L1</span>（PCIe 页级搬运）
+    └ L2 未中 → <span class="miss">prefetch L3→L2</span> → load_back
+               剩余未命中部分才算 prefill</div>
+      <div class="lane"><h4>写入 / 淘汰路径（保容量）</h4><span class="k">cache_finished_req</span>
+  write_through          → 立刻写 L2（可再 backup 到 L3）
+  write_back             → 只写 L1，等淘汰再下沉
+  write_through_selective→ 短前缀不写，够长才写
+<span class="k">evict</span>
+  L1 淘汰 → 已 backup 的降级到 L2，未 backup 的按策略补写或直接丢弃
+  L2 淘汰 → backup 线程回写 L3</div>
+    </div>
+    <p class="hint" style="margin-top:14px">一串具体数字：8B 级 GQA 模型约 131 KB/token 的 KV，10K token 的系统提示 ≈ 1.3 GB；从主机 DRAM 经 PCIe Gen5 搬回约 20 ms，而重算这 10K token 的 prefill 约 0.2–0.5 s。<b>跨层搬运之所以成立，是因为它永远比重新计算便宜。</b></p>
+  </section>
+
+  <section>
+    <span class="tag">C · 职责边界</span>
+    <h2>HiCache 是策略层，Mooncake 是数据面</h2>
+    <div class="split">
+      <div class="card">
+        <h3 class="hicache">HiCache —— SGLang 进程内的缓存层级管理器</h3>
+        <ul>
+          <li>决定<b>哪份 KV 该在哪一层</b>：提升、降级、预取、回写</li>
+          <li>与 RadixAttention 树耦合：key 是前缀哈希 / chunk 哈希，节点带 lock_ref，淘汰必须尊重树结构</li>
+          <li>与调度器耦合：prefetch 与 batch 重叠、超时终止、命中长度影响本轮的 extend 长度</li>
+          <li>对外只暴露 L3 的抽象接口，后端可替换（Mooncake 只是其中一种）</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 class="mooncake">Mooncake —— 集群级的 KV 存储与传输基础设施</h3>
+        <ul>
+          <li>决定<b>东西在哪台机、怎么最快搬过去</b>：聚合全网 DRAM/SSD 成共享池</li>
+          <li>Transfer Engine（RDMA / GPUDirect / 多网卡零拷贝）+ Master（元数据、租约、淘汰）</li>
+          <li>不理解前缀树，也不感知 batch；只认 key → 对象</li>
+          <li>可脱离 HiCache 独立使用：PD 分离的 KV 搬运默认就走 Mooncake</li>
+        </ul>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>维度</th><th class="hicache">HiCache</th><th class="mooncake">Mooncake</th></tr></thead>
+      <tbody>
+        <tr><td>层次</td><td>策略 / 编排层（进程内）</td><td>数据面 / 资源层（集群级）</td></tr>
+        <tr><td>管的层</td><td>L1、L2 的拥有者，L3 的定义者</td><td>L3 的实现者之一（也可做 PD 传输、embedding store）</td></tr>
+        <tr><td>地址空间</td><td>单实例：HBM + 本地 DRAM</td><td>跨实例：全网 DRAM/SSD</td></tr>
+        <tr><td>核心算法</td><td>前缀匹配、写策略、预取策略、树形淘汰</td><td>对象放置、副本、一致性、RDMA 传输调度</td></tr>
+        <tr><td>换成别人行不行</td><td>可以：L3 换成 hf3fs / nixl / file / aibrix 等</td><td>可以：PD 传输换 nixl，L3 换 3FS</td></tr>
+        <tr><td>共同点</td><td colspan="2">都以 KV 对象为粒度做 key-value 复用；都靠 RDMA / 零拷贝打通主机与远端；目标都是「让别人算过的前缀不再算」；都有淘汰与命中统计</td></tr>
+      </tbody>
+    </table>
+    <p class="one">一句话：<b>HiCache 回答「这份 KV 现在最该待在哪一层」，Mooncake 回答「这些 KV 在哪个节点的哪块内存/盘上，怎么几毫秒搬过来」。</b>前者像 CPU 的 cache 替换策略 + 页缓存逻辑，后者像分布式内存设备加一台 DMA 引擎。</p>
+  </section>
+
+  <footer>基于本地分支 /Users/qqtang/Desktop/research/是石科技/DeepseekV4/sglang 的代码核对 · SGLang HiCache / Mooncake Store 集成</footer>
+</div>
+</body>
+</html>
