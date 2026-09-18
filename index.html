@@ -15,9 +15,15 @@
        padding:44px 20px 80px}
   .wrap{max-width:1000px;margin:0 auto}
   h1{font-size:28px;margin:0 0 8px;letter-spacing:-.01em}
-  .sub{color:var(--dim);font-size:14px;margin:0 0 24px}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 10px}
+  .statline{font:12px var(--mono);color:var(--dim2);margin:0 0 22px;display:flex;flex-wrap:wrap;gap:8px}
+  .statline span{display:inline-flex;align-items:center;gap:6px}
+  .statline i{width:5px;height:5px;border-radius:50%;background:#c3ccdb;display:inline-block}
   .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
-  #q{flex:1;min-width:220px;padding:11px 14px;border:1px solid var(--line);border-radius:10px;
+  .searchwrap{position:relative;flex:1 1 260px}
+  .searchwrap svg{position:absolute;left:13px;top:50%;transform:translateY(-50%);
+                  width:16px;height:16px;color:var(--dim2);pointer-events:none}
+  #q{width:100%;padding:11px 14px 11px 38px;border:1px solid var(--line);border-radius:10px;
      font-size:14.5px;background:var(--panel);color:var(--fg)}
   #q:focus{outline:2px solid #c7d7f5;border-color:#a8c0e8}
   .count{font:12px var(--mono);color:var(--dim2)}
@@ -30,16 +36,23 @@
   h2.cat::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent);
                  flex:none;transform:translateY(-2px)}
   h2.cat span{font:11.5px var(--mono);color:var(--dim2);letter-spacing:.02em}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:stretch}
   @media(max-width:760px){.grid{grid-template-columns:1fr}body{padding:26px 14px 60px}}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px 14px;
         box-shadow:0 1px 2px rgba(16,24,40,.04);display:flex;flex-direction:column;gap:9px;
+        position:relative;overflow:hidden;
         transition:box-shadow .16s ease,border-color .16s ease,transform .16s ease}
+  .card::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent);
+                transform:scaleX(0);transform-origin:left;transition:transform .22s ease}
   .card:hover{box-shadow:0 6px 18px rgba(16,24,40,.09);border-color:#c9d6ea;transform:translateY(-1px)}
+  .card:hover::before{transform:scaleX(1)}
   .card h3{margin:0;font-size:16px;line-height:1.45}
   .card h3 a{color:#0d1526;text-decoration:none}
-  .card h3 a:hover{color:var(--accent);text-decoration:underline}
-  .card .one{color:var(--dim);font-size:13.5px;margin:0}
+  .card h3 a::after{content:"→";display:inline-block;margin-left:6px;color:var(--accent);
+                    opacity:0;transform:translateX(-4px);transition:opacity .18s ease,transform .18s ease}
+  .card:hover h3 a::after{opacity:1;transform:translateX(0)}
+  .card h3 a:hover{color:var(--accent)}
+  .card .one{color:var(--dim);font-size:13.5px;margin:0;flex:1 1 auto}
   .card .tags{display:flex;flex-wrap:wrap;gap:6px}
   .card .tags span{font:11.5px var(--mono);background:var(--chip);border:1px solid var(--chipb);
                    border-radius:999px;padding:3px 8px;color:#3f4c63}
@@ -57,9 +70,16 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
+  <p class="statline"><span>3 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-18</span></p>
 
   <div class="controls">
-    <input id="q" type="search" placeholder="搜索标题、标签、一句话…" autocomplete="off">
+    <div class="searchwrap">
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M13.2 13.2 17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <input id="q" type="search" placeholder="搜索标题、标签、一句话…" autocomplete="off">
+    </div>
     <span class="count" id="count"></span>
   </div>
   <div class="chips" id="chips"></div>
@@ -159,7 +179,7 @@ function render() {
   for (const [cat, items] of byCat) {
     html += `<h2 class="cat">${CATS[cat] || cat}<span>${cat} · ${items.length}</span></h2><div class="grid">`;
     for (const e of items) {
-      const MAXT = 5;
+      const MAXT = 3;
       const shown = (e.tags || []).slice(0, MAXT);
       const rest = (e.tags || []).length - shown.length;
       const tags = shown.map(t => `<span>${t}</span>`).join("") +
