@@ -6,25 +6,31 @@
 <meta name="color-scheme" content="light">
 <title>PP 适配 DFlash · 伪造单例 PP 组 + 两条跨阶段数据流</title>
 <style>
+  /* ============ 全站共用设计变量（三篇保持一致） ============ */
   :root{
     --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --line:#dde3ee;
-    --fg:#131c2e; --dim:#4a5871; --dim2:#657389; --accent:#17509e; --warn:#a35a06;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --warn:#a35a06; --waste:#b23a10;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
   body{margin:0;background:var(--bg);color:var(--fg);
        font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
-       padding:40px 20px 80px}
-  .wrap{max-width:900px;margin:0 auto}
-  .top{margin-bottom:26px}
-  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:10px}
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .top{margin-bottom:24px}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
   .crumb a{color:var(--accent);text-decoration:none}
-  h1{font-size:25px;line-height:1.4;margin:0 0 10px;letter-spacing:-.01em}
-  h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);color:#0d1526}
-  h3{font-size:16px;margin:24px 0 8px;color:#0d1526}
+  .crumb a:hover{text-decoration:underline}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:40px 0 8px;padding-bottom:8px;border-bottom:1px solid var(--line);color:var(--ink)}
+  h3{font-size:15.5px;margin:26px 0 8px;color:var(--ink)}
   p{margin:10px 0}
-  .meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font:12px var(--mono);color:var(--dim2)}
-  .meta .tag{background:#eef2f9;border:1px solid #dbe2ee;border-radius:999px;padding:4px 9px;color:#3f4c63}
+  .meta{display:flex;flex-wrap:wrap;gap:7px;align-items:center;font:11.5px var(--mono);color:var(--dim2)}
+  .meta .tag{background:#eef2f9;border:1px solid #dbe2ee;border-radius:999px;padding:4px 10px;color:#3f4c63}
   .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;padding:11px 14px;
         font-size:13.5px;color:#4a3a1c;margin:16px 0}
   pre{background:#f3f6fb;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
@@ -42,13 +48,21 @@
          box-shadow:0 1px 2px rgba(16,24,40,.04)}
   .final strong{color:#0d1526}
   .mermaid{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:14px 0;text-align:center}
-  footer{color:var(--dim2);font:11.5px/1.75 var(--mono);text-align:center;margin-top:30px}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2);text-align:left}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
 
   /* ================= 学习增强层 ================= */
   .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
   .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
-         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px}
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
   .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
   .tldr{margin:0 0 20px;border:1px solid #dbe3f4;background:#f7f9ff;border-radius:12px;padding:16px 20px}
   .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
   .tldr ul{margin:0;padding-left:18px}
@@ -374,7 +388,10 @@ if forward_batch.can_run_tbo or is_cp_v2_active(...):
     <p>代价也清楚：草稿模型集中在一个阶段，<strong>PP0 因此比其他段忙</strong>（profile 里 PP0 busy 25.98s vs 其他段 21.8~23.3s），且 prefill 放弃了图捕获。</p>
   </div>
 
-  <footer>show-me 知识库 · inference-systems/dflash-pp-adaptation · 由一次内部实验的代码审读整理，模型与工程标识已脱敏</footer>
+  <footer>
+    <p>由一次内部实验的代码审读整理；原始问答存于同目录 <a href="notes.md">notes.md</a>，模型与工程标识已脱敏。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
 </div>
 <script type="module">
   // mermaid 从 CDN 加载;离线时保留源码块可读(降级不报错)

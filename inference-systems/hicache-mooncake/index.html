@@ -6,137 +6,188 @@
 <meta name="color-scheme" content="light">
 <title>L1–L4 缓存 · KV 分层 · HiCache vs Mooncake (SGLang)</title>
 <style>
+  /* ============ 全站共用设计变量（三篇保持一致） ============ */
   :root{
     --bg:#f5f7fb; --panel:#ffffff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
-    --fg:#131c2e; --dim:#4a5871; --dim2:#657389;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10;
     --gpu:#0f7a48; --host:#175fc4; --store:#8b2fc9; --warn:#a35a06;
-    --c1:#0b7a45; --c2:#1d5fd0; --c3:#8b2fc9; --c4:#a35a06;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
-  body{
-    margin:0;background:var(--bg);color:var(--fg);
-    font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
-    padding:40px 20px 80px;
-  }
-  .wrap{max-width:1080px;margin:0 auto}
-  h1{font-size:27px;line-height:1.4;margin:0 0 8px;letter-spacing:-.01em;color:#0d1526}
-  h2{font-size:17.5px;margin:38px 0 4px;color:#0d1526}
-  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:14.5px}
-  h3.mini{font-size:15.5px;margin:24px 0 4px;color:#0d1526}
-  .sub{color:var(--dim);font-size:14px;margin:0 0 26px}
-  .sub code{font-family:var(--mono);font-size:12.5px;color:#12489c;background:#e8eefb;padding:1.5px 6px;border-radius:5px}
-  section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 26px;margin-bottom:22px;
-          box-shadow:0 1px 2px rgba(16,24,40,.04)}
-  .tag{display:inline-block;font:600 10.5px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
-       color:#3f4c63;background:#eef2f9;border:1px solid #dbe2ee;border-radius:999px;padding:6px 10px;margin-bottom:12px}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:40px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h2:first-of-type{margin-top:32px}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .sub code{font-family:var(--mono);font-size:12.5px;color:var(--accent);background:#e8eefb;padding:1.5px 6px;border-radius:5px}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
   p{margin:10px 0}
-  .hint{color:var(--dim);font-size:13.5px}
-  b{color:#0d1526}
+  .hint,.lead{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  [id]{scroll-margin-top:20px}
 
-  /* --- ladder --- */
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 层级阶梯 ---------- */
   .ladder{display:flex;flex-direction:column;gap:10px;margin-top:16px}
-  .rung{display:grid;grid-template-columns:118px 1fr 208px;gap:14px;align-items:center}
-  .rung .name{font:600 13px var(--mono);color:#1b2740}
+  .rung{display:grid;grid-template-columns:132px 1fr 208px;gap:14px;align-items:center}
+  .rung .name{font:600 12.5px var(--mono);color:#1b2740}
   .rung .name span{display:block;font:400 11px var(--mono);color:var(--dim2);margin-top:2px}
   .bar{height:32px;border-radius:8px;position:relative;overflow:hidden;background:#f2f5fa;border:1px solid var(--line)}
   .bar i{position:absolute;top:0;bottom:0;left:0;width:var(--w);border-radius:7px 0 0 7px}
   .bar b{position:absolute;left:11px;top:0;line-height:30px;font:600 11.5px var(--mono);color:#0b1220;z-index:2}
   .rung .meta{font:11.5px/1.55 var(--mono);color:#526078}
-  .rung .meta em{color:#12489c;font-style:normal;font-weight:600}
+  .rung .meta em{color:var(--accent);font-style:normal;font-weight:600}
   .l1 i{background:linear-gradient(90deg,#5fd39a,#a8ecc4)}
   .l2 i{background:linear-gradient(90deg,#7db3f0,#b8d8fb)}
   .l3 i{background:linear-gradient(90deg,#d0a6f0,#e9d2fb)}
   .l4 i{background:linear-gradient(90deg,#f3c168,#fbe0ab)}
+  @media(max-width:760px){
+    .rung{grid-template-columns:112px 1fr;gap:8px 10px}
+    .rung .meta{grid-column:1/-1;padding-left:122px}
+  }
 
-  /* --- tiers --- */
+  /* ---------- 三层落地 ---------- */
   .tier{border:1px solid var(--line);border-left:4px solid var(--tier);border-radius:10px;background:var(--panel2);
         padding:14px 17px}
-  .tier h3{margin:0 0 3px;font-size:14.5px;color:#0d1526}
+  .tier h3{margin:0 0 3px;font-size:14.5px;color:var(--ink)}
   .tier .where{font:11.5px var(--mono);color:var(--dim2);margin-bottom:8px}
   .tier ul{margin:0;padding-left:18px;font-size:13.5px;color:#3b4860}
   .tier li{margin:4px 0}
-  .tier code{font-family:var(--mono);font-size:12px;color:#12489c;background:#e8eefb;padding:1.5px 5px;border-radius:4px}
+  .tier code{font-family:var(--mono);font-size:12px;color:var(--accent);background:#e8eefb;padding:1.5px 5px;border-radius:4px}
   .gpu{--tier:var(--gpu)} .host{--tier:var(--host)} .store{--tier:var(--store)}
   .arrowrow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 0 10px 8px;font:12px var(--mono);color:var(--dim)}
   .arrowrow .up{color:#0b6b3f;font-weight:600} .arrowrow .dn{color:#17509e;font-weight:600}
   .arrowrow .sp{color:var(--dim2)}
   .pathA{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}
+  @media(max-width:760px){.pathA{grid-template-columns:1fr}}
   .lane{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;
         font:12.5px/1.85 var(--mono);color:#334155;white-space:pre-wrap;overflow-x:auto}
-  .lane h4{margin:0 0 9px;font:600 12px var(--mono);letter-spacing:.04em;color:#0d1526}
+  .lane h4{margin:0 0 9px;font:600 12px var(--mono);letter-spacing:.04em;color:var(--ink)}
   .hit{color:#0b6b3f;font-weight:600} .miss{color:#9a4d06;font-weight:600} .k{color:#6b21a8;font-weight:600}
-  @media(max-width:760px){
-    body{padding:24px 14px 60px}
-    .pathA{grid-template-columns:1fr}
-    .rung{grid-template-columns:100px 1fr;gap:10px}
-    .rung .meta{grid-column:1/-1;padding-left:110px}
-  }
 
-  /* --- compare --- */
+  /* ---------- 公式 / 表格 ---------- */
+  .eq{margin:18px 0;padding:16px 20px;border-radius:12px;background:var(--panel);border:1px solid var(--line);
+      font:13.5px/2.05 var(--mono);overflow-x:auto;color:#28374f}
+  .eq .lbl{color:var(--dim2)}
+  .eq .hl{background:#eefbf8;padding:1px 5px;border-radius:4px;color:var(--good);font-weight:600}
+  .eq hr{border:0;border-top:1px solid var(--line);margin:11px 0}
+  .kicker{display:inline-block;font-size:12px;font-family:var(--mono);background:#eef2f9;color:#3f4c63;
+          padding:3px 9px;border-radius:100px}
   table{width:100%;border-collapse:collapse;margin-top:16px;font-size:13.5px}
   th,td{text-align:left;padding:11px 13px;border-bottom:1px solid #e6ebf3;vertical-align:top}
   th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
   tr:last-child td{border-bottom:0}
   td:first-child{color:#3b4860;white-space:nowrap;font:600 12px var(--mono)}
-  .hicache{color:#17509e} .mooncake{color:#7a22b8}
+  @media (max-width:560px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:3px 0;display:flex;justify-content:space-between;gap:14px;text-align:right}
+    td::before{content:attr(data-label);color:var(--dim2);font-size:12px;text-align:left;flex:none}
+    td:first-child{display:block;text-align:left;font-size:15px;font-weight:600;
+      border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td:first-child::before{content:none}
+  }
+
+  /* ---------- 职责边界 ---------- */
   .split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
+  @media(max-width:760px){.split{grid-template-columns:1fr}}
   .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:15px 17px}
   .card h3{margin:0 0 9px;font-size:14.5px}
   .card ul{margin:0;padding-left:18px;font-size:13.5px;color:#3b4860}
   .card li{margin:5px 0}
+  .hicache{color:var(--host)} .mooncake{color:var(--store)}
   .one{font-size:14px;color:#26334a;border-left:3px solid var(--warn);background:#fdf7ec;
        padding:12px 14px;border-radius:0 8px 8px 0;margin-top:16px}
-  footer{color:var(--dim2);font:11.5px/1.75 var(--mono);text-align:center;margin-top:28px}
-  @media(max-width:760px){.split{grid-template-columns:1fr}}
+  .tag{display:inline-block;font:600 10.5px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+       color:#3f4c63;background:#eef2f9;border:1px solid #dbe2ee;border-radius:999px;padding:6px 10px;margin-bottom:10px}
 
-  /* ================= 学习增强层 ================= */
-  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
-  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
-         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px}
-  .nav a:hover{color:#175fc4;border-color:#bcd0f0;background:#e6eefb}
-  .tldr{margin:0 0 22px;border:1px solid #dbe3f4;background:#f7f9ff;border-radius:12px;padding:16px 20px}
-  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:#175fc4;letter-spacing:.04em}
-  .tldr ul{margin:0;padding-left:18px}
-  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
-  .eq{margin:18px 0;padding:16px 20px;border-radius:12px;background:var(--panel2);border:1px solid var(--line);
-      font:13.5px/2 var(--mono);overflow-x:auto;color:#28374f}
-  .eq .lbl{color:var(--dim2)}
-  .eq .hl{background:#e8f5ee;padding:1px 5px;border-radius:4px;color:#0b6b3f;font-weight:600}
-  .eq hr{border:0;border-top:1px solid var(--line);margin:11px 0}
-  .kicker{display:inline-block;font-size:12px;font-family:var(--mono);background:#eef2f9;color:#3f4c63;
-          padding:3px 9px;border-radius:100px}
+  /* ---------- 交互计算器 ---------- */
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:170px 1fr 96px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr 1fr;gap:6px 10px}
+    .calc .ctl label{grid-column:1/-1}.calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent)}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff;color:var(--fg)}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,1fr)}
+  .calc .row.g3{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:1fr}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:19px/1.35 var(--mono);font-weight:600;color:var(--ink)}
+  .calc .cell .v.good{color:var(--good)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .upd{font-size:12.5px;color:var(--dim);margin-top:14px}
+
+  /* ---------- 误区 / 自测 / 链接 ---------- */
   .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
-        background:#fff;padding:13px 16px;margin:12px 0}
-  .myth .w{font-size:13.5px;color:#b23a10;font-weight:600}
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
   .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
-  .myth .r b{color:#0b6b3f}
-  details{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 16px;margin:10px 0}
-  details summary{cursor:pointer;font-size:14px;font-weight:600;color:#0d1526}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
   details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
-  details .ans b{color:#0b6b3f}
+  details .ans b{color:var(--good)}
   .links{list-style:none;padding:0;margin:14px 0 0}
   .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
-  .links a{color:#175fc4;text-decoration:none;font-size:14px}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
   .links a:hover{text-decoration:underline}
   .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
-  .calc{border:1px solid #dbe3f4;border-radius:12px;background:#f7f9ff;padding:18px 20px;margin:18px 0 0}
-  .calc .ctl{display:grid;grid-template-columns:170px 1fr 104px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
-  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr;gap:4px}}
-  .calc input[type=range]{width:100%}
-  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff}
-  .calc .out{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:12px;margin-top:16px}
-  .calc .out div{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px}
-  .calc .out .k{font:12px var(--mono);color:var(--dim2)}
-  .calc .out .v{font:19px var(--mono);font-weight:600;margin-top:2px;color:#0d1526}
-  .calc .out .d{font-size:12px;color:#3b4860;margin-top:2px}
-  .calc .out .v.good{color:#0b6b3f}
+
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
 <div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>inference-systems<span class="sep">/</span>hicache-mooncake
+  </div>
   <h1>L1–L4 缓存 与 LLM 推理的 KV 分层<br>HiCache / Mooncake 在 SGLang 里各管什么</h1>
   <p class="sub">同一个思想在两个尺度上的外推：离计算越近 → 越贵、越小、越快。硬件层面是 <code>SMEM/L1 → L2 → L3(LLC) → DRAM/NVMe</code>；推理系统层面是 <code>HBM → Host DRAM → 分布式存储</code>。</p>
+  <div class="metarow">
+    <span>2026-09-18</span><span>KV Cache</span><span>HiCache</span><span>Mooncake</span>
+    <span>SGLang</span><span>分层缓存</span><span>前缀复用</span><span>PD 分离</span>
+  </div>
 
   <nav class="nav">
     <a href="#tldr">速览</a>
@@ -162,7 +213,7 @@
     </ul>
   </div>
 
-  <h2 id="pre" style="margin-top:30px">前置知识：四个必须先站稳的概念</h2>
+  <h2 id="pre">前置知识：四个必须先站稳的概念</h2>
   <p class="hint">如果下面四点你都清楚，可以直接看 <a href="#layer">层级阶梯</a>。</p>
 
   <h3 class="mini">① KV Cache 是什么</h3>
@@ -200,31 +251,28 @@
     它带来一个和普通缓存很不一样的性质：<b>命中不是一个 key 命中与否，而是一棵前缀树上的最长匹配</b>。
   </p>
 
-  <section id="layer" style="padding:0;border:0;background:none;box-shadow:none;margin:0">
-    <span class="tag">A · 为什么推理关心缓存层级</span>
-    <h2>逐 token 解码是纯访存瓶颈</h2>
-    <p class="hint">decode 一个 token 必须把「全部权重 + 该请求全部 KV」从存储里搬一遍，算术强度只有 ~1–2 FLOP/Byte，而 H100 的 roofline 拐点在 ~295 FLOP/Byte。所以优化只有三条路：<b>少搬字节</b>（量化/GQA/MLA）、<b>少算一次</b>（前缀复用）、<b>把字节放到更近的层</b>（KV 分层）。后两条正是 HiCache / Mooncake 的地盘。</p>
-    <div class="ladder">
-      <div class="rung l1"><div class="name">寄存器 / SMEM<span>on-chip SRAM</span></div>
-        <div class="bar"><i style="--w:3%"></i><b>~0.2 MB · 20 TB/s · ~10 ns</b></div>
-        <div class="meta"><em>FlashAttention</em> 把 K/V 分块喂到这里，每块只从 HBM 读一次</div></div>
-      <div class="rung l1"><div class="name">GPU HBM ← 推理 L1<span>device KV pool</span></div>
-        <div class="bar"><i style="--w:9%"></i><b>~80–192 GB · 2–8 TB/s · ~0.5 µs</b></div>
-        <div class="meta">RadixAttention 前缀树 + 在跑的 KV 都住这里，容量最紧张</div></div>
-      <div class="rung l2"><div class="name">Host DRAM ← 推理 L2<span>pinned host pool</span></div>
-        <div class="bar"><i style="--w:34%"></i><b>~0.5–2 TB · 0.1–0.3 TB/s · ~0.1 µs</b></div>
-        <div class="meta">PCIe Gen5 ×16 = 64 GB/s/向；GH200 NVLink-C2C 900 GB/s</div></div>
-      <div class="rung l3"><div class="name">远端 DRAM / SSD ← L3<span>cluster store</span></div>
-        <div class="bar"><i style="--w:70%"></i><b>集群级 · 25–50 GB/s/网卡 · 5–100 µs</b></div>
-        <div class="meta">RDMA 400 Gb/s ≈ 50 GB/s；NVMe 3–7 GB/s/盘，延迟 ~100 µs</div></div>
-      <div class="rung l4"><div class="name">对象存储 / 冷盘 ← L4<span>offline</span></div>
-        <div class="bar"><i style="--w:100%"></i><b>无限 · GB/s · ms 级</b></div>
-        <div class="meta">只适合跨天复用；Mooncake 自身内部也是 DRAM+SSD 两级</div></div>
-    </div>
-    <p class="hint" style="margin-top:14px">注意两个「L2」不是一回事：<b>GPU 硬件 L2</b> 是片上 40–50 MB SRAM（FlashAttention 关心的那层）；<b>推理语境里的 L2</b> 指主机 DRAM 缓存层。本文其余部分都用后者。</p>
-  </section>
+  <h2 id="layer">A · 为什么推理关心缓存层级</h2>
+  <p class="lead">decode 一个 token 必须把「全部权重 + 该请求全部 KV」从存储里搬一遍，算术强度只有 ~1–2 FLOP/Byte，而 H100 的 roofline 拐点在 ~295 FLOP/Byte。所以优化只有三条路：<b>少搬字节</b>（量化/GQA/MLA）、<b>少算一次</b>（前缀复用）、<b>把字节放到更近的层</b>（KV 分层）。后两条正是 HiCache / Mooncake 的地盘。</p>
+  <div class="ladder">
+    <div class="rung l1"><div class="name">寄存器 / SMEM<span>on-chip SRAM</span></div>
+      <div class="bar"><i style="--w:3%"></i><b>~0.2 MB · 20 TB/s · ~10 ns</b></div>
+      <div class="meta"><em>FlashAttention</em> 把 K/V 分块喂到这里，每块只从 HBM 读一次</div></div>
+    <div class="rung l1"><div class="name">GPU HBM<span>推理 L1 · device pool</span></div>
+      <div class="bar"><i style="--w:9%"></i><b>~80–192 GB · 2–8 TB/s · ~0.5 µs</b></div>
+      <div class="meta">RadixAttention 前缀树 + 在跑的 KV 都住这里，容量最紧张</div></div>
+    <div class="rung l2"><div class="name">Host DRAM<span>推理 L2 · host pool</span></div>
+      <div class="bar"><i style="--w:34%"></i><b>~0.5–2 TB · 0.1–0.3 TB/s · ~0.1 µs</b></div>
+      <div class="meta">PCIe Gen5 ×16 = 64 GB/s/向；GH200 NVLink-C2C 900 GB/s</div></div>
+    <div class="rung l3"><div class="name">远端 DRAM / SSD<span>推理 L3 · cluster store</span></div>
+      <div class="bar"><i style="--w:70%"></i><b>集群级 · 25–50 GB/s/网卡 · 5–100 µs</b></div>
+      <div class="meta">RDMA 400 Gb/s ≈ 50 GB/s；NVMe 3–7 GB/s/盘，延迟 ~100 µs</div></div>
+    <div class="rung l4"><div class="name">对象存储 / 冷盘<span>推理 L4 · offline</span></div>
+      <div class="bar"><i style="--w:100%"></i><b>无限 · GB/s · ms 级</b></div>
+      <div class="meta">只适合跨天复用；Mooncake 自身内部也是 DRAM+SSD 两级</div></div>
+  </div>
+  <p class="hint" style="margin-top:14px">注意两个「L2」不是一回事：<b>GPU 硬件 L2</b> 是片上 40–50 MB SRAM（FlashAttention 关心的那层）；<b>推理语境里的 L2</b> 指主机 DRAM 缓存层。本文其余部分都用后者。</p>
 
-  <h2 id="math" style="margin-top:34px">推导：一个 token 的 KV 到底占多少字节</h2>
+  <h2 id="math">推导：一个 token 的 KV 到底占多少字节</h2>
   <p class="hint">这个公式值得背下来，它决定了 L1 能装多少上下文、以及 L2/L3 值不值得开。</p>
 
   <div class="eq">
@@ -241,9 +289,9 @@
   <table>
     <thead><tr><th>模型</th><th>配置</th><th>KV / token</th><th>100K 上下文</th></tr></thead>
     <tbody>
-      <tr><td>Llama-3-8B</td><td>32 层 · 8 KV 头 · 128 dim · bf16</td><td><b>128 KiB</b></td><td>≈ 12.5 GB</td></tr>
-      <tr><td>Llama-3-70B</td><td>80 层 · 8 KV 头 · 128 dim · bf16</td><td><b>320 KiB</b></td><td>≈ 31.3 GB</td></tr>
-      <tr><td>DeepSeek 系 MLA</td><td>61 层 · 576 元素 · fp8</td><td><b>≈ 34 KiB</b></td><td>≈ 3.4 GB</td></tr>
+      <tr><td data-label="模型">Llama-3-8B</td><td data-label="配置">32 层 · 8 KV 头 · 128 dim · bf16</td><td data-label="KV / token"><b>128 KiB</b></td><td data-label="100K 上下文">≈ 12.5 GB</td></tr>
+      <tr><td data-label="模型">Llama-3-70B</td><td data-label="配置">80 层 · 8 KV 头 · 128 dim · bf16</td><td data-label="KV / token"><b>320 KiB</b></td><td data-label="100K 上下文">≈ 31.3 GB</td></tr>
+      <tr><td data-label="模型">DeepSeek 系 MLA</td><td data-label="配置">61 层 · 576 元素 · fp8</td><td data-label="KV / token"><b>≈ 34 KiB</b></td><td data-label="100K 上下文">≈ 3.4 GB</td></tr>
     </tbody>
   </table>
   <p class="hint">
@@ -266,49 +314,46 @@
     就超过重算了。
   </p>
 
-  <section id="sglang" style="padding:0;border:0;background:none;box-shadow:none;margin:0">
-    <span class="tag">B · SGLang 的三层落地</span>
-    <h2>HiCache：把 radix 树从 HBM 延伸到主机与集群</h2>
-    <div class="tier gpu">
-      <h3>L1 · GPU HBM</h3>
-      <div class="where">radix_cache.py / hiradix_cache.py · --mem-fraction-static</div>
-      <ul><li>前缀树节点直接持有设备 KV 页；<code>match_prefix</code> 命中即直接进 prefill 的 <code>extend</code></li>
-      <li>容量最小、价值最高：只有这里的数据能真的省算力</li></ul>
-    </div>
-    <div class="arrowrow"><span class="up">▲ load_back</span><span class="sp">（L2→L1，命中后先把页搬进设备再算）</span>
-      <span class="dn">▼ write / demote</span><span class="sp">（L1→L2，写策略决定何时写）</span></div>
-    <div class="tier host">
-      <h3>L2 · Host DRAM</h3>
-      <div class="where">pool_host/{mha,mla,dsa}.py · --hicache-ratio / --hicache-size · layout page_first</div>
-      <ul><li>pinned 内存池，按页与设备池一一对应；<code>HiCacheController</code> 用 kernel/direct IO 做整页搬运</li>
-      <li><code>--hicache-host-memory-mode cache</code> 是真缓存层；<code>buffer_only</code> 只当 L3 的暂存区</li></ul>
-    </div>
-    <div class="arrowrow"><span class="up">▲ prefetch</span><span class="sp">（L3→L2，miss 时异步预取，best_effort / wait_complete / timeout）</span>
-      <span class="dn">▼ backup</span><span class="sp">（L2 淘汰时回写 L3）</span></div>
-    <div class="tier store">
-      <h3>L3 · 共享存储（可插拔后端）</h3>
-      <div class="where">hicache_storage.py 接口 · --hicache-storage-backend mooncake|hf3fs|nixl|file|aibrix|mori|eic|simm|shm</div>
-      <ul><li>统一 <code>get/set/exists/batch_*</code> + 分组语义；实现零拷贝注册缓冲区（Mooncake 用 RDMA 直取）</li>
-      <li>跨实例共享：同一份系统提示 / RAG 文档在集群里只算一次</li></ul>
-    </div>
+  <h2 id="sglang">B · HiCache：把 radix 树从 HBM 延伸到主机与集群</h2>
+  <div class="tier gpu">
+    <h3>L1 · GPU HBM</h3>
+    <div class="where">radix_cache.py / hiradix_cache.py · --mem-fraction-static</div>
+    <ul><li>前缀树节点直接持有设备 KV 页；<code>match_prefix</code> 命中即直接进 prefill 的 <code>extend</code></li>
+    <li>容量最小、价值最高：只有这里的数据能真的省算力</li></ul>
+  </div>
+  <div class="arrowrow"><span class="up">▲ load_back</span><span class="sp">（L2→L1，命中后先把页搬进设备再算）</span>
+    <span class="dn">▼ write / demote</span><span class="sp">（L1→L2，写策略决定何时写）</span></div>
+  <div class="tier host">
+    <h3>L2 · Host DRAM</h3>
+    <div class="where">pool_host/{mha,mla,dsa}.py · --hicache-ratio / --hicache-size · layout page_first</div>
+    <ul><li>pinned 内存池，按页与设备池一一对应；<code>HiCacheController</code> 用 kernel/direct IO 做整页搬运</li>
+    <li><code>--hicache-host-memory-mode cache</code> 是真缓存层；<code>buffer_only</code> 只当 L3 的暂存区</li></ul>
+  </div>
+  <div class="arrowrow"><span class="up">▲ prefetch</span><span class="sp">（L3→L2，miss 时异步预取，best_effort / wait_complete / timeout）</span>
+    <span class="dn">▼ backup</span><span class="sp">（L2 淘汰时回写 L3）</span></div>
+  <div class="tier store">
+    <h3>L3 · 共享存储（可插拔后端）</h3>
+    <div class="where">hicache_storage.py 接口 · --hicache-storage-backend mooncake|hf3fs|nixl|file|aibrix|mori|eic|simm|shm</div>
+    <ul><li>统一 <code>get/set/exists/batch_*</code> + 分组语义；实现零拷贝注册缓冲区（Mooncake 用 RDMA 直取）</li>
+    <li>跨实例共享：同一份系统提示 / RAG 文档在集群里只算一次</li></ul>
+  </div>
 
-    <div class="pathA">
-      <div class="lane"><h4>命中路径（省算力）</h4><span class="k">match_prefix</span>
+  <div class="pathA">
+    <div class="lane"><h4>命中路径（省算力）</h4><span class="k">match_prefix</span>
   L1 命中 → <span class="hit">直接 serve，零搬运</span>
   L1 未命中 → 查 L2 前缀
     ├ L2 命中 → <span class="hit">load_back 到 L1</span>（PCIe 页级搬运）
     └ L2 未中 → <span class="miss">prefetch L3→L2</span> → load_back
                剩余未命中部分才算 prefill</div>
-      <div class="lane"><h4>写入 / 淘汰路径（保容量）</h4><span class="k">cache_finished_req</span>
+    <div class="lane"><h4>写入 / 淘汰路径（保容量）</h4><span class="k">cache_finished_req</span>
   write_through          → 立刻写 L2（可再 backup 到 L3）
   write_back             → 只写 L1，等淘汰再下沉
   write_through_selective→ 短前缀不写，够长才写
 <span class="k">evict</span>
   L1 淘汰 → 已 backup 的降级到 L2，未 backup 的按策略补写或直接丢弃
   L2 淘汰 → backup 线程回写 L3</div>
-    </div>
-    <p class="hint" style="margin-top:14px">写策略的选择本质是在<b>带宽</b>和<b>容量</b>之间做交换：write_through 保证被淘汰的前缀都还在 L2/L3（换来一次额外写），write_back 省带宽但淘汰时没备份的就真丢了。所以「前缀会被反复复用」的在线服务更适合默认的 write_through。</p>
-  </section>
+  </div>
+  <p class="hint" style="margin-top:14px">写策略的选择本质是在<b>带宽</b>和<b>容量</b>之间做交换：write_through 保证被淘汰的前缀都还在 L2/L3（换来一次额外写），write_back 省带宽但淘汰时没备份的就真丢了。所以「前缀会被反复复用」的在线服务更适合默认的 write_through。</p>
 
   <h2 id="calc">动手算：改配置看 KV 与传输时间</h2>
   <p class="hint">用上一节的公式，拖动滑块看看 KV 有多大、在不同层级上读一遍要多久、以及比重算便宜多少倍。</p>
@@ -322,54 +367,66 @@
       <span class="mono" id="cDtypeV">2 B</span></div>
     <div class="ctl"><label for="cTok">复用前缀长度</label><input id="cTok" type="range" min="1024" max="131072" step="1024" value="10240"><span class="mono" id="cTokV">10K</span></div>
     <div class="ctl"><label for="cParams">模型参数量</label><input id="cParams" type="range" min="1" max="70" step="1" value="8"><span class="mono" id="cParamsV">8 B</span></div>
-    <div class="out">
-      <div><div class="k">KV / token</div><div class="v" id="oKvt">—</div><div class="d" id="oKvtD">—</div></div>
-      <div><div class="k">这段前缀的 KV</div><div class="v" id="oTotal">—</div><div class="d">× 复用长度</div></div>
-      <div><div class="k">L1 · HBM 读一遍</div><div class="v good" id="oHbm">—</div><div class="d">3.35 TB/s</div></div>
-      <div><div class="k">L2 · PCIe 读一遍</div><div class="v" id="oPcie">—</div><div class="d">64 GB/s</div></div>
-      <div><div class="k">L3 · 400G RDMA</div><div class="v" id="oRdma">—</div><div class="d">50 GB/s</div></div>
-      <div><div class="k">重算这段 prefill</div><div class="v" id="oRe">—</div><div class="d">2·P·L，30% MFU</div></div>
-      <div><div class="k">搬运 vs 重算</div><div class="v good" id="oRatio">—</div><div class="d">PCIe 路径的比值</div></div>
+
+    <div class="glabel">KV 规模</div>
+    <div class="row g2">
+      <div class="cell"><div class="k">KV / token</div><div class="v" id="oKvt">—</div>
+        <div class="d" id="oKvtD">2 × H × D × L × bytes</div></div>
+      <div class="cell"><div class="k">这段前缀的 KV 总量</div><div class="v" id="oTotal">—</div>
+        <div class="d">KV/token × 复用长度</div></div>
     </div>
-    <p class="hint" style="margin-top:12px">有效算力取 30% MFU（H100 bf16 989 TFLOPS 的约三成，即 ≈300 TFLOPS）。prefill 的 FLOPs 用 2·P·L 近似，忽略了注意力的 O(L²) 项——上下文越长这个近似越保守（真实重算只会更慢）。</p>
+
+    <div class="glabel">把这段前缀读一遍需要多久</div>
+    <div class="row g3">
+      <div class="cell"><div class="k">L1 · HBM</div><div class="v good" id="oHbm">—</div><div class="d">3.35 TB/s</div></div>
+      <div class="cell"><div class="k">L2 · PCIe Gen5</div><div class="v" id="oPcie">—</div><div class="d">64 GB/s</div></div>
+      <div class="cell"><div class="k">L3 · 400G RDMA</div><div class="v" id="oRdma">—</div><div class="d">50 GB/s</div></div>
+    </div>
+
+    <div class="glabel">值不值得：搬运 vs 重算</div>
+    <div class="row g2">
+      <div class="cell"><div class="k">重算这段 prefill</div><div class="v" id="oRe">—</div>
+        <div class="d">2 · P · L，30% MFU</div></div>
+      <div class="cell"><div class="k">重算 ÷ 搬运</div><div class="v good" id="oRatio">—</div>
+        <div class="d">按 L2 · PCIe 路径比较</div></div>
+    </div>
+
+    <p class="upd">有效算力取 30% MFU（H100 bf16 989 TFLOPS 的约三成，即 ≈300 TFLOPS）。prefill 的 FLOPs 用 2·P·L 近似，忽略了注意力的 O(L²) 项——上下文越长这个近似越保守（真实重算只会更慢）。</p>
   </div>
 
-  <section id="duty" style="padding:0;border:0;background:none;box-shadow:none;margin:0">
-    <span class="tag">C · 职责边界</span>
-    <h2>HiCache 是策略层，Mooncake 是数据面</h2>
-    <div class="split">
-      <div class="card">
-        <h3 class="hicache">HiCache —— SGLang 进程内的缓存层级管理器</h3>
-        <ul>
-          <li>决定<b>哪份 KV 该在哪一层</b>：提升、降级、预取、回写</li>
-          <li>与 RadixAttention 树耦合：key 是前缀哈希 / chunk 哈希，节点带 lock_ref，淘汰必须尊重树结构</li>
-          <li>与调度器耦合：prefetch 与 batch 重叠、超时终止、命中长度影响本轮的 extend 长度</li>
-          <li>对外只暴露 L3 的抽象接口，后端可替换（Mooncake 只是其中一种）</li>
-        </ul>
-      </div>
-      <div class="card">
-        <h3 class="mooncake">Mooncake —— 集群级的 KV 存储与传输基础设施</h3>
-        <ul>
-          <li>决定<b>东西在哪台机、怎么最快搬过去</b>：聚合全网 DRAM/SSD 成共享池</li>
-          <li>Transfer Engine（RDMA / GPUDirect / 多网卡零拷贝）+ Master（元数据、租约、淘汰）</li>
-          <li>不理解前缀树，也不感知 batch；只认 key → 对象</li>
-          <li>可脱离 HiCache 独立使用：PD 分离的 KV 搬运默认就走 Mooncake</li>
-        </ul>
-      </div>
+  <h2 id="duty">C · 职责边界：HiCache 是策略层，Mooncake 是数据面</h2>
+  <div class="split">
+    <div class="card">
+      <h3 class="hicache">HiCache —— SGLang 进程内的缓存层级管理器</h3>
+      <ul>
+        <li>决定<b>哪份 KV 该在哪一层</b>：提升、降级、预取、回写</li>
+        <li>与 RadixAttention 树耦合：key 是前缀哈希 / chunk 哈希，节点带 lock_ref，淘汰必须尊重树结构</li>
+        <li>与调度器耦合：prefetch 与 batch 重叠、超时终止、命中长度影响本轮的 extend 长度</li>
+        <li>对外只暴露 L3 的抽象接口，后端可替换（Mooncake 只是其中一种）</li>
+      </ul>
     </div>
-    <table>
-      <thead><tr><th>维度</th><th class="hicache">HiCache</th><th class="mooncake">Mooncake</th></tr></thead>
-      <tbody>
-        <tr><td>层次</td><td>策略 / 编排层（进程内）</td><td>数据面 / 资源层（集群级）</td></tr>
-        <tr><td>管的层</td><td>L1、L2 的拥有者，L3 的定义者</td><td>L3 的实现者之一（也可做 PD 传输、embedding store）</td></tr>
-        <tr><td>地址空间</td><td>单实例：HBM + 本地 DRAM</td><td>跨实例：全网 DRAM/SSD</td></tr>
-        <tr><td>核心算法</td><td>前缀匹配、写策略、预取策略、树形淘汰</td><td>对象放置、副本、一致性、RDMA 传输调度</td></tr>
-        <tr><td>换成别人行不行</td><td>可以：L3 换成 hf3fs / nixl / file / aibrix 等</td><td>可以：PD 传输换 nixl，L3 换 3FS</td></tr>
-        <tr><td>共同点</td><td colspan="2">都以 KV 对象为粒度做 key-value 复用；都靠 RDMA / 零拷贝打通主机与远端；目标都是「让别人算过的前缀不再算」；都有淘汰与命中统计</td></tr>
-      </tbody>
-    </table>
-    <p class="one">一句话：<b>HiCache 回答「这份 KV 现在最该待在哪一层」，Mooncake 回答「这些 KV 在哪个节点的哪块内存/盘上，怎么几毫秒搬过来」。</b>前者像 CPU 的 cache 替换策略 + 页缓存逻辑，后者像分布式内存设备加一台 DMA 引擎。</p>
-  </section>
+    <div class="card">
+      <h3 class="mooncake">Mooncake —— 集群级的 KV 存储与传输基础设施</h3>
+      <ul>
+        <li>决定<b>东西在哪台机、怎么最快搬过去</b>：聚合全网 DRAM/SSD 成共享池</li>
+        <li>Transfer Engine（RDMA / GPUDirect / 多网卡零拷贝）+ Master（元数据、租约、淘汰）</li>
+        <li>不理解前缀树，也不感知 batch；只认 key → 对象</li>
+        <li>可脱离 HiCache 独立使用：PD 分离的 KV 搬运默认就走 Mooncake</li>
+      </ul>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th>维度</th><th class="hicache">HiCache</th><th class="mooncake">Mooncake</th></tr></thead>
+    <tbody>
+      <tr><td data-label="维度">层次</td><td data-label="HiCache">策略 / 编排层（进程内）</td><td data-label="Mooncake">数据面 / 资源层（集群级）</td></tr>
+      <tr><td data-label="维度">管的层</td><td data-label="HiCache">L1、L2 的拥有者，L3 的定义者</td><td data-label="Mooncake">L3 的实现者之一（也可做 PD 传输、embedding store）</td></tr>
+      <tr><td data-label="维度">地址空间</td><td data-label="HiCache">单实例：HBM + 本地 DRAM</td><td data-label="Mooncake">跨实例：全网 DRAM/SSD</td></tr>
+      <tr><td data-label="维度">核心算法</td><td data-label="HiCache">前缀匹配、写策略、预取策略、树形淘汰</td><td data-label="Mooncake">对象放置、副本、一致性、RDMA 传输调度</td></tr>
+      <tr><td data-label="维度">换成别人行不行</td><td data-label="HiCache">可以：L3 换成 hf3fs / nixl / file / aibrix 等</td><td data-label="Mooncake">可以：PD 传输换 nixl，L3 换 3FS</td></tr>
+      <tr><td data-label="维度">共同点</td><td colspan="2">都以 KV 对象为粒度做 key-value 复用；都靠 RDMA / 零拷贝打通主机与远端；目标都是「让别人算过的前缀不再算」；都有淘汰与命中统计</td></tr>
+    </tbody>
+  </table>
+  <p class="one">一句话：<b>HiCache 回答「这份 KV 现在最该待在哪一层」，Mooncake 回答「这些 KV 在哪个节点的哪块内存/盘上，怎么几毫秒搬过来」。</b>前者像 CPU 的 cache 替换策略 + 页缓存逻辑，后者像分布式内存设备加一台 DMA 引擎。</p>
 
   <h2 id="myth">常见误解</h2>
 
@@ -457,7 +514,8 @@
   </ul>
 
   <footer>
-    基于本地 SGLang 开发分支的代码核对（HiCache 前缀树、缓存控制器、L3 存储接口、Mooncake store 后端）· 带宽与规格数字取公开参数，未含未公开的工程配置
+    <p>基于本地 SGLang 开发分支的代码核对（HiCache 前缀树、缓存控制器、L3 存储接口、Mooncake store 后端）· 带宽与规格数字取公开参数，未含未公开的工程配置。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
   </footer>
 </div>
 <script>
@@ -480,7 +538,7 @@
     el('cHeadsV').textContent = heads;
     el('cDimV').textContent = dim;
     el('cDtypeV').textContent = dt+' B';
-    el('cTokV').textContent = toks >= 1024 ? (toks/1024).toFixed(toks<10240?1:0)+'K' : toks;
+    el('cTokV').textContent = (toks/1024).toFixed(toks<10240?1:0)+'K';
     el('cParamsV').textContent = params+' B';
     el('oKvt').textContent = perTok>=1024 ? (perTok/1024).toFixed(0)+' KiB' : perTok+' B';
     el('oKvtD').textContent = '2 × '+heads+' × '+dim+' × '+layers+' × '+dt+'B';

@@ -37,7 +37,8 @@ def load_entries() -> list[dict]:
         entry["_dir"] = meta_path.parent.relative_to(ROOT).as_posix()
         entry.setdefault("artifact", "index.html")
         entries.append(entry)
-    entries.sort(key=lambda e: (CAT_ORDER.get(e["category"], 99), e["date"], e["slug"]))
+    entries.sort(key=lambda e: e["date"], reverse=True)          # 组内新的在前
+    entries.sort(key=lambda e: CAT_ORDER.get(e["category"], 99))  # 稳定排序保住上面的日期序
     return entries
 
 
@@ -93,13 +94,17 @@ PORTAL = r"""<!DOCTYPE html>
   .chip{font:12px var(--mono);background:var(--chip);border:1px solid var(--chipb);color:#3f4c63;
         border-radius:999px;padding:5px 11px;cursor:pointer;user-select:none}
   .chip[aria-pressed="true"]{background:#17509e;border-color:#17509e;color:#fff}
-  h2.cat{font-size:16px;margin:30px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--line);
+  h2.cat{font-size:16px;margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line);
          display:flex;align-items:baseline;gap:9px;color:#0d1526}
-  h2.cat span{font:11.5px var(--mono);color:var(--dim2)}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  h2.cat::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent);
+                 flex:none;transform:translateY(-2px)}
+  h2.cat span{font:11.5px var(--mono);color:var(--dim2);letter-spacing:.02em}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
   @media(max-width:760px){.grid{grid-template-columns:1fr}body{padding:26px 14px 60px}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
-        box-shadow:0 1px 2px rgba(16,24,40,.04);display:flex;flex-direction:column;gap:9px}
+        box-shadow:0 1px 2px rgba(16,24,40,.04);display:flex;flex-direction:column;gap:9px;
+        transition:box-shadow .16s ease,border-color .16s ease,transform .16s ease}
+  .card:hover{box-shadow:0 6px 18px rgba(16,24,40,.09);border-color:#c9d6ea;transform:translateY(-1px)}
   .card h3{margin:0;font-size:16px;line-height:1.45}
   .card h3 a{color:#0d1526;text-decoration:none}
   .card h3 a:hover{color:var(--accent);text-decoration:underline}
@@ -107,8 +112,10 @@ PORTAL = r"""<!DOCTYPE html>
   .card .tags{display:flex;flex-wrap:wrap;gap:6px}
   .card .tags span{font:11.5px var(--mono);background:var(--chip);border:1px solid var(--chipb);
                    border-radius:999px;padding:3px 8px;color:#3f4c63}
+  .card .tags span.more{background:#fff;border-style:dashed;color:var(--dim2)}
   .card .foot{margin-top:auto;display:flex;flex-wrap:wrap;gap:12px;align-items:center;
               font:11.5px var(--mono);color:var(--dim2);border-top:1px solid #eef2f8;padding-top:10px}
+  .card .foot .date{color:#3f4c63}
   .card .foot a{color:var(--accent);text-decoration:none}
   .card .foot a:hover{text-decoration:underline}
   .empty{color:var(--dim2);font:13px var(--mono);padding:30px 0;text-align:center}
@@ -161,7 +168,11 @@ function render() {
   for (const [cat, items] of byCat) {
     html += `<h2 class="cat">${CATS[cat] || cat}<span>${cat} · ${items.length}</span></h2><div class="grid">`;
     for (const e of items) {
-      const tags = (e.tags || []).map(t => `<span>${t}</span>`).join("");
+      const MAXT = 5;
+      const shown = (e.tags || []).slice(0, MAXT);
+      const rest = (e.tags || []).length - shown.length;
+      const tags = shown.map(t => `<span>${t}</span>`).join("") +
+                   (rest > 0 ? `<span class="more">+${rest}</span>` : "");
       const extras = (e.extra_files || []).map(f => `<a href="${e._dir}/${f}">${f}</a>`).join("");
       html += `<div class="card">
         <h3><a href="${e._dir}/${e.artifact}">${e.title}</a></h3>
