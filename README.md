@@ -1,8 +1,8 @@
 # 🧠 show-me 知识库 · 图解与概念解释合集
 
-每次用 [`show-me`](/Users/qqtang/.agents/skills/show-me/SKILL.md) 把概念讲清楚时产出的图解、推导与解释，都归档在这里。一个主题一个目录，`index.html` 是产物本体。
+每次用 `show-me` skill 把概念讲清楚时产出的图解、推导与解释，都归档在这里。一个主题一个目录，`index.html` 是产物本体。
 
-- **定位**：和 [Paper-Reading-Collection](../Paper-Reading-Collection/) 并列——那边是读别人的论文，这边是讲清楚一个概念、一次改动或一个系统设计。
+- **定位**：和 [Paper-Reading-Collection](https://qqtang-code.github.io/Paper-Reading-Collection/) 并列——那边是读别人的论文，这边是讲清楚一个概念、一次改动或一个系统设计。
 - **在线门户**：[qqtang-code.github.io/show-me](https://qqtang-code.github.io/show-me/)（本地直接 `open index.html` 也有搜索与标签筛选）。
 - **每篇的结构**：速览 → 前置知识 → 关键推导（带真实数字）→ 常见误解 → 自测题 → 延伸阅读。自测题用 `<details>` 折叠，答案就在下面。
 
