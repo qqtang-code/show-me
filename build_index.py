@@ -53,7 +53,7 @@ def render_readme(entries: list[dict]) -> str:
         if extra:
             link += f" ({extra})"
         date = e["date"]
-        sid = e.get("session_id") or ""
+        sid = e.get("session_ref") or ""
         src = f"`{sid}`" if sid else "—"
         lines.append(f"| {date} | {link} | {e['category']} | {tags} | {e['one_liner']} | {src} |")
     table = "\n".join(lines)
@@ -128,7 +128,7 @@ PORTAL = r"""<!DOCTYPE html>
 
   <div id="list"></div>
 
-  <footer>由 build_index.py 从各目录 meta.json 生成 · 仓库私有，内容含未公开工程细节</footer>
+  <footer>由 build_index.py 从各目录 meta.json 生成 · 公开学习资料，内部标识已脱敏</footer>
 </div>
 <script>
 const ENTRIES = __ENTRIES__;

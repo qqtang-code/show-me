@@ -60,7 +60,7 @@
 
   <div id="list"></div>
 
-  <footer>由 build_index.py 从各目录 meta.json 生成 · 仓库私有，内容含未公开工程细节</footer>
+  <footer>由 build_index.py 从各目录 meta.json 生成 · 公开学习资料，内部标识已脱敏</footer>
 </div>
 <script>
 const ENTRIES = [
@@ -79,7 +79,6 @@ const ENTRIES = [
     ],
     "one_liner": "上游 SGLang 有三道护栏硬性禁止 DFlash 与 PP 共存；适配没有碰算法，而是用一个 world_size=1 的伪造 PP 组让草稿模型整体跑在 PP0，并设计 aux hidden 去程累积、投影 context 回程两条通道穿过 PP ring。",
     "artifact": "index.html",
-    "session_id": "sess_0255fd71-2740-4760-8543-294de23e9fc5",
     "_dir": "inference-systems/dflash-pp-adaptation",
     "extra_files": [
       "notes.md"
@@ -101,7 +100,6 @@ const ENTRIES = [
     ],
     "one_liner": "用存储层级的容量/带宽阶梯解释 decode 为什么是纯访存瓶颈；SGLang HiCache 把 radix 树从 HBM 延伸到主机与集群，Mooncake 是其中一种 L3 实现（同时还是 PD 分离的默认传输后端），二者是策略层与数据面的正交关系。",
     "artifact": "index.html",
-    "session_id": "sess_028051f7-061f-4ed4-ae09-2e0f7bd6f263",
     "_dir": "inference-systems/hicache-mooncake",
     "extra_files": []
   },
@@ -118,9 +116,8 @@ const ENTRIES = [
       "投机解码",
       "Amdahl"
     ],
-    "one_liner": "GLM-5.3 TP8 上把 AllReduce 从广播式改成 reduce-scatter + all-gather，单次归约 907 → 222.6 µs；收益全部来自「少搬 4 倍字节」，端到端 +60% 对 Amdahl 上限 +76% 的兑现率 91%。",
+    "one_liner": "把 AllReduce 从广播式改成 reduce-scatter + all-gather，单次归约 907 → 222.6 µs；收益全部来自「少搬 4 倍字节」，端到端 +60% 对 Amdahl 上限 +76% 的兑现率 91%。",
     "artifact": "index.html",
-    "session_id": "sess_0255fd71-2740-4760-8543-294de23e9fc5",
     "_dir": "comm-parallel/allreduce-1stage-vs-2stage",
     "extra_files": [
       "allreduce-infographic.png"

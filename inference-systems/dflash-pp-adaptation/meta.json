@@ -7,10 +7,11 @@
   "one_liner": "上游 SGLang 有三道护栏硬性禁止 DFlash 与 PP 共存；适配没有碰算法，而是用一个 world_size=1 的伪造 PP 组让草稿模型整体跑在 PP0，并设计 aux hidden 去程累积、投影 context 回程两条通道穿过 PP ring。",
   "artifact": "index.html",
   "extra_files": ["notes.md"],
-  "session_id": "sess_0255fd71-2740-4760-8543-294de23e9fc5",
-  "cwd": "/Users/qqtang/Desktop/research/是石科技/GLM 5.2测试指南",
+  "session_ref": "sess_0255fd71",
   "sources": [
-    "从会话记录重建：当时 show-me 只给了聊天回答，未落盘（notes.md 为原始文本，index.html 为渲染版）"
+    "由一次内部实验的代码审读整理（当时只给了聊天回答，notes.md 为原始文本存档，index.html 为学习增强版）"
   ],
-  "visibility": "internal"
+  "visibility": "public",
+  "redactions": ["内部环境变量名前缀", "项目/工作区名称"],
+  "enriched": "2026-09-19"
 }

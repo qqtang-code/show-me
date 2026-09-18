@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
 <title>1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</title>
 <style>
   :root{
@@ -39,6 +40,7 @@
     padding-top:22px;border-top:1px solid var(--line)
   }
   h2 .n{color:var(--ink3);font-weight:400;margin-right:8px;font-family:ui-monospace,monospace;font-size:15px}
+  h3.mini{font-size:15px;margin:26px 0 4px}
   p{margin:10px 0}
   .lead{color:var(--ink2)}
 
@@ -158,13 +160,54 @@
   ul{margin:10px 0;padding-left:20px}
   li{margin:7px 0}
   .foot{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink3)}
+
+  /* ================= 学习增强层 ================= */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 0}
+  .nav a{
+    font-size:12.5px;font-family:ui-monospace,monospace;text-decoration:none;
+    color:var(--ink2);background:#f2f3f0;border:1px solid var(--line);
+    padding:5px 11px;border-radius:100px
+  }
+  .nav a:hover{color:var(--accent);border-color:#c7d2fe;background:#eef2ff}
+  .tldr{
+    margin:16px 0 0;border:1px solid #dbe3f4;background:#f7f9ff;border-radius:12px;padding:16px 20px
+  }
+  .tldr h4{margin:0 0 8px;font-size:13px;color:var(--accent);font-family:ui-monospace,monospace;letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:var(--ink2)}
+  .tldr b{color:var(--ink)}
+  .myth{border:1px solid var(--line);border-left:3px solid var(--waste);border-radius:0 10px 10px 0;
+        background:#fff;padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
+  .myth .r{font-size:13.5px;color:var(--ink2);margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--ink3)}
+  details .ans{margin-top:10px;font-size:13.5px;color:var(--ink2);border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--ink3);font-size:12.5px;display:block;margin-top:2px}
+  .calc{border:1px solid #dbe3f4;border-radius:12px;background:#f7f9ff;padding:18px 20px;margin:20px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:150px 1fr 92px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr;gap:4px}}
+  .calc input[type=range]{width:100%}
+  .calc .out{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}
+  .calc .out div{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px}
+  .calc .out .k{font-size:12px;color:var(--ink3);font-family:ui-monospace,monospace}
+  .calc .out .v{font-size:19px;font-family:ui-monospace,monospace;font-weight:600;margin-top:2px}
+  .calc .out .d{font-size:12px;color:var(--ink2);margin-top:2px}
+  .upd{font-size:12.5px;color:var(--ink3);margin-top:10px}
 </style>
 </head>
 <body>
 <div class="wrap">
 
   <h1>1-stage → 2-stage AllReduce：省下的是 4 倍字节</h1>
-  <p class="sub">GLM-5.3 · TP8 · 单次归约 kernel 907 → 222.6 μs，端到端 1k/4k C64 <span class="mono">847.82 → 1358.47 tok/s</span></p>
+  <p class="sub">8 卡 PCIe 服务器（无 NVLink）· TP8 · 单次归约 kernel 907 → 222.6 μs，端到端 1k/4k C64 <span class="mono">847.82 → 1358.47 tok/s</span></p>
 
   <div class="setup">
     一次 AllReduce 的载荷 <b>P</b>：高并发 verify 消息 <b>≈ 4.6 MB</b>。
@@ -172,7 +215,67 @@
     八卡分处两个四卡 PCIe 组（无 NVLink），归约必须走 PCIe 交换。
   </div>
 
-  <h2><span class="n">01</span>两种算法真正做的事：搬多少字节</h2>
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#pre">前置知识</a>
+    <a href="#s01">搬多少字节</a>
+    <a href="#s02">N/2 定律</a>
+    <a href="#calc">动手算</a>
+    <a href="#s03">带宽对账</a>
+    <a href="#s04">Amdahl</a>
+    <a href="#s05">适用边界</a>
+    <a href="#myth">常见误解</a>
+    <a href="#quiz">自测</a>
+    <a href="#read">延伸阅读</a>
+  </nav>
+
+  <div class="tldr" id="tldr">
+    <h4>速览 · 30 秒</h4>
+    <ul>
+      <li><b>问题</b>：8 卡跨 PCIe 交换做 AllReduce，一条 4.6 MB 的消息，单次归约要 907 μs，占 Decode 累计 kernel 时间的 57%。</li>
+      <li><b>改动</b>：把「广播 + 本机相加」换成「reduce-scatter + all-gather」。<b>没有换硬件，没有提带宽</b>，只是每个 rank 从收 7 份完整载荷变成收 1.75 份。</li>
+      <li><b>结果</b>：kernel 907 → 222.6 μs（4.07×），端到端 +60.2%。做到 91% 的 Amdahl 上限。</li>
+      <li><b>记住这一条</b>：字节倍数恰好是 <b>TP/2</b>。所以 TP 越大收益越大，TP2 上收益为零。</li>
+    </ul>
+  </div>
+
+  <h2 id="pre"><span class="n">00</span>前置知识：这次归约到底在传什么</h2>
+  <p class="lead">如果下面三个概念你都已经清楚，可以直接跳到 <a href="#s01">01</a>。</p>
+
+  <h3 class="mini">① AllReduce 做什么</h3>
+  <p>
+    每个 rank 手里有一份<b>形状相同、内容不同</b>的张量（这里是各卡算出的部分和）。AllReduce 结束后，
+    <b>每个 rank 都拿到所有 rank 之和</b>。注意它和 ReduceScatter、AllGather 的关系：
+    <span class="mono">AllReduce = ReduceScatter + AllGather</span> —— 这正是本次改动的全部数学内容，
+    两个阶段拼起来的结果与一步到位完全一样。
+  </p>
+
+  <h3 class="mini">② 张量并行（TP）里为什么到处都是 AllReduce</h3>
+  <p>
+    张量并行把一层的权重按列/行切到多张卡上。以 Transformer 的一层为例，两个地方会产生「部分和」：
+    Attention 的输出投影 <span class="mono">o_proj</span> 之后、MLP 的 <span class="mono">down_proj</span> 之后。</p>
+  <ul>
+    <li>列并行（<span class="mono">q/k/v_proj</span>、<span class="mono">gate/up_proj</span>）输出按列切，各卡结果互不重叠，<b>不需要通信</b>；</li>
+    <li>行并行（<span class="mono">o_proj</span>、<span class="mono">down_proj</span>）需要把输入按行切、结果相加，<b>必须 AllReduce</b>。</li>
+  </ul>
+  <p>所以每层 2 次 AllReduce，64 层就是 128 次 —— 单次省下的微秒数会被层数放大，这就是它对端到端能有 60% 影响的原因。</p>
+
+  <h3 class="mini">③ 载荷 P 是怎么长出来的</h3>
+  <p>
+    投机解码的 verify 阶段，一条请求要一次性验证 <b>draft 长度</b>个 token，所以这一批参与计算的「行」数远大于请求数。
+    行的宽度就是 hidden size。于是：
+  </p>
+  <div class="eq">
+    P &nbsp;=&nbsp; 行数 × hidden × dtype 字节数<br>
+    <span class="lbl">本轮实测：4.6 MB ≈ 374 行 × 6144 × 2B</span><br>
+    <span class="lbl">行数 ≈ 并发批大小 × draft 长度（并发越高、draft 越长，消息越大）</span>
+  </div>
+  <p>
+    这就是为什么这条优化在高并发 verify 场景收益最大：<b>P 越大，PCIe 越是瓶颈，省字节的价值越高</b>。
+    而 8 卡分处两个四卡 PCIe 组、且没有 NVLink，意味着跨组流量必须过主机桥 —— 归约天然是带宽墙上的活。
+  </p>
+
+  <h2 id="s01"><span class="n">01</span>两种算法真正做的事：搬多少字节</h2>
   <p class="lead">两者的数学结果完全一样，区别只在「每个 rank 要从网络上收多少字节」。这是本次提升的全部来源。</p>
 
   <div class="cols">
@@ -218,7 +321,7 @@
     </div>
   </div>
 
-  <h2><span class="n">02</span>为什么倍率恰好是 N/2</h2>
+  <h2 id="s02"><span class="n">02</span>为什么倍率恰好是 N/2</h2>
   <p class="lead">
     一次 all-reduce 的字节下界是每 rank <span class="mono">2(N−1)/N · P</span>：每个 rank 至少要把「别人的贡献」和「所有人的结果」各过一遍。
     1-stage 是广播式搬法，收的是 <span class="mono">N−1</span> 份完整载荷，比下界多出 <span class="mono">N/2</span> 倍。
@@ -231,7 +334,7 @@
         <th class="num">1-stage 每 rank 收</th>
         <th class="num">2-stage 每 rank 收</th>
         <th class="num">字节节省</th>
-        <th>对应观测（子文档）</th>
+        <th>对应观测</th>
       </tr>
     </thead>
     <tbody>
@@ -254,7 +357,7 @@
         <td class="num" data-label="1-stage 每 rank 收">7.00 P</td>
         <td class="num" data-label="2-stage 每 rank 收">1.75 P</td>
         <td class="num sav max" data-label="字节节省">4.00×</td>
-        <td data-label="对应观测">本轮主实验（CAR 2-stage）</td>
+        <td data-label="对应观测">本轮主实验（2-stage 自定义 AllReduce）</td>
       </tr>
     </tbody>
   </table>
@@ -262,7 +365,45 @@
     TP2 时两个算法搬的字节数<b>完全</b>相同，只多出一轮同步开销 —— 所以凡是以省字节为目标的通信改动，在小 TP 域上都应当预期接近零收益。
   </p>
 
-  <h2><span class="n">03</span>对账：907 → 222.6 μs 是不是同一堵带宽墙</h2>
+  <h3 class="mini">把倍率算出来</h3>
+  <div class="eq">
+    <span class="kicker">1-stage</span> 每 rank 收 <span class="v">(N − 1) · P</span><br>
+    <span class="kicker">2-stage</span> 每 rank 收 <span class="v">2 · (N − 1)/N · P</span><br>
+    <hr>
+    比值 = <span class="hl">(N − 1) ÷ [2(N − 1)/N] = N / 2</span><br>
+    <span class="lbl">N = 8 → 4×；N = 4 → 2×；N = 2 → 1×（无收益）；N = 16 → 8×</span>
+  </div>
+  <p>
+    注意两个式子的<b>量级</b>差异：1-stage 是 <span class="mono">O(N·P)</span>，随 TP 线性膨胀；
+    2-stage 是 <span class="mono">O(2P)</span>，<b>与 TP 规模无关</b>。这是「TP 越大越该用 2-stage」的根源，
+    也是它成为带宽最优算法的原因 —— 下界是 2(N−1)/N·P，N 很大时趋近 2P。
+  </p>
+
+  <h2 id="calc">自己动手：换个 TP 规模和消息大小看结果</h2>
+  <p class="lead">公式是不是真的这样长？拖动下面的滑块。带宽固定取实测反推值 35.5 GB/s，AllReduce 占比取 57.2%。</p>
+
+  <div class="calc">
+    <div class="ctl">
+      <label for="nTp">TP 规模 N</label>
+      <input id="nTp" type="range" min="2" max="16" step="1" value="8">
+      <span class="mono" id="nTpV">8</span>
+    </div>
+    <div class="ctl">
+      <label for="nRows">verify 行数</label>
+      <input id="nRows" type="range" min="64" max="2048" step="1" value="374">
+      <span class="mono" id="nRowsV">374</span>
+    </div>
+    <div class="out">
+      <div><div class="k">载荷 P</div><div class="v" id="oP">—</div><div class="d">行数 × 6144 × 2B</div></div>
+      <div><div class="k">1-stage 每 rank 收</div><div class="v" id="o1">—</div><div class="d" id="o1t">—</div></div>
+      <div><div class="k">2-stage 每 rank 收</div><div class="v good" id="o2">—</div><div class="d" id="o2t">—</div></div>
+      <div><div class="k">字节节省</div><div class="v" id="oR">—</div><div class="d">= N / 2</div></div>
+      <div><div class="k">端到端上限</div><div class="v" id="oA">—</div><div class="d">Amdahl，占比 57.2%</div></div>
+    </div>
+    <p class="upd">这个上限只描述「归约这一项变快」能带来多少，实际还会被 prefill、以及 kernel 时间 ≠ wall time 稀释（本次实测 1.60× 对上限 1.76×）。</p>
+  </div>
+
+  <h2 id="s03"><span class="n">03</span>对账：907 → 222.6 μs 是不是同一堵带宽墙</h2>
   <p class="lead">如果提升真的来自「少搬字节」，那么两次 kernel 反推出的有效带宽必须相等。</p>
 
   <div class="eq">
@@ -283,7 +424,14 @@
     那里 allreduce 在整轮耗时里的占比本来就低。
   </p>
 
-  <h2><span class="n">04</span>从 kernel 省 75% 到端到端只涨 60%</h2>
+  <h3 class="mini">这个「反推带宽」的手法值得单独记住</h3>
+  <p>
+    面对一个性能改动，判断它是否真的按你设想的那条路径起作用，最有力的证据不是「变快了」，而是
+    <b>两条独立路径反推出的物理量一致</b>：字节数 ÷ 时间 ≈ 外部微基准测得的带宽。
+    一旦它们在 2% 内吻合，就可以排除「换了算法但其实走了别的路径」「编译器把某段优化掉了」这类解释。
+  </p>
+
+  <h2 id="s04"><span class="n">04</span>从 kernel 省 75% 到端到端只涨 60%</h2>
   <p class="lead">
     原始 Decode trace 中，1-stage AllReduce 占累计 GPU kernel 时间的 <b>57.2%</b>。
     归约时间缩到 1/4，其余部分不动，这是 Amdahl 给出的天花板。
@@ -323,19 +471,118 @@
     <b>TP 域有多大</b>（决定能省多少字节）。两者都已知时，+60% 这个数字就是可预测的，不是运气。
   </p>
 
-  <h2><span class="n">05</span>边界：什么时候这条改动不成立</h2>
+  <h2 id="s05"><span class="n">05</span>边界：什么时候这条改动不成立</h2>
   <ul>
     <li><b>TP 域小。</b>TP2 时 1-stage 与 2-stage 搬的字节完全相同，2-stage 只多一轮 kernel + barrier，理论上应略慢 —— 与 TP2PP4 上观测到的 −0.12% 一致。</li>
-    <li><b>消息极小。</b>1-stage 只需 1 个 kernel + 1 次同步，延迟最优；2-stage 要 2 个 kernel + 2 次同步。延迟主导的小消息上 1-stage 反而更快 —— 这正是子文档里还要为 1–64 行小张量单独做 IPC 路径的原因。</li>
-    <li><b>大消息也不该继续加码。</b>96 MiB 上 IPC 候选比 PyNCCL 慢（3.71 ms vs 参考路径），所以大消息保留原路径；本轮最终配方是按消息尺寸分流，而不是全量替换。</li>
+    <li><b>消息极小。</b>1-stage 只需 1 个 kernel + 1 次同步，延迟最优；2-stage 要 2 个 kernel + 2 次同步。延迟主导的小消息上 1-stage 反而更快 —— 这也是为什么还要为 1–64 行的小张量单独做 IPC 路径。</li>
+    <li><b>大消息也不该继续加码。</b>96 MiB 上 IPC 候选比参考路径慢（3.71 ms vs 参考路径），所以大消息保留原路径；本轮最终配方是<b>按消息尺寸分流</b>，而不是全量替换。</li>
+  </ul>
+
+  <h2 id="myth">常见误解</h2>
+
+  <div class="myth">
+    <div class="w">✗「2-stage 的通信更快」</div>
+    <div class="r">两阶段的<b>单跳带宽、链路、协议全都没变</b>。变的是需要搬的字节数。所以正确的说法是「通信变少了」——
+      这也意味着：如果链路本身没到饱和（比如延迟主导的小消息），这条改动不会带来收益。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「省了 4 倍字节，所以端到端快 4 倍」</div>
+    <div class="r">被 Amdahl 定律拦住了。归约只占 57.2% 的 kernel 时间，即使它缩到 0，上限也只有 1/(1−0.572) ≈ 2.34×；
+      缩到 1/4 则上限 <b>1.76×</b>。加速比是「占比」和「局部加速比」的函数，不是后者本身。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「那所有 AllReduce 都该换成 2-stage」</div>
+    <div class="r">反例就在同一份数据里：TP2 上字节完全相同却多一轮同步，实测 <b>−0.12%</b>；小消息上 1-stage 反而更快。
+      正确做法是按 <b>N 和消息大小</b>分流（N ≥ 4 且消息够大才换），而不是全局替换。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「kernel 快了 4 倍，那吞吐应该也快 4 倍」</div>
+    <div class="r">kernel 时间 ≠ wall time。真实一轮里还有 prefill、还有 kernel 之间的空隙与同步。
+      兑现率 91% 已经是很好的结果，剩下的 9% 就来自这些没被加速的部分。</div>
+  </div>
+
+  <h2 id="quiz">自测：能答上这五题就算懂了</h2>
+
+  <details>
+    <summary>1. N = 16、P = 1 MB 时，两种算法每 rank 各接收多少字节？</summary>
+    <div class="ans">1-stage：<b>(N−1)·P = 15 MB</b>；2-stage：<b>2(N−1)/N·P = 1.875 MB</b>。
+      比值 8×，正好是 N/2。注意 2-stage 已经非常接近理论上限 2P = 2 MB。</div>
+  </details>
+
+  <details>
+    <summary>2. 为什么这条改动在 TP2 上不但没收益，还可能略慢？</summary>
+    <div class="ans">N = 2 时两个式子的值相同：1-stage 收 (2−1)P = P；2-stage 收 2(1)/2·P = P。
+      <b>字节数完全一样</b>，而 2-stage 需要两个 kernel、两次同步，纯属额外开销 —— 所以实测 −0.12% 是符合预期的，不是噪声。</div>
+  </details>
+
+  <details>
+    <summary>3. 如果 AllReduce 只占 kernel 时间的 20%，缩到 1/4，端到端上限是多少？</summary>
+    <div class="ans">1 ÷ (0.8 + 0.2/4) = 1 ÷ 0.85 ≈ <b>1.18×</b>（+18%）。
+      对比本次 57.2% 占比下的 1.76×：<b>同样一个优化，占比决定了它值不值得做。</b></div>
+  </details>
+
+  <details>
+    <summary>4. 有人报告 2-stage 的单次耗时从 222 μs 变成 300 μs，能断定「带宽变差了」吗？</summary>
+    <div class="ans">不能。必须先算 <b>字节数 ÷ 时间</b> 反推有效带宽：如果消息变大导致字节数也涨了，
+      300 μs 可能仍然是同一堵带宽墙。只有「有效带宽显著低于微基准」才说明链路或实现出了问题 ——
+      这正是 03 节那套对账方法的用处。</div>
+  </details>
+
+  <details>
+    <summary>5. 为什么说 1-stage 是 O(N·P)、2-stage 是 O(2P)？后者为什么与 TP 无关？</summary>
+    <div class="ans">1-stage 每个 rank 要收齐其他所有人的完整载荷，(N−1) 份，随 N 线性增长。
+      2-stage 把载荷先切成 N 份，每个 rank 在 scatter 和 gather 两阶段各只经手 (N−1) 份<b>小块</b>，
+      合起来是 2(N−1)/N·P —— N 变大时 (N−1)/N → 1，<b>总量趋近 2P</b>，与 N 无关。</div>
+  </details>
+
+  <h2 id="read">延伸阅读</h2>
+  <ul class="links">
+    <li><a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html" target="_blank" rel="noopener">NCCL · Collectives 文档</a>
+      <span class="why">AllReduce / ReduceScatter / AllGather 的官方定义与算法选择逻辑，想搞清楚生产库怎么按消息大小分流就看这里。</span></li>
+    <li><a href="http://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/" target="_blank" rel="noopener">Bringing HPC Techniques to Deep Learning（ring all-reduce 图解）</a>
+      <span class="why">经典长文，用手绘图讲清 ring 结构为什么能做到带宽最优 —— 理解「2(N−1)/N·P 下界」的最佳读物。</span></li>
+    <li><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang / RadixAttention 论文</a>
+      <span class="why">本次实验所在的推理框架；理解 verify 负载、批内行数为何随并发放大，从这里入手。</span></li>
+    <li><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener">Fast Inference from Transformers via Speculative Decoding</a>
+      <span class="why">投机解码原始论文。载荷 P 随 draft 长度增长的根源就在这里。</span></li>
+    <li><a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener">sgl-project/sglang</a>
+      <span class="why">自定义 AllReduce 与通信算子的实现都在仓库里，可以对照本文的算法描述读代码。</span></li>
   </ul>
 
   <div class="foot">
-    数据来源：主文档《9.4-9.14 GLM5.3 第一轮优化汇总》「通信优化 / Custom AllReduce：1-stage → 2-stage」；
-    子文档《9.14 GLM-5.3 通信优化：16k→512 C8/C32 最终配置》「与原始 baseline 的累计收益」。
-    带宽数字由文档给出的 4.6 MB / 907 μs / 222.6 μs 反算得出。
+    数据来自 2026-09 的一次内部优化实验：8 卡 PCIe 服务器、TP8、投机解码高并发 verify 负载。
+    单次归约 907 → 222.6 μs、端到端 847.82 → 1358.47 tok/s 均为实测；带宽数字由 4.6 MB / 907 μs / 222.6 μs 反算得出。
+    内部文档与模型版本信息已做脱敏。
   </div>
 
 </div>
+<script>
+(function(){
+  var HIDDEN = 6144, BYTES = 2, BW = 35.5e9;  // 实测反推有效带宽 35.5 GB/s（1-stage 路径）
+  var AR_FRACTION = 0.572;                   // AllReduce 占 kernel 时间比例
+  var tp = document.getElementById('nTp'), rows = document.getElementById('nRows');
+  function fmt(b){ return b >= 1e6 ? (b/1e6).toFixed(2)+' MB' : (b/1e3).toFixed(0)+' KB'; }
+  function us(b){ var t = b/BW*1e6; return t >= 1000 ? (t/1000).toFixed(2)+' ms' : t.toFixed(0)+' μs'; }
+  function upd(){
+    var N = +tp.value, R = +rows.value;
+    var P = R*HIDDEN*BYTES;
+    var b1 = (N-1)*P, b2 = 2*(N-1)/N*P, ratio = N/2;
+    document.getElementById('nTpV').textContent = N;
+    document.getElementById('nRowsV').textContent = R;
+    document.getElementById('oP').textContent = fmt(P);
+    document.getElementById('o1').textContent = fmt(b1);
+    document.getElementById('o1t').textContent = '(N−1)P · ≈' + us(b1) + ' @35.5GB/s';
+    document.getElementById('o2').textContent = fmt(b2);
+    document.getElementById('o2t').textContent = '2(N−1)/N·P · ≈' + us(b2) + ' @35.5GB/s';
+    document.getElementById('oR').textContent = ratio.toFixed(2) + '×';
+    var amd = 1/((1-AR_FRACTION) + AR_FRACTION/ratio);
+    document.getElementById('oA').textContent = amd.toFixed(2) + '×';
+  }
+  tp.addEventListener('input', upd); rows.addEventListener('input', upd); upd();
+})();
+</script>
 </body>
 </html>

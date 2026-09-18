@@ -20,7 +20,7 @@
   .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:10px}
   .crumb a{color:var(--accent);text-decoration:none}
   h1{font-size:25px;line-height:1.4;margin:0 0 10px;letter-spacing:-.01em}
-  h2{font-size:19px;margin:34px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);color:#0d1526}
+  h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);color:#0d1526}
   h3{font-size:16px;margin:24px 0 8px;color:#0d1526}
   p{margin:10px 0}
   .meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font:12px var(--mono);color:var(--dim2)}
@@ -36,12 +36,47 @@
   table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
   th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
   th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;background:#f4f7fc;text-transform:uppercase}
+  td.mono{font-family:var(--mono);font-size:12.5px;color:#28374f}
   blockquote{margin:12px 0;padding:8px 14px;border-left:3px solid var(--line);color:var(--dim);font-size:14px}
   .final{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:26px;
          box-shadow:0 1px 2px rgba(16,24,40,.04)}
   .final strong{color:#0d1526}
   .mermaid{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:14px 0;text-align:center}
   footer{color:var(--dim2);font:11.5px/1.75 var(--mono);text-align:center;margin-top:30px}
+
+  /* ================= 学习增强层 ================= */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 20px;border:1px solid #dbe3f4;background:#f7f9ff;border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .flow{border:1px solid var(--line);border-radius:12px;background:#fff;padding:16px 18px;margin:16px 0}
+  .flow .step{display:grid;grid-template-columns:26px 1fr;gap:12px;padding:9px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52}
+  .flow .step .t b{color:#0d1526}
+  .flow .step .t .sub{display:block;color:var(--dim);font-size:13px;margin-top:2px}
+  .pick{border:1px solid #c9ece6;background:#f2fbf8;border-radius:12px;padding:14px 18px;margin:14px 0}
+  .pick h4{margin:0 0 6px;font-size:14px;color:#0b6b3f}
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:#fff;padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:#b23a10;font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:#0b6b3f}
+  details{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:#0d1526}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:#0b6b3f}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
 </style>
 </head>
 <body>
@@ -56,9 +91,62 @@
     </div>
   </div>
 
-  <div class="note">归档说明：2026-09-16 用 show-me 问「PP 适配 DFlash 做了什么改动」时只给了聊天回答，没有落盘。本页由会话记录 <code>sess_0255fd71</code> 重建，代码片段与结论未改动；Markdown 原文见 <a href="notes.md">notes.md</a>。</div>
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#pre">前置知识</a>
+    <a href="#why">为什么天生冲突</a>
+    <a href="#p1">矛盾与四块改动</a>
+    <a href="#pick">为什么选这个方案</a>
+    <a href="#bug">正确性 bug</a>
+    <a href="#myth">常见误解</a>
+    <a href="#quiz">自测</a>
+    <a href="#read">延伸阅读</a>
+  </nav>
 
-  <h2>一、要解决的根本矛盾</h2>
+  <div class="tldr" id="tldr">
+    <h4>速览 · 30 秒</h4>
+    <ul>
+      <li><b>冲突点</b>：上游 SGLang 用三道断言禁止「投机解码 + 流水并行」共存，因为 DFlash 的数据流假设<b>所有东西都在一个 rank 上</b>——草稿模型、它需要的多层 hidden、以及 LM head。</li>
+      <li><b>核心手法</b>：不切分草稿模型，而是给它<b>伪造一个 world_size=1 的 PP 组</b>，让 6 层 draft 以为自己在 PP=1 下运行，整体待在第 0 段。</li>
+      <li><b>真正的工作量</b>：设计两条跨阶段数据通道——aux hidden 沿 PP ring <b>去程累积</b>、投影结果沿 output ring <b>回程绕回</b>，并把 draft 状态装进信封穿环传递。</li>
+      <li><b>代价</b>：草稿计算全部压在 PP0，PP0 明显更忙（busy 25.98s vs 其他段 21.8–23.3s），且 prefill 放弃图捕获。</li>
+      <li><b>顺便收获一个教训</b>：投机解码下按「请求数」切片张量是错的，必须按「token 行数」切——同一个坑在 PP+MTP 上已经踩过一次。</li>
+    </ul>
+  </div>
+
+  <h2 id="pre">前置知识：三个概念</h2>
+
+  <h3>① 流水并行（PP）在做什么</h3>
+  <p>
+    把一个模型的层按顺序切成几段，每段放一组 GPU。第 0 段算完自己的层，把<b>激活值</b>沿一条 ring 传给第 1 段，
+    依次往后；最后一段算完把结果沿 output ring 传回第 0 段。数据在环上流动，所以叫 pipeline。
+    关键性质：<b>每一段只持有自己那几层的权重，也只看得见自己那几层的中间结果</b>——这正是下面所有麻烦的根源。
+  </p>
+
+  <h3>② 投机解码在做什么</h3>
+  <p>
+    用一个小而快的 <b>draft（草稿）模型</b>先一次性猜出后续若干 token，再让<b>目标模型</b>一次前向把这些猜测
+    全部验证（verify）。猜对的部分直接接受，猜错的位置截断重来。收益来自「一次前向验证多个 token」，
+    所以 verify 阶段的<b>批内 token 行数 = 请求数 × draft 长度</b>。
+  </p>
+
+  <h3 id="why">③ 为什么这两件事天生冲突</h3>
+  <p>把 draft 的需求逐条摆出来，冲突就很直观了：</p>
+  <table>
+    <thead><tr><th>draft 需要什么</th><th>在 PP 下它在哪里</th></tr></thead>
+    <tbody>
+      <tr><td>目标模型<b>多个中间层</b>的 hidden state（本例捕获 6 层）</td><td class="mono">散落在 4 个阶段上</td></tr>
+      <tr><td><b>LM head</b>（把 hidden 变成词表 logits）</td><td class="mono">只在最后一段</td></tr>
+      <tr><td><b>输入 embedding</b> 与下一步的 draft 输入</td><td class="mono">在第 0 段</td></tr>
+      <tr><td>草稿模型自己（6 层，体积很小）</td><td class="mono">没有归属</td></tr>
+    </tbody>
+  </table>
+  <p>
+    上游的选择是干脆不支持：<span class="mono">if cfg.pp_size != 1: raise ValueError(...)</span>。
+    要让它跑起来，必须把这四条需求在 PP 的拓扑上重新安排一遍。
+  </p>
+
+  <h2 id="p1">一、要解决的根本矛盾</h2>
   <p>上游 SGLang <strong>硬性禁止</strong> DFlash 与 PP 共存，三道护栏都在启动期直接报错：</p>
 <pre><code># speculative_hook.py
 if cfg.pp_size != 1:
@@ -73,8 +161,13 @@ assert (cfg.disable_overlap_schedule and cfg.speculative_algorithm is None), \
 
   <h2>二、改动分四块</h2>
 
-  <h3>A. 放开护栏（全部门控在 <code>HZY_DFLASH_PP_INIT_PROBE=1</code> 下）</h3>
-  <p>三个文件各 1~4 行，都是 <code>and os.environ.get("HZY_DFLASH_PP_INIT_PROBE") == "1"</code> 形式的条件放宽。<strong>没有改算法，只是把禁入改成可入</strong>，且保留开关随时可退回。</p>
+  <h3>A. 放开护栏（全部门控在 <code>DFLASH_PP_INIT_PROBE=1</code> 下）</h3>
+  <p>三个文件各 1~4 行，都是 <code>and os.environ.get("DFLASH_PP_INIT_PROBE") == "1"</code> 形式的条件放宽。<strong>没有改算法，只是把禁入改成可入</strong>，且保留开关随时可退回。</p>
+  <div class="pick">
+    <h4>为什么用环境变量门控，而不是直接删断言</h4>
+    删掉断言等于把这个尚不完整的能力（暂不支持混合微批、TBO/CP）暴露给所有用户；门控成开关则让实验可以推进、
+    同时保持默认行为不变。<b>改一个上游的「禁止」为「允许」时，给出可退回的开关，比改默认值更负责任。</b>
+  </div>
 
   <h3>B. 草稿模型不切分——伪造单例 PP 组</h3>
   <p><code>dflash_pp_scope.py</code>（新增，1.5 KB）是整个适配的钥匙：</p>
@@ -119,44 +212,169 @@ sequenceDiagram
   <p><strong>回程</strong>：投影必须发生在<strong>末段</strong>，然后结果沿 output ring 绕回 PP0。所以有了 <code>dflash_pp_result.py</code>——一个带 <code>dflash_result/</code> 前缀的信封，装 bonus token、seq_len、block_size、commit_len。里面每处都 <code>.clone()</code>，注释说明了原因：</p>
   <blockquote>Queued PP outputs must survive subsequent graph/static-buffer reuse.</blockquote>
   <p>即 PP ring 会把包<strong>跨微批排队</strong>，而 worker 的 buffer 会被复用（CUDA graph 静态缓冲），所以必须存快照而非引用。</p>
+  <div class="pick">
+    <h4>为什么回程要「用完立刻 del」</h4>
+    投影后的 context 只有 PP0 的 draft 需要。中间段拿到它没有任何用处，却会占着显存、并且每传一段就多一次
+    ring 上的字节量。<b>跨阶段数据流要显式管理生命周期</b>——这也是为什么 <code>take_projected_context()</code> 之后立刻
+    释放：让这个张量只活在真正需要它的两个端点。
+  </div>
 
   <h3>D. PP0 缺的东西要补</h3>
   <p><code>dflash_pp_lm_head.py</code>（新增）——PP0 上没有 LM head（它只在末段），所以<strong>直接从 checkpoint 单独加载一份不带量化的、按 TP 切分的 <code>lm_head.weight</code></strong>，注释开头就写明了 "for drafting on the <strong>first PP stage</strong>"。同时 <code>_resolve_dflash_embedding_module</code> 会优先用这份副本。</p>
 
-  <h2>三、一个容易漏掉的正确性 bug</h2>
+  <h2 id="pick">三、为什么最终选了「伪造 PP 组」这条路</h2>
+  <p>同样的问题至少有三个解法，选中的这个是最小侵入的：</p>
+  <table>
+    <thead><tr><th>方案</th><th>做法</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="mono">A · 把 draft 也切分</td>
+        <td>6 层按 PP 切成 4 段，每段 1–2 层</td>
+        <td>draft 本来就小，切完每段只剩一两层，<b>通信与同步开销超过算力收益</b>；而且它要的 6 层 hidden 仍要跨段收集，复杂度反而更高</td>
+      </tr>
+      <tr>
+        <td class="mono">B · 每段复制一份 draft</td>
+        <td>四个阶段各放一个完整 draft</td>
+        <td>显存与加载时间 ×4，但<b>只有 PP0 那份会真正工作</b>（draft 的输入 token 在 PP0 就确定了），纯浪费</td>
+      </tr>
+      <tr>
+        <td class="mono">C · 伪造 PP=1 单例组<br>（本次采用）</td>
+        <td>用 <code>world_size=1</code> 的 PP 组替换并行状态，draft 整体留在 PP0</td>
+        <td>PP0 承担全部 draft 计算成为<b>最忙的一段</b>；但改动局限在 scope 与数据流，不碰 draft 内部结构</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="hint">
+    方案的取舍逻辑值得记住：<b>当一个小模块与主框架的并行假设冲突时，优先让它在「自己以为的单卡世界」里运行，
+    而不是把它也切碎</b>——前提是这个小模块的计算量相对于主流程足够小。draft 只有 6 层，正好符合。
+    代价也很清楚：负载会集中到一个阶段上（PP0 busy 25.98s vs 其他段 21.8–23.3s）。
+  </p>
+
+  <h2>四、一个容易漏掉的正确性 bug</h2>
 <pre class="diff"><span class="del">- return PPProxyTensors({k: v[: self.bs] for k, v in output.tensors.items()})</span>
 <span class="add">+ return PPProxyTensors({k: v[: self.raw_num_token] for k, v in output.tensors.items()})</span></pre>
   <p><strong>投机解码下一条请求产生 <code>block_size</code> 个 token 行，按请求数 <code>bs</code> 切片会丢行。</strong>以及 verify 的图预规划：</p>
 <pre><code>if pp_proxy_tensors is not None:
     # Verify planning precedes receipt of the preceding PP stage.
     # Refresh its activations now, even when attention metadata is ready.</code></pre>
-  <p>——<strong>这和 GLM 工作区里 PP+MTP 的 r37 补丁是同一类 bug</strong>（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一个坑在 MTP 和 DFlash 上各踩了一次。</p>
+  <p>——<strong>这和同项目里 PP+MTP 的 r37 补丁是同一类 bug</strong>（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一个坑在 MTP 和 DFlash 上各踩了一次。</p>
+  <div class="pick">
+    <h4>这类 bug 的共同形状</h4>
+    「按请求数分配/切片」的假设在<b>非投机</b>场景下永远成立，所以它能活很久；一旦每个请求携带多个 token 行
+    （verify、block 解码、CUDA graph 预规划），<code>bs</code> 和 <code>num_token</code> 就分道扬镳。
+    同一类错误在新特性上重复出现，说明它值得被写成一条检查项：
+    <b>凡是用 <code>bs</code> 切片激活张量的地方，都要问一句「这里是不是该用 token 行数」。</b>
+  </div>
 
-  <h2>四、配套的调度改动</h2>
+  <h2>五、配套的调度改动</h2>
   <table>
     <thead><tr><th>文件</th><th>改动</th><th>目的</th></tr></thead>
     <tbody>
-      <tr><td><code>scheduler.py</code> (+24/-17)</td><td>DFlash+PP 时不再原地更新 batch 状态，改由 output ring 完成</td><td>"PP completion is handled on the output ring instead"</td></tr>
-      <tr><td><code>scheduler_pp_mixin.py</code> (+94/-22)</td><td>加 <code>dflash_append_plan</code>；收发两侧挂 <code>add_result</code>/<code>restore_result</code>；信封一致性校验</td><td>携带 draft 状态穿过 ring</td></tr>
-      <tr><td>↳ 时序优化</td><td><strong>提前发 proxy</strong>："KV release can synchronize the host. Send the current proxy first so the peer can launch its forward before that wait."</td><td>让下游段早启动</td></tr>
-      <tr><td><code>base_runner.py</code> (+14/-2)</td><td><code>residual_shape</code> 从 <code>(max_bs, hidden)</code> 改为 <code>(max_num_token, hidden)</code>；autotune 时伪造 aux 张量</td><td>verify 每请求多行</td></tr>
-      <tr><td><code>decode_cuda_graph_runner.py</code> (+17/-1)</td><td>图内预分配 <code>dflash_aux_hidden</code> 缓冲</td><td>图捕获需要静态形状</td></tr>
+      <tr><td class="mono">scheduler.py (+24/-17)</td><td>DFlash+PP 时不再原地更新 batch 状态，改由 output ring 完成</td><td>"PP completion is handled on the output ring instead"</td></tr>
+      <tr><td class="mono">scheduler_pp_mixin.py (+94/-22)</td><td>加 <code>dflash_append_plan</code>；收发两侧挂 <code>add_result</code>/<code>restore_result</code>；信封一致性校验</td><td>携带 draft 状态穿过 ring</td></tr>
+      <tr><td class="mono">↳ 时序优化</td><td><strong>提前发 proxy</strong>："KV release can synchronize the host. Send the current proxy first so the peer can launch its forward before that wait."</td><td>让下游段早启动</td></tr>
+      <tr><td class="mono">base_runner.py (+14/-2)</td><td><code>residual_shape</code> 从 <code>(max_bs, hidden)</code> 改为 <code>(max_num_token, hidden)</code>；autotune 时伪造 aux 张量</td><td>verify 每请求多行</td></tr>
+      <tr><td class="mono">decode_cuda_graph_runner.py (+17/-1)</td><td>图内预分配 <code>dflash_aux_hidden</code> 缓冲</td><td>图捕获需要静态形状</td></tr>
     </tbody>
   </table>
 
-  <h2>五、明确未接通的部分（能力边界）</h2>
+  <h2>六、明确未接通的部分（能力边界）</h2>
 <pre><code>if batch.is_extend_in_batch and not batch.forward_mode.is_extend():
     raise RuntimeError('DFlash PP mixed decode/prefill is not connected')
 if forward_batch.can_run_tbo or is_cp_v2_active(...):
     raise NotImplementedError("DFlash PP capture requires unsharded eager rows")</code></pre>
   <p><strong>混合 decode/prefill 微批不支持、TBO/CP 不支持</strong>，加上 <code>--cuda-graph-backend-prefill disabled</code> —— 这些正好对应 profile 里看到的 prefill attention 0% 图覆盖。</p>
+  <p class="hint">
+    把未接通的部分显式写成 <code>raise</code> 而不是「静默走错路径」，是这类适配能被信任的前提：
+    能力边界在代码里可读，而不是留给下一个调试的人去猜。
+  </p>
 
-  <div class="final">
-    <p><strong>一句话概括</strong>：这次适配没碰 DFlash 的算法，而是（1）放开三道禁入护栏，（2）用一个伪造的单例 PP 组让草稿模型在 PP0 上以 PP=1 的视角独立运行，（3）新设计两条跨阶段数据通道——aux hidden 沿 ring 前向累积、投影 context 沿 output ring 绕回——并把 draft 状态装进信封穿环传递，同时补上 PP0 缺失的 LM head 副本。</p>
-    <p>代价也清楚：草稿模型集中在一个阶段，<strong>PP0 因此比其他段忙</strong>（profile 里 PP0 busy 25.98s vs PP1-3 的 21.8~23.3s），且 prefill 放弃了图捕获。</p>
+  <h2 id="myth">常见误解</h2>
+
+  <div class="myth">
+    <div class="w">✗「适配就是删掉那三道断言」</div>
+    <div class="r">删断言只占改动的几行。真正的工作量在数据流：主文件 <b>+590 行</b>，
+      加上调度侧的 <code>+94/-22</code>、runner 的形状修正、以及 PP0 缺失 LM head 的补载。
+      <b>断言是「不许」，而适配要回答「那么该怎么做」。</b></div>
   </div>
 
-  <footer>show-me 知识库 · inference-systems/dflash-pp-adaptation · 重建自会话 sess_0255fd71</footer>
+  <div class="myth">
+    <div class="w">✗「草稿模型会被切分到各个 PP 段，所以 PP 越大 draft 越快」</div>
+    <div class="r">恰恰相反——draft <b>整体留在 PP0</b>，不参与流水。这意味着 PP 段数增加不会加速 draft，
+      反而让 PP0 相对更忙：draft 的计算全部堆在这一段上（实测 PP0 busy 25.98s，比其他段高 10% 以上）。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「折衷方案就是每段都放一份 draft」</div>
+    <div class="r">看起来简单，实际上只有 PP0 那份会被用到：draft 的输入 token 在 PP0 就确定了。
+      其余三份纯占显存与加载时间。所以「复制到处都有」在这里不是冗余换安全，而是纯浪费。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「按请求数切片和按 token 行数切片是一样的」</div>
+    <div class="r">在非投机解码下确实一样（一个请求一行）。一旦进入 verify，一条请求就产生
+      <code>block_size</code> 行——此时按 <code>bs</code> 切会<b>静默丢掉大部分激活值</b>。
+      这类 bug 不会崩溃，只会让结果悄悄变错，所以最值得警惕。</div>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+
+  <details>
+    <summary>1. draft 为什么必须整体待在 PP0，而不是可以任意挑一段？</summary>
+    <div class="ans">因为它的两个端点都在 PP0：<b>输入</b>是待 draft 的 token（在 PP0 就确定了），
+      <b>输出</b>要立刻参与下一轮 verify 的构造（也在 PP0）。把它放在别的段，等于把 draft 的输入输出都变成跨段通信。
+      另外 PP0 有 embedding，缺的只是 LM head——补一份副本比搬整个 draft 便宜得多。</div>
+  </details>
+
+  <details>
+    <summary>2. 为什么 aux hidden 沿去程累积，而投影结果要走回程？</summary>
+    <div class="ans">因为两者的<b>输入依赖方向不同</b>：aux hidden 是各段「本地」中间层的输出，只能各段自己产出，
+      所以沿 ring 正向逐段追加；而投影需要<b>最终层的 hidden</b>（只有末段才有），所以只能在末段算，
+      算完再沿 output ring 送回 PP0 给 draft 用。<b>数据往哪边走，由它的依赖在哪里决定。</b></div>
+  </details>
+
+  <details>
+    <summary>3. 信封里每个张量都 .clone()，不加会出什么问题？</summary>
+    <div class="ans">PP ring 上的包会<b>跨微批排队</b>，而 worker 的缓冲区（尤其 CUDA graph 的静态缓冲）
+      会被后续步骤复用。不加 clone 就是把「引用」放进了队列——等接收方真去读时，
+      同一块内存已经被下一个微批改写，读到的是别人的数据。这类错误往往表现为<b>偶发的、和 batch 组合相关的结果错误</b>。</div>
+  </details>
+
+  <details>
+    <summary>4. 为什么放开护栏要用环境变量门控？</summary>
+    <div class="ans">因为这个能力还不完整（混合微批、TBO/CP 都不支持）。直接删断言会让默认配置也走这条未验证路径，
+      把风险扩散给所有人；门控成开关则让实验能推进、默认行为不变，而且出问题时能一行退回。
+      <b>把上游的「禁止」改成「允许」时，保留一个显式的开关比修改默认值更安全。</b></div>
+  </details>
+
+  <details>
+    <summary>5. 这个适配明确不支持哪些场景？为什么这些限制是合理的？</summary>
+    <div class="ans">不支持<b>混合 decode/prefill 微批</b>、<b>TBO</b> 与 <b>CP</b>，且 prefill 关闭了 CUDA graph。
+      合理性在于：这些路径都会改变「行」的组织方式（谁和谁在一个微批里、行怎么切分），
+      而 aux hidden 的累积与信封传递<b>正是按行组织的</b>。先让主干路径（纯 decode + verify）跑通并用 raise 显式挡住其余路径，
+      比一次性支持所有组合更可靠。<b>能力边界写进代码，比写在文档里更不容易腐烂。</b></div>
+  </details>
+
+  <h2 id="read">延伸阅读</h2>
+  <ul class="links">
+    <li><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener">Fast Inference from Transformers via Speculative Decoding</a>
+      <span class="why">投机解码的原始论文。理解 draft / verify / 接受长度从这里开始。</span></li>
+    <li><a href="https://arxiv.org/abs/2302.01318" target="_blank" rel="noopener">Accelerating Large Language Model Decoding with Speculative Sampling</a>
+      <span class="why">同一时期 DeepMind 的独立工作，给出了「为什么接受/拒绝是无偏的」的统计论证。</span></li>
+    <li><a href="https://www.deepspeed.ai/tutorials/pipeline/" target="_blank" rel="noopener">DeepSpeed · Pipeline Parallelism 教程</a>
+      <span class="why">PP 的基础机制（微批、ring、bubble）讲得最清楚的一份入门材料，本文前置知识 ① 的展开版。</span></li>
+    <li><a href="https://docs.sglang.io/" target="_blank" rel="noopener">SGLang 官方文档</a>
+      <span class="why">文中涉及的 PP 与投机解码参数（<code>--pp-size</code>、<code>--speculative-algorithm</code> 等）的权威出处。</span></li>
+    <li><a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener">sgl-project/sglang</a>
+      <span class="why">文中提到的 <code>speculative_hook.py</code>、<code>scheduler_pp_mixin.py</code>、<code>PPProxyTensors</code> 都在这个仓库里，可对照阅读。</span></li>
+  </ul>
+
+  <div class="final">
+    <p><strong>一句话概括</strong>：这次适配没碰 DFlash 的算法，而是（1）放开三道禁入护栏并给了可退回的开关，（2）用一个伪造的单例 PP 组让草稿模型在 PP0 上以 PP=1 的视角独立运行，（3）新设计两条跨阶段数据通道——aux hidden 沿 ring 前向累积、投影 context 沿 output ring 绕回——并把 draft 状态装进信封穿环传递，同时补上 PP0 缺失的 LM head 副本。</p>
+    <p>代价也清楚：草稿模型集中在一个阶段，<strong>PP0 因此比其他段忙</strong>（profile 里 PP0 busy 25.98s vs 其他段 21.8~23.3s），且 prefill 放弃了图捕获。</p>
+  </div>
+
+  <footer>show-me 知识库 · inference-systems/dflash-pp-adaptation · 由一次内部实验的代码审读整理，模型与工程标识已脱敏</footer>
 </div>
 <script type="module">
   // mermaid 从 CDN 加载;离线时保留源码块可读(降级不报错)

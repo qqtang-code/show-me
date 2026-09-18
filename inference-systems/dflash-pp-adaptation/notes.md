@@ -1,6 +1,8 @@
 # PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流
 
-> 归档说明：2026-09-16 用 show-me 问「PP 适配 DFlash 做了什么改动」时只给了聊天回答，没有落盘。此文件由会话记录 `sess_0255fd71` 逐字重建，代码片段与结论均未改动。
+> 归档说明：2026-09-16 用 show-me 问「PP 适配 DFlash 做了什么改动」时只给了聊天回答，没有落盘；此文件由会话记录重建，代码片段与结论未改动，仅对内部标识做了脱敏。
+>
+> 学习增强版（前置知识、方案取舍、常见误解、自测题）见 [index.html](index.html)。
 
 ## 一、要解决的根本矛盾
 
@@ -22,9 +24,9 @@ assert (cfg.disable_overlap_schedule and cfg.speculative_algorithm is None), \
 
 ## 二、改动分四块
 
-### A. 放开护栏（全部门控在 `HZY_DFLASH_PP_INIT_PROBE=1` 下）
+### A. 放开护栏（全部门控在 `DFLASH_PP_INIT_PROBE=1` 下）
 
-三个文件各 1~4 行，都是 `and os.environ.get("HZY_DFLASH_PP_INIT_PROBE") == "1"` 形式的条件放宽。**没有改算法，只是把禁入改成可入**，且保留开关随时可退回。
+三个文件各 1~4 行，都是 `and os.environ.get("DFLASH_PP_INIT_PROBE") == "1"` 形式的条件放宽。**没有改算法，只是把禁入改成可入**，且保留开关随时可退回。
 
 ### B. 草稿模型不切分——伪造单例 PP 组
 
@@ -109,7 +111,7 @@ if pp_proxy_tensors is not None:
     # Refresh its activations now, even when attention metadata is ready.
 ```
 
-——**这和 GLM 工作区里 PP+MTP 的 r37 补丁是同一类 bug**（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一个坑在 MTP 和 DFlash 上各踩了一次。
+——**这和同项目里 PP+MTP 的 r37 补丁是同一类 bug**（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一个坑在 MTP 和 DFlash 上各踩了一次。
 
 ## 四、配套的调度改动
 

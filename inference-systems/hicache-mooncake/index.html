@@ -21,8 +21,10 @@
   }
   .wrap{max-width:1080px;margin:0 auto}
   h1{font-size:27px;line-height:1.4;margin:0 0 8px;letter-spacing:-.01em;color:#0d1526}
-  h2{font-size:17.5px;margin:0 0 4px;color:#0d1526}
-  .sub{color:var(--dim);font-size:14px;margin:0 0 32px}
+  h2{font-size:17.5px;margin:38px 0 4px;color:#0d1526}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:14.5px}
+  h3.mini{font-size:15.5px;margin:24px 0 4px;color:#0d1526}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 26px}
   .sub code{font-family:var(--mono);font-size:12.5px;color:#12489c;background:#e8eefb;padding:1.5px 6px;border-radius:5px}
   section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 26px;margin-bottom:22px;
           box-shadow:0 1px 2px rgba(16,24,40,.04)}
@@ -87,6 +89,48 @@
        padding:12px 14px;border-radius:0 8px 8px 0;margin-top:16px}
   footer{color:var(--dim2);font:11.5px/1.75 var(--mono);text-align:center;margin-top:28px}
   @media(max-width:760px){.split{grid-template-columns:1fr}}
+
+  /* ================= 学习增强层 ================= */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px}
+  .nav a:hover{color:#175fc4;border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 22px;border:1px solid #dbe3f4;background:#f7f9ff;border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:#175fc4;letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .eq{margin:18px 0;padding:16px 20px;border-radius:12px;background:var(--panel2);border:1px solid var(--line);
+      font:13.5px/2 var(--mono);overflow-x:auto;color:#28374f}
+  .eq .lbl{color:var(--dim2)}
+  .eq .hl{background:#e8f5ee;padding:1px 5px;border-radius:4px;color:#0b6b3f;font-weight:600}
+  .eq hr{border:0;border-top:1px solid var(--line);margin:11px 0}
+  .kicker{display:inline-block;font-size:12px;font-family:var(--mono);background:#eef2f9;color:#3f4c63;
+          padding:3px 9px;border-radius:100px}
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:#fff;padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:#b23a10;font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:#0b6b3f}
+  details{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:#0d1526}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:#0b6b3f}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
+  .links a{color:#175fc4;text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
+  .calc{border:1px solid #dbe3f4;border-radius:12px;background:#f7f9ff;padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:170px 1fr 104px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr;gap:4px}}
+  .calc input[type=range]{width:100%}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff}
+  .calc .out{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:12px;margin-top:16px}
+  .calc .out div{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px}
+  .calc .out .k{font:12px var(--mono);color:var(--dim2)}
+  .calc .out .v{font:19px var(--mono);font-weight:600;margin-top:2px;color:#0d1526}
+  .calc .out .d{font-size:12px;color:#3b4860;margin-top:2px}
+  .calc .out .v.good{color:#0b6b3f}
 </style>
 </head>
 <body>
@@ -94,7 +138,69 @@
   <h1>L1–L4 缓存 与 LLM 推理的 KV 分层<br>HiCache / Mooncake 在 SGLang 里各管什么</h1>
   <p class="sub">同一个思想在两个尺度上的外推：离计算越近 → 越贵、越小、越快。硬件层面是 <code>SMEM/L1 → L2 → L3(LLC) → DRAM/NVMe</code>；推理系统层面是 <code>HBM → Host DRAM → 分布式存储</code>。</p>
 
-  <section>
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#pre">前置知识</a>
+    <a href="#layer">层级阶梯</a>
+    <a href="#math">推导：一 token 多少字节</a>
+    <a href="#sglang">SGLang 三层落地</a>
+    <a href="#calc">动手算</a>
+    <a href="#duty">职责边界</a>
+    <a href="#myth">常见误解</a>
+    <a href="#quiz">自测</a>
+    <a href="#read">延伸阅读</a>
+  </nav>
+
+  <div class="tldr" id="tldr">
+    <h4>速览 · 30 秒</h4>
+    <ul>
+      <li><b>为什么关心缓存层级</b>：decode 每生成一个 token，必须把「全部权重 + 该请求全部 KV」完整读一遍，算术强度只有 1–2 FLOP/Byte，远低于 GPU 的 roofline 拐点 —— 推理是<b>被访存带宽钉死的</b>。</li>
+      <li><b>于是只有三条路</b>：少搬字节（量化/GQA/MLA）、少算一次（前缀复用）、把字节放到更近的层（KV 分层）。HiCache 和 Mooncake 做的是后两条。</li>
+      <li><b>HiCache</b> 是 SGLang 进程内的缓存层级管理器：决定哪份 KV 待在哪一层（GPU / 主机 / 远端），负责提升、降级、预取、回写。</li>
+      <li><b>Mooncake</b> 是集群级的 KV 存储与传输基础设施：把全网 DRAM/SSD 聚合成共享池，是 HiCache 可选的 L3 后端之一，同时还是 PD 分离的默认传输后端。</li>
+      <li><b>记住这一条</b>：跨层搬运之所以成立，是因为它<b>永远比重算便宜</b>——10K token 从主机搬回约 20 ms，重算约 500 ms。</li>
+    </ul>
+  </div>
+
+  <h2 id="pre" style="margin-top:30px">前置知识：四个必须先站稳的概念</h2>
+  <p class="hint">如果下面四点你都清楚，可以直接看 <a href="#layer">层级阶梯</a>。</p>
+
+  <h3 class="mini">① KV Cache 是什么</h3>
+  <p>
+    自回归生成第 t 个 token 时，注意力需要这个请求前面所有 token 的 Key 和 Value。如果每步都重算，
+    生成 N 个 token 就是 O(N²) 次投影。KV Cache 就是把这 N 步算出来的 K/V <b>存下来复用</b>——
+    代价是显存，收益是每步只算 1 个 token 的投影。
+    它的大小<b>只跟层数、KV 头数、精度和上下文长度有关，与模型参数量无关</b>（下一节给出公式）。
+  </p>
+
+  <h3 class="mini">② Prefill 与 Decode 是两种完全不同的负载</h3>
+  <ul>
+    <li><b>Prefill</b>（处理输入）：一次算很多 token，矩阵乘很大 —— 算力受限（compute-bound），GPU 利用率高。</li>
+    <li><b>Decode</b>（逐字生成）：一次只算 1 个 token，却要把全部权重和全部 KV 读一遍 —— 访存受限（memory-bound），算力大量闲置。</li>
+  </ul>
+  <p>两个阶段对缓存的需求也不同：<b>prefill 关心「能不能不重算」，decode 关心「KV 放不放得下、读不读得动」</b>。HiCache 的价值主要落在前者。</p>
+
+  <h3 class="mini">③ 算术强度与 roofline：为什么说是被带宽钉死的</h3>
+  <div class="eq">
+    <span class="kicker">算术强度</span> ≈ 1–2 FLOP / Byte &nbsp;<span class="lbl">（decode 每读一个字节只做一两次乘加）</span><br>
+    <span class="kicker">H100 拐点</span> ≈ 295 FLOP / Byte &nbsp;<span class="lbl">（bf16 989 TFLOPS ÷ HBM 3.35 TB/s）</span><br>
+    <hr>
+    <span class="lbl">→ 差两个数量级：算力在 decode 阶段基本闲置，真正的天花板是 </span><span class="hl">HBM 带宽</span>
+  </div>
+  <p class="hint">
+    补充：批处理能提高算术强度——一次读权重服务多条请求。但<b>KV 的读取量随 batch 线性增长</b>，
+    所以长上下文高并发下，KV 流量本身会变成新的墙。
+  </p>
+
+  <h3 class="mini">④ 前缀复用为什么天然成立</h3>
+  <p>
+    因果注意力下，一个 token 的 K/V <b>只由它自己及其之前的 token 决定</b>，与后面接什么无关。
+    所以两个请求只要开头一段 token 完全相同（同一个 system prompt、同一份 RAG 文档、同一段多轮对话），
+    这段前缀的 KV 就逐字节相同，可以互相复用。这就是 RadixAttention / 前缀缓存的物理基础。
+    它带来一个和普通缓存很不一样的性质：<b>命中不是一个 key 命中与否，而是一棵前缀树上的最长匹配</b>。
+  </p>
+
+  <section id="layer" style="padding:0;border:0;background:none;box-shadow:none;margin:0">
     <span class="tag">A · 为什么推理关心缓存层级</span>
     <h2>逐 token 解码是纯访存瓶颈</h2>
     <p class="hint">decode 一个 token 必须把「全部权重 + 该请求全部 KV」从存储里搬一遍，算术强度只有 ~1–2 FLOP/Byte，而 H100 的 roofline 拐点在 ~295 FLOP/Byte。所以优化只有三条路：<b>少搬字节</b>（量化/GQA/MLA）、<b>少算一次</b>（前缀复用）、<b>把字节放到更近的层</b>（KV 分层）。后两条正是 HiCache / Mooncake 的地盘。</p>
@@ -118,7 +224,49 @@
     <p class="hint" style="margin-top:14px">注意两个「L2」不是一回事：<b>GPU 硬件 L2</b> 是片上 40–50 MB SRAM（FlashAttention 关心的那层）；<b>推理语境里的 L2</b> 指主机 DRAM 缓存层。本文其余部分都用后者。</p>
   </section>
 
-  <section>
+  <h2 id="math" style="margin-top:34px">推导：一个 token 的 KV 到底占多少字节</h2>
+  <p class="hint">这个公式值得背下来，它决定了 L1 能装多少上下文、以及 L2/L3 值不值得开。</p>
+
+  <div class="eq">
+    <span class="kicker">MHA / GQA</span><br>
+    KV 字节/token &nbsp;=&nbsp; 2 × n_kv_heads × head_dim × n_layers × dtype_bytes<br>
+    <span class="lbl">（2 是 K 和 V 各一份；GQA 的 n_kv_heads 是分组后的 KV 头数，不是注意力头数）</span>
+    <hr>
+    <span class="kicker">MLA（DeepSeek 系）</span><br>
+    KV 字节/token &nbsp;=&nbsp; (kv_lora_rank + qk_rope_dim) × n_layers × dtype_bytes<br>
+    <span class="lbl">（压缩成一份 latent：512 + 64 = 576 个元素/层，K 和 V 共享）</span>
+  </div>
+
+  <h3 class="mini">三个算例</h3>
+  <table>
+    <thead><tr><th>模型</th><th>配置</th><th>KV / token</th><th>100K 上下文</th></tr></thead>
+    <tbody>
+      <tr><td>Llama-3-8B</td><td>32 层 · 8 KV 头 · 128 dim · bf16</td><td><b>128 KiB</b></td><td>≈ 12.5 GB</td></tr>
+      <tr><td>Llama-3-70B</td><td>80 层 · 8 KV 头 · 128 dim · bf16</td><td><b>320 KiB</b></td><td>≈ 31.3 GB</td></tr>
+      <tr><td>DeepSeek 系 MLA</td><td>61 层 · 576 元素 · fp8</td><td><b>≈ 34 KiB</b></td><td>≈ 3.4 GB</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">
+    最后一行解释了 MLA 为什么是个大突破：<b>同样 100K 上下文，KV 从 12.5 GB 降到 3.4 GB</b>，
+    相当于把 L1 的有效容量放大约 3.7 倍。在此之前，长上下文服务里最先撞墙的从来不是算力，而是 KV 把显存吃满。
+  </p>
+
+  <h3 class="mini">为什么 L2/L3 值得存在：跨层搬运 vs 重新计算</h3>
+  <div class="eq">
+    <span class="kicker">搬回来</span> 时间 ≈ KV 字节数 ÷ 层间带宽<br>
+    <span class="lbl">10K token × 128 KiB = 1.31 GB ÷ 64 GB/s ≈ </span><span class="hl">20 ms</span><br>
+    <hr>
+    <span class="kicker">重算</span> 时间 ≈ 2 × 参数量 × token 数 ÷ 有效算力<br>
+    <span class="lbl">2 × 8e9 × 1e4 = 1.6e14 FLOP ÷ 3e14 FLOPS ≈ </span><span class="hl">530 ms</span>
+  </div>
+  <p>
+    <b>20 ms 对 530 ms，差 26 倍。</b>这就是 KV 分层的全部经济性来源：只要命中的前缀足够长，
+    从哪怕最慢的一层搬回来，都比重新算一遍便宜。反过来也界定了它的边界——
+    <b>只有被复用的前缀足够长时才算得过来</b>：几十个 token 的前缀，搬运的固定开销（建连、同步、启动）
+    就超过重算了。
+  </p>
+
+  <section id="sglang" style="padding:0;border:0;background:none;box-shadow:none;margin:0">
     <span class="tag">B · SGLang 的三层落地</span>
     <h2>HiCache：把 radix 树从 HBM 延伸到主机与集群</h2>
     <div class="tier gpu">
@@ -159,10 +307,34 @@
   L1 淘汰 → 已 backup 的降级到 L2，未 backup 的按策略补写或直接丢弃
   L2 淘汰 → backup 线程回写 L3</div>
     </div>
-    <p class="hint" style="margin-top:14px">一串具体数字：8B 级 GQA 模型约 131 KB/token 的 KV，10K token 的系统提示 ≈ 1.3 GB；从主机 DRAM 经 PCIe Gen5 搬回约 20 ms，而重算这 10K token 的 prefill 约 0.2–0.5 s。<b>跨层搬运之所以成立，是因为它永远比重新计算便宜。</b></p>
+    <p class="hint" style="margin-top:14px">写策略的选择本质是在<b>带宽</b>和<b>容量</b>之间做交换：write_through 保证被淘汰的前缀都还在 L2/L3（换来一次额外写），write_back 省带宽但淘汰时没备份的就真丢了。所以「前缀会被反复复用」的在线服务更适合默认的 write_through。</p>
   </section>
 
-  <section>
+  <h2 id="calc">动手算：改配置看 KV 与传输时间</h2>
+  <p class="hint">用上一节的公式，拖动滑块看看 KV 有多大、在不同层级上读一遍要多久、以及比重算便宜多少倍。</p>
+
+  <div class="calc">
+    <div class="ctl"><label for="cLayers">层数</label><input id="cLayers" type="range" min="8" max="96" step="1" value="32"><span class="mono" id="cLayersV">32</span></div>
+    <div class="ctl"><label for="cHeads">KV 头数</label><input id="cHeads" type="range" min="1" max="32" step="1" value="8"><span class="mono" id="cHeadsV">8</span></div>
+    <div class="ctl"><label for="cDim">head_dim</label><input id="cDim" type="range" min="64" max="192" step="64" value="128"><span class="mono" id="cDimV">128</span></div>
+    <div class="ctl"><label for="cDtype">精度</label>
+      <select id="cDtype"><option value="2">bf16 / fp16（2 B）</option><option value="1">fp8 / int8（1 B）</option></select>
+      <span class="mono" id="cDtypeV">2 B</span></div>
+    <div class="ctl"><label for="cTok">复用前缀长度</label><input id="cTok" type="range" min="1024" max="131072" step="1024" value="10240"><span class="mono" id="cTokV">10K</span></div>
+    <div class="ctl"><label for="cParams">模型参数量</label><input id="cParams" type="range" min="1" max="70" step="1" value="8"><span class="mono" id="cParamsV">8 B</span></div>
+    <div class="out">
+      <div><div class="k">KV / token</div><div class="v" id="oKvt">—</div><div class="d" id="oKvtD">—</div></div>
+      <div><div class="k">这段前缀的 KV</div><div class="v" id="oTotal">—</div><div class="d">× 复用长度</div></div>
+      <div><div class="k">L1 · HBM 读一遍</div><div class="v good" id="oHbm">—</div><div class="d">3.35 TB/s</div></div>
+      <div><div class="k">L2 · PCIe 读一遍</div><div class="v" id="oPcie">—</div><div class="d">64 GB/s</div></div>
+      <div><div class="k">L3 · 400G RDMA</div><div class="v" id="oRdma">—</div><div class="d">50 GB/s</div></div>
+      <div><div class="k">重算这段 prefill</div><div class="v" id="oRe">—</div><div class="d">2·P·L，30% MFU</div></div>
+      <div><div class="k">搬运 vs 重算</div><div class="v good" id="oRatio">—</div><div class="d">PCIe 路径的比值</div></div>
+    </div>
+    <p class="hint" style="margin-top:12px">有效算力取 30% MFU（H100 bf16 989 TFLOPS 的约三成，即 ≈300 TFLOPS）。prefill 的 FLOPs 用 2·P·L 近似，忽略了注意力的 O(L²) 项——上下文越长这个近似越保守（真实重算只会更慢）。</p>
+  </div>
+
+  <section id="duty" style="padding:0;border:0;background:none;box-shadow:none;margin:0">
     <span class="tag">C · 职责边界</span>
     <h2>HiCache 是策略层，Mooncake 是数据面</h2>
     <div class="split">
@@ -199,7 +371,129 @@
     <p class="one">一句话：<b>HiCache 回答「这份 KV 现在最该待在哪一层」，Mooncake 回答「这些 KV 在哪个节点的哪块内存/盘上，怎么几毫秒搬过来」。</b>前者像 CPU 的 cache 替换策略 + 页缓存逻辑，后者像分布式内存设备加一台 DMA 引擎。</p>
   </section>
 
-  <footer>基于本地分支 /Users/qqtang/Desktop/research/是石科技/DeepseekV4/sglang 的代码核对 · SGLang HiCache / Mooncake Store 集成</footer>
+  <h2 id="myth">常见误解</h2>
+
+  <div class="myth">
+    <div class="w">✗「推理里的 L1/L2 就是 CPU/GPU 的 L1/L2 硬件缓存」</div>
+    <div class="r">两套命名只是借用了同一套直觉（越近越快越小）。<b>推理里的 L1 = GPU 显存、L2 = 主机内存、L3 = 远端存储</b>，
+      按「数据要跨几种介质才能到 SM」划分；而 GPU 片上那个 40–50 MB 的硬件 L2 是另一回事。
+      同一份文档里出现「L2」时，先看它在说带宽还是说容量——说容量时基本就是主机内存那一层。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「HiCache 和 Mooncake 是一回事，都是 KV 缓存方案」</div>
+    <div class="r">它们是<b>正交的两层</b>：HiCache 是 SGLang 内部的策略层，Mooncake 是外部的数据面。
+      证据很直接——HiCache 的 L3 后端可以换成 hf3fs / NIXL / 本地文件而不改上层逻辑；
+      Mooncake 也可以完全不参与缓存层级，只做 PD 分离的 KV 搬运。把两者当作「一个东西的两种叫法」是最常见的误解。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「KV 放到主机内存就能提升吞吐」</div>
+    <div class="r">要看命中率和访问模式。<b>用 L2 的 KV 服务 decode 是亏的</b>——PCIe 64 GB/s 对比 HBM 3.35 TB/s，
+      每步都要读全部 KV 会把 TPOT 拖垮。L2/L3 的真正价值在 <b>prefill 复用</b>：
+      用一次 20 ms 的搬运换掉 500 ms 的重算。搞错这一点，就会得出「开了 HiCache 反而更慢」的结论。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「命中率就是命中的请求比例」</div>
+    <div class="r">前缀缓存里命中是<b>最长前缀匹配</b>：一次请求命中 8000 token 后又分叉，剩下的部分仍要重算。
+      所以有效指标不是「多少请求命中」，而是<b>命中的 token 数占总 token 数的比例</b>——
+      一个 90% 请求命中、但每次只命中 100 token 的系统，收益接近于零。</div>
+  </div>
+
+  <h2 id="quiz">自测：能答上这五题就算懂了</h2>
+
+  <details>
+    <summary>1. 用公式估算：40 层、8 个 KV 头、head_dim 128、bf16 的模型，64K 上下文的 KV 占多少显存？</summary>
+    <div class="ans">2 × 8 × 128 × 40 × 2 B = <b>163840 B ≈ 160 KiB/token</b>。
+      64K 上下文 = 65536 × 160 KiB ≈ <b>10.5 GB</b>。一张 80 GB 卡上，权重之外能留给 KV 的空间就是这么被吃掉的。</div>
+  </details>
+
+  <details>
+    <summary>2. MLA 和 GQA 都在「把 KV 变小」，思路差在哪？</summary>
+    <div class="ans">GQA 是<b>让多个注意力头共享同一组 K/V</b>（在头维度上做减法），MLA 是<b>把 K/V 压缩成低秩 latent</b>
+      （在特征维度上做减法，用时再投影回来）。两者可以叠加，但代价不同：GQA 几乎不增计算，
+      MLA 的投影要在每层做矩阵乘——它把成本从「显存带宽」搬到了「算力」，而算力恰恰是 decode 阶段闲着的那部分。</div>
+  </details>
+
+  <details>
+    <summary>3. 一个请求命中了 8000 token 的前缀，为什么还可能比不命中更慢？</summary>
+    <div class="ans">如果这 8000 token 在 L2/L3 上，加载要走 PCIe/RDMA：8000 × 128 KiB = 1 GB，按 64 GB/s 要 <b>15.6 ms</b>。
+      若此刻这批请求重算成本本来就不高（小 batch、算力空闲），或者预取没赶上调度（请求在等 IO），
+      这笔搬运就白花了甚至更贵。所以 HiCache 要配 prefetch 策略与超时终止——
+      <b>超时后放弃预取、直接重算</b>，正是为了防止慢速 L3 拖垮调度。</div>
+  </details>
+
+  <details>
+    <summary>4. write_through 和 write_back 分别在什么场景下更优？</summary>
+    <div class="ans"><b>write_through</b>：写完立刻下沉到 L2/L3，任何时刻被淘汰都不丢——适合前缀会被跨请求反复复用、且 PCIe/RDMA 带宽有余量的在线服务。
+      <b>write_back</b>：只写 L1，等淘汰时再下沉——省写带宽，但淘汰时来不及备份的节点就真丢了，适合复用概率低的一次性长上下文。
+      <b>write_through_selective</b> 是折中：短前缀不写（写了也不值），足够长的才写。</div>
+  </details>
+
+  <details>
+    <summary>5. 如果集群里所有实例共享同一个 Mooncake 池，命中率会怎么变？代价是什么？</summary>
+    <div class="ans">命中率显著上升——<b>缓存边界从单个实例扩大到整个集群</b>，同一份 system prompt 在整个集群里只需付一次 prefill。
+      代价：① 命中延迟变高（RDMA 往返，需要预取来掩盖）；② 网络成为共享资源，KV 流量会和 MoE 的 all-to-all 抢带宽；
+      ③ 要处理一致性与故障（对象过期、节点掉线），这正是 Mooncake 里 Master/租约机制存在的原因。</div>
+  </details>
+
+  <h2 id="read">延伸阅读</h2>
+  <ul class="links">
+    <li><a href="https://docs.sglang.io/advanced_features/hicache_design.html" target="_blank" rel="noopener">SGLang · HiCache 设计文档</a>
+      <span class="why">本文 B 节的官方版本：L1/L2/L3 分层、写策略与预取策略的完整定义。</span></li>
+    <li><a href="https://kvcache-ai.github.io/Mooncake/design/hicache-design.html" target="_blank" rel="noopener">Mooncake × SGLang HiCache 系统设计</a>
+      <span class="why">两份设计文档对照读，最容易看清「策略层 / 数据面」的分界线。</span></li>
+    <li><a href="https://arxiv.org/abs/2407.00079" target="_blank" rel="noopener">Mooncake: A KVCache-centric Disaggregated Architecture</a>
+      <span class="why">KVCache 为中心的分离式架构原始论文，讲清了为什么要把 KV 做成集群级资源。</span></li>
+    <li><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang / RadixAttention 论文</a>
+      <span class="why">前缀树为什么是前缀缓存的自然数据结构，看 Fig.2 就够。</span></li>
+    <li><a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">PagedAttention / vLLM 论文</a>
+      <span class="why">分页管理 KV 的起点，理解「页」这个粒度怎么来的——HiCache 的 L2 搬运也是按页。</span></li>
+    <li><a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener">FlashAttention</a>
+      <span class="why">把「缓存层级」讲进算法内核的那篇：为什么分块能减少 HBM 流量，是本文所有论证的原型。</span></li>
+    <li><a href="https://github.com/kvcache-ai/Mooncake" target="_blank" rel="noopener">kvcache-ai/Mooncake</a>
+      <span class="why">代码与文档入口，含集成指南与 benchmark 结果。</span></li>
+  </ul>
+
+  <footer>
+    基于本地 SGLang 开发分支的代码核对（HiCache 前缀树、缓存控制器、L3 存储接口、Mooncake store 后端）· 带宽与规格数字取公开参数，未含未公开的工程配置
+  </footer>
 </div>
+<script>
+(function(){
+  var HBM = 3.35e12, PCIE = 64e9, RDMA = 50e9, FLOPS = 3e14;   // 3.35 TB/s · 64 GB/s · 50 GB/s · 30% MFU ≈ 300 TFLOPS
+  var el = function(id){ return document.getElementById(id); };
+  var L = el('cLayers'), H = el('cHeads'), D = el('cDim'), T = el('cDtype'), N = el('cTok'), P = el('cParams');
+  function bytes(b){ return b>=1e9 ? (b/1e9).toFixed(2)+' GB' : b>=1e6 ? (b/1e6).toFixed(1)+' MB' : (b/1e3).toFixed(0)+' KB'; }
+  function time(s){
+    if (s >= 1) return s.toFixed(2)+' s';
+    if (s >= 1e-3) return (s*1e3).toFixed(s*1e3<10?1:0)+' ms';
+    return (s*1e6).toFixed(0)+' μs';
+  }
+  function upd(){
+    var layers=+L.value, heads=+H.value, dim=+D.value, dt=+T.value, toks=+N.value, params=+P.value;
+    var perTok = 2*heads*dim*layers*dt;
+    var total = perTok*toks;
+    var re = 2*params*1e9*toks/FLOPS;
+    el('cLayersV').textContent = layers;
+    el('cHeadsV').textContent = heads;
+    el('cDimV').textContent = dim;
+    el('cDtypeV').textContent = dt+' B';
+    el('cTokV').textContent = toks >= 1024 ? (toks/1024).toFixed(toks<10240?1:0)+'K' : toks;
+    el('cParamsV').textContent = params+' B';
+    el('oKvt').textContent = perTok>=1024 ? (perTok/1024).toFixed(0)+' KiB' : perTok+' B';
+    el('oKvtD').textContent = '2 × '+heads+' × '+dim+' × '+layers+' × '+dt+'B';
+    el('oTotal').textContent = bytes(total);
+    el('oHbm').textContent = time(total/HBM);
+    el('oPcie').textContent = time(total/PCIE);
+    el('oRdma').textContent = time(total/RDMA);
+    el('oRe').textContent = time(re);
+    el('oRatio').textContent = (re/(total/PCIE)).toFixed(1)+'×';
+  }
+  [L,H,D,T,N,P].forEach(function(x){ x.addEventListener('input', upd); });
+  upd();
+})();
+</script>
 </body>
 </html>

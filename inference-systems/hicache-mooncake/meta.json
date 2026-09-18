@@ -7,10 +7,11 @@
   "one_liner": "用存储层级的容量/带宽阶梯解释 decode 为什么是纯访存瓶颈；SGLang HiCache 把 radix 树从 HBM 延伸到主机与集群，Mooncake 是其中一种 L3 实现（同时还是 PD 分离的默认传输后端），二者是策略层与数据面的正交关系。",
   "artifact": "index.html",
   "extra_files": [],
-  "session_id": "sess_028051f7-061f-4ed4-ae09-2e0f7bd6f263",
-  "cwd": "/Users/qqtang/.zcode/workspace/default",
+  "session_ref": "sess_028051f7",
   "sources": [
-    "本地 SGLang 分支代码核对：mem_cache/hiradix_cache.py、managers/cache_controller.py、mem_cache/hicache_storage.py、storage/mooncake_store/README.md"
+    "公开资料为主：SGLang HiCache 设计文档、Mooncake 论文与集成文档、RadixAttention / PagedAttention / FlashAttention 论文",
+    "辅以本地 SGLang 开发分支的代码核对（前缀树、缓存控制器、L3 存储接口）"
   ],
-  "visibility": "public-ok"
+  "visibility": "public",
+  "enriched": "2026-09-19"
 }
