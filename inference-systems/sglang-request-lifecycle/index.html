@@ -109,6 +109,10 @@
   .band .dense{background:linear-gradient(180deg,#bcd0f0,#dbe7fb);flex:3}
   .band .moe{background:linear-gradient(180deg,#8fd8c4,#c6efe3);flex:75}
   .band .mtp{background:linear-gradient(180deg,#f3c168,#fbe0ab);flex:1}
+  /* 3 / 75 / 1 是等比条：两侧太窄放不下字，标签一律交给下方图例 */
+  .bandlegend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--dim);margin:12px 0 0}
+  .bandlegend span{display:inline-flex;align-items:center;gap:6px}
+  .bandlegend i{width:11px;height:11px;border-radius:3px;flex:none;border:1px solid var(--line)}
   .layerzoom{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   @media (max-width:700px){.layerzoom{grid-template-columns:1fr}}
   .box{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px}
@@ -451,11 +455,15 @@
   <h3 class="mini">78 层的结构</h3>
   <div class="stack">
     <div class="band">
-      <div class="dense">dense ×3</div>
-      <div class="moe">MoE + DSA 交替 ×75</div>
-      <div class="mtp">MTP ×1</div>
+      <div class="dense" title="dense FFN ×3"></div>
+      <div class="moe" title="MoE + DSA 交替 ×75"></div>
+      <div class="mtp" title="MTP ×1（EAGLE draft）"></div>
     </div>
-    <p class="hint" style="margin-top:2px">前 3 层是普通 dense FFN（保持 bf16），中间 75 层是 MoE（routed 专家 NVFP4），最后 1 层 MTP 被当作 EAGLE 的 draft 模型。</p>
+    <p class="bandlegend">
+      <span><i style="background:linear-gradient(180deg,#bcd0f0,#dbe7fb)"></i>前 3 层：普通 dense FFN（保持 bf16）</span>
+      <span><i style="background:linear-gradient(180deg,#8fd8c4,#c6efe3)"></i>中间 75 层：MoE（routed 专家 NVFP4）+ DSA 交替</span>
+      <span><i style="background:linear-gradient(180deg,#f3c168,#fbe0ab)"></i>最后 1 层：MTP，当作 EAGLE 的 draft 模型</span>
+    </p>
     <div class="layerzoom">
       <div class="box">
         <h5>每个 MoE 层内部</h5>

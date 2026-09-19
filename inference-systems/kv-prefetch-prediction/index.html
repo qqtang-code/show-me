@@ -100,6 +100,13 @@
   .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--dim);margin-top:6px}
   .legend span{display:inline-flex;align-items:center;gap:6px}
   .legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+  /* 窄屏：条内文字放不下，改为纯色条 + 下方图例，绝不裁字 */
+  .legend-narrow{display:none}
+  @media (max-width:660px){
+    .legend-narrow{display:flex;flex-wrap:wrap;gap:7px 16px;font-size:12.5px;color:var(--dim);margin-top:12px}
+    .legend-narrow span{display:inline-flex;align-items:center;gap:6px}
+    .legend-narrow i{width:11px;height:11px;border-radius:3px;flex:none;border:1px solid var(--line)}
+  }
 
   /* ---------- 象限图 ---------- */
   .quad{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px 18px 14px;margin:16px 0}
@@ -206,6 +213,11 @@
   footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
   footer a{color:var(--accent);text-decoration:none}
   footer a:hover{text-decoration:underline}
+
+  /* 放在样式表末尾：同权重时后写的生效，窄屏一律不裁条内文字 */
+  @media (max-width:660px){
+    .tl .track i,.lane2 .strip i,.stack2 .sbar i{font-size:0}
+  }
 </style>
 </head>
 <body>
@@ -470,18 +482,24 @@
     <h4 class="micro" style="margin-top:0">机制：Forecast 把"选择"提前一层，预取压进计算里</h4>
     <div class="lane2"><span class="who2">层 l</span>
       <div class="strip">
-        <i class="seg-forecast" style="left:0;width:18%">Forecast → 层 l+1 的 block 列表</i>
-        <i class="seg-attn" style="left:18%;width:82%">层 l 的稀疏注意力计算</i>
+        <i class="seg-forecast" style="left:0;width:26%">Forecast 预测</i>
+        <i class="seg-attn" style="left:26%;width:74%">层 l 的稀疏注意力计算</i>
       </div></div>
     <div class="lane2"><span class="who2">PCIe / 传输</span>
       <div class="strip">
-        <i class="seg-pf" style="left:18%;width:42%">预取层 l+1 需要的 KV block</i>
-        <i style="left:60%;width:40%;background:linear-gradient(180deg,#dbeafe,#eff6ff);color:#5b6a82">（与计算重叠）</i>
+        <i class="seg-pf" style="left:26%;width:40%">预取层 l+1 需要的 KV block</i>
+        <i style="left:66%;width:34%;background:linear-gradient(180deg,#dbeafe,#eff6ff);color:#5b6a82">（与计算重叠）</i>
       </div></div>
     <div class="lane2"><span class="who2">层 l+1</span>
       <div class="strip">
-        <i class="seg-attn" style="left:60%;width:40%">层 l+1 计算时数据已就位</i>
+        <i class="seg-attn" style="left:66%;width:34%">层 l+1 计算时数据已就位</i>
       </div></div>
+    <div class="legend-narrow">
+      <span><i class="seg-forecast"></i>Forecast 预测：输出层 l+1 要读的 block 列表</span>
+      <span><i class="seg-attn"></i>稀疏注意力计算</span>
+      <span><i class="seg-pf"></i>预取传输（压在层 l 的计算里）</span>
+      <span><i style="background:linear-gradient(180deg,#dbeafe,#eff6ff)"></i>空档</span>
+    </div>
     <p class="hint" style="margin-bottom:0">
       代价控制有两处设计：<b>只训 Forecast</b>（&lt;0.5% 参数），用 KL 散度对齐原 selector 的 block-attention 分布，基座不动；
       因为 Forecast 与 query 解耦，<b>GQA 下每个 GQA 组只要一个 forecast head</b>，比原来的多头 selector 更省。
@@ -511,6 +529,12 @@
       <div class="sbar"><i class="s-kv" style="width:34%">GPU 常驻的稀疏 KV + 选中状态</i><i class="s-aux" style="width:26%">aux 状态（landmarks/索引）</i><i class="s-rest" style="width:40%">权重 / 运行时缓冲</i></div></div>
     <div class="srow"><div class="slabel">DualDecoder：预测取代存储</div>
       <div class="sbar"><i class="s-kv" style="width:34%">GPU 常驻的稀疏 KV + 选中状态</i><i class="s-save" style="width:26%">省下的 aux 状态（改为预测）</i><i class="s-rest" style="width:40%">权重 / 运行时缓冲</i></div></div>
+    <div class="legend-narrow">
+      <span><i class="s-kv"></i>GPU 常驻的稀疏 KV + 选中状态</span>
+      <span><i class="s-aux"></i>aux 状态（landmarks / 检索索引）</span>
+      <span><i class="s-save"></i>DualDecoder 省下的部分（改为预测）</span>
+      <span><i class="s-rest"></i>权重 / 运行时缓冲</span>
+    </div>
     <p class="hint" style="margin-bottom:0">
       它的价值主张不是"省传输"，而是<b>省掉为了传输而存在的那份元数据</b>——这份账在常规评测里几乎总是被漏掉。
     </p>
