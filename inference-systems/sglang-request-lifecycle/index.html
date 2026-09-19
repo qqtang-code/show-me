@@ -583,7 +583,7 @@
     <div class="lane3">
       <div class="hd"><span class="t">① stock CAR / 1-stage bf16（改造前）</span><span class="n">每 rank 收 (N−1)·P = 7P</span></div>
       <div class="bytes"><i class="b1" style="width:100%"></i></div>
-      <p class="hint" style="margin:0">NCCL 广播式归约，每张卡收 7 份完整 bf16 载荷。这是本部署最初 57% kernel 时间所在的那条路径（详见<a href="../comm-parallel/allreduce-1stage-vs-2stage/index.html">另一篇</a>）。</p>
+      <p class="hint" style="margin:0">NCCL 广播式归约，每张卡收 7 份完整 bf16 载荷。这是本部署最初 57% kernel 时间所在的那条路径（详见<a href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html">另一篇</a>）。</p>
     </div>
     <div class="lane3">
       <div class="hd"><span class="t">② 2-stage bf16（reduce-scatter + all-gather）</span><span class="n">1.75P · 4× 更少</span></div>
@@ -832,7 +832,7 @@
     <li><a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener">FlashAttention</a>
       <span class="why">「IO-aware」思路的源头，理解为什么 decode 是访存瓶颈、为什么分块与稀疏能省字节。</span></li>
     <li><a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html" target="_blank" rel="noopener">NCCL · Collectives</a>
-      <span class="why">all-reduce 的等价算法与选路逻辑，配合<a href="../comm-parallel/allreduce-1stage-vs-2stage/index.html">AllReduce 那篇</a>看更清楚。</span></li>
+      <span class="why">all-reduce 的等价算法与选路逻辑，配合<a href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html">AllReduce 那篇</a>看更清楚。</span></li>
     <li><a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener">sgl-project/sglang</a>
       <span class="why">本页提到的 <code>scheduler.py</code>、<code>schedule_policy.py</code>、<code>schedule_batch.py</code>、<code>speculative/eagle_worker_v2.py</code>、<code>layers/attention/dsa_backend.py</code> 都在这个仓库里。</span></li>
   </ul>

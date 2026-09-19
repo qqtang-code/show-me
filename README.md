@@ -25,6 +25,8 @@
 ```
 show-me/
 ├── build_index.py             # 扫 meta.json → 重建 README 表格与门户 index.html
+├── build_index.py             # 扫 meta.json → 重建 README 表格与门户 index.html
+├── check_links.py             # 校验所有页面的相对链接是否可达（sync.sh 会自动跑）
 ├── sync.sh                    # commit + push（skill 每次写完自动调用）
 ├── <category>/<slug>/
 │   ├── index.html             # 产物本体（固定文件名）
@@ -53,6 +55,7 @@ show-me/
 ```bash
 open index.html                 # 打开门户（搜索 + 标签筛选）
 python3 build_index.py          # 新增/修改 meta.json 后重建索引
+python3 check_links.py          # 链接体检（sync.sh 里也会自动跑）
 bash sync.sh "show-me: <主题>"   # 提交并推送（幂等；无改动时不产生空提交）
 ```
 

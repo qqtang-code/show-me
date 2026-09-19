@@ -8,6 +8,11 @@ msg="${1:-show-me: update}"
 
 python3 build_index.py >/dev/null
 
+# 链接体检：跨分类引用最容易少退一级，坏了要立刻看见（只告警，不阻断提交）
+if ! python3 check_links.py; then
+  echo "sync: ⚠ 上面这些链接是坏的，页面已提交但读者会点到 404 —— 建议先修再继续" >&2
+fi
+
 git add -A
 if git diff --cached --quiet; then
   echo "sync: 无改动，跳过"
