@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>3 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-18</span></p>
+  <p class="statline"><span>4 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-19</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -90,6 +90,27 @@
 </div>
 <script>
 const ENTRIES = [
+  {
+    "title": "SGLang 推理全流程：一条请求从进到出的每一步",
+    "slug": "sglang-request-lifecycle",
+    "category": "inference-systems",
+    "date": "2026-09-19",
+    "tags": [
+      "SGLang",
+      "调度",
+      "DSA 稀疏注意力",
+      "MoE",
+      "NVFP4",
+      "投机解码",
+      "CUDA Graph",
+      "量化 AllReduce",
+      "连续批处理"
+    ],
+    "one_liner": "以一台 8 卡 PCIe 单机的 GLM 系列 MoE 部署（TP8 · DSA · NVFP4 · EAGLE · 270K 上下文）为例，把一条请求从 HTTP 接入到流式输出的五段流程拆开讲：调度器每轮怎么组批、78 层里到底算了什么、每轮上百次 all-reduce 怎么被压下去、容量与延迟各由什么决定。",
+    "artifact": "index.html",
+    "_dir": "inference-systems/sglang-request-lifecycle",
+    "extra_files": []
+  },
   {
     "title": "L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么",
     "slug": "hicache-mooncake",

@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>SGLang 推理全流程：一条请求从进到出的每一步</title>
+<style>
+  /* ============ 全站共用设计变量（三篇保持一致） ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:3px 0;display:flex;justify-content:space-between;gap:14px;text-align:right}
+    td::before{content:attr(data-label);color:var(--dim2);font-size:12px;text-align:left;flex:none;font-family:-apple-system,sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none}
+  }
+
+  /* ---------- 流程图组件 ---------- */
+  .flow{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .flow .step{display:grid;grid-template-columns:26px 1fr;gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52}
+  .flow .step .t b{color:var(--ink)}
+  .flow .step .t .sub2{display:block;color:var(--dim);font-size:13px;margin-top:3px}
+  .flow .step .t .where{font:11.5px var(--mono);color:var(--dim2);margin-top:4px;display:block}
+
+  .topo{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px;margin:16px 0}
+  .prow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+  .prow .lbl{font:11.5px var(--mono);color:var(--dim2);min-width:104px}
+  .node{border:1px solid #cfd8e8;background:#f7f9ff;border-radius:8px;padding:6px 11px;
+        font:12px var(--mono);color:#1b2740;flex:none}
+  .node.hot{background:#e8eefb;border-color:#b9cdf0;font-weight:600}
+  .node.gpu{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .arrowdown{text-align:center;color:var(--dim2);font-size:14px;margin:2px 0}
+  .pciegroup{display:flex;gap:6px;padding:8px;border:1px dashed #c9d6ea;border-radius:10px;background:#fbfcff}
+
+  .stack{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .band{display:flex;gap:3px;margin:10px 0}
+  .band div{height:38px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+            font:11px var(--mono);color:#0b1220;overflow:hidden}
+  .band .dense{background:linear-gradient(180deg,#bcd0f0,#dbe7fb);flex:3}
+  .band .moe{background:linear-gradient(180deg,#8fd8c4,#c6efe3);flex:75}
+  .band .mtp{background:linear-gradient(180deg,#f3c168,#fbe0ab);flex:1}
+  .layerzoom{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+  @media (max-width:700px){.layerzoom{grid-template-columns:1fr}}
+  .box{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px}
+  .box h5{margin:0 0 6px;font:600 12.5px var(--mono);color:#1b2740;letter-spacing:.03em}
+  .box ul{margin:0;padding-left:16px;font-size:13px;color:#3b4860}
+  .box li{margin:3px 0}
+
+  .dsa{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+  @media (max-width:700px){.dsa{grid-template-columns:1fr}}
+  .keys{display:flex;flex-wrap:wrap;gap:3px;margin:8px 0}
+  .keys i{width:11px;height:11px;border-radius:3px;background:#e2e8f4;display:block}
+  .keys i.sel{background:#1d4ed8}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:8px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+
+  .lanes3{display:grid;grid-template-columns:1fr;gap:10px;margin:16px 0}
+  .lane3{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 14px}
+  .lane3 .hd{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between}
+  .lane3 .hd .t{font:600 13px var(--mono);color:#1b2740}
+  .lane3 .hd .n{font:12.5px var(--mono);color:var(--dim)}
+  .bytes{display:flex;height:22px;border-radius:5px;overflow:hidden;margin:9px 0 4px;border:1px solid var(--line)}
+  .bytes i{display:block;height:100%}
+  .bytes .b1{background:#f0a184} .bytes .b2{background:#f5c99b} .bytes .b3{background:#a8ecc4}
+  .bytes .b4{background:#cfe3fb} .bytes .b5{background:#e6ecf8}
+
+  .spec{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .specrow{display:flex;gap:4px;align-items:center;margin:8px 0}
+  .specrow .s{flex:1;height:30px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+              font:11.5px var(--mono);color:#0b1220;border:1px solid #00000010}
+  .specrow .draft{background:#dbe7fb}
+  .specrow .verify{background:#a8ecc4}
+  .specrow .acc{background:#8fd8c4}
+  .specrow .rej{background:#f6d5cd;color:#8a3a1c}
+
+  .buckets{display:flex;gap:5px;align-items:flex-end;height:70px;margin:10px 0}
+  .buckets div{flex:1;background:linear-gradient(180deg,#7db3f0,#cfe3fb);border-radius:4px 4px 0 0;
+               position:relative}
+  .buckets div span{position:absolute;bottom:-19px;left:0;right:0;text-align:center;font:10.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 计算器 ---------- */
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:180px 1fr 104px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr 1fr;gap:6px 10px}
+    .calc .ctl label{grid-column:1/-1}.calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent)}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff;color:var(--fg)}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,1fr)}
+  .calc .row.g3{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:1fr}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:18px/1.35 var(--mono);font-weight:600;color:var(--ink)}
+  .calc .cell .v.good{color:var(--good)} .calc .cell .v.warn{color:var(--waste)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .upd{font-size:12.5px;color:var(--dim);margin-top:14px}
+  .verdictbox{margin-top:14px;border-radius:10px;padding:11px 14px;font-size:13.5px;border:1px solid}
+  .verdictbox.ok{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .verdictbox.no{background:#fff4ec;border-color:#f0d9c8;color:#9a4d06}
+
+  /* ---------- 误区 / 自测 / 链接 ---------- */
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:11px 14px;font-size:13.5px;color:#4a3a1c;margin:16px 0}
+
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>inference-systems<span class="sep">/</span>sglang-request-lifecycle
+  </div>
+  <h1>SGLang 推理全流程：一条请求从进到出的每一步</h1>
+  <p class="sub">以一台 8 卡 PCIe 单机上的 GLM 系列 MoE 部署为例：TP8 · DSA 稀疏注意力 · NVFP4 专家 · EAGLE 投机解码 · 270K 上下文</p>
+  <div class="metarow">
+    <span>2026-09-19</span><span>SGLang</span><span>调度</span><span>DSA 稀疏注意力</span>
+    <span>MoE</span><span>NVFP4</span><span>投机解码</span><span>CUDA Graph</span><span>量化 AllReduce</span>
+  </div>
+
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#deploy">部署样例</a>
+    <a href="#pre">前置</a>
+    <a href="#topo">进程与拓扑</a>
+    <a href="#life">生命周期</a>
+    <a href="#sched">调度器</a>
+    <a href="#fwd">一次前向</a>
+    <a href="#dsa">DSA</a>
+    <a href="#moe">MoE 与量化</a>
+    <a href="#ar">TP8 通信</a>
+    <a href="#spec">投机解码</a>
+    <a href="#graph">CUDA Graph</a>
+    <a href="#cap">容量账</a>
+    <a href="#lat">延迟</a>
+    <a href="#myth">误解</a>
+    <a href="#quiz">自测</a>
+    <a href="#read">阅读</a>
+  </nav>
+
+  <div class="tldr" id="tldr">
+    <h4>速览 · 30 秒</h4>
+    <ul>
+      <li><b>一条请求走五段</b>：接入（分词/模板）→ 排队等待 → 调度（组批 + 分配 KV）→ 前向（78 层 × 【稀疏注意力 + MoE】× TP8 通信）→ 采样输出（流式回传）。</li>
+      <li><b>四个进程组</b>：TokenizerManager（收 HTTP）、Scheduler（兼 TP rank0）、7 个 TP worker 进程（每卡一个）、DetokenizerManager。GPU 上真正跑的是后两类。</li>
+      <li><b>每轮 decode 的真实代价</b>不在算力，而在<b>访存</b>：读 78 层权重 + 全部 KV + 每层两次 all-reduce。所以这套部署的每个参数都在减少这三项的字节数。</li>
+      <li><b>这套部署的三个关键取舍</b>：DSA 把注意力从「看全部 270K 个 key」压到「看 2048 个」；NVFP4 只压在占权重 95% 的专家上；量化 AllReduce 在 16 MB 以上的消息上把通信字节再砍一半。</li>
+      <li><b>记住这条链路</b>：参数 → 每轮搬多少字节 → 每轮多久 → 吞吐。任何一个参数都能被追到这条链上。</li>
+    </ul>
+  </div>
+
+  <h2 id="deploy">样例部署速查（本文所有数字都基于它）</h2>
+  <p class="lead">一台 8 卡 PCIe 单机（PCIe only，无 NVLink），TP8 单实例，对外一个 30000 端口。</p>
+
+  <h4 class="micro">并行与资源</h4>
+  <table>
+    <thead><tr><th>参数</th><th>值</th><th>为什么是这个值</th></tr></thead>
+    <tbody>
+      <tr><td class="k">--tp</td><td class="v">8</td><td>8 卡全用上做张量并行；无 DP attention、无 EP —— 单实例，只切张量。</td></tr>
+      <tr><td class="k">--mem-fraction-static</td><td class="v">0.90</td><td>把每卡 90% 显存划给「权重 + KV 池 + CUDA graph 缓冲」，留 10% 给激活峰值与碎片。</td></tr>
+      <tr><td class="k">--context-length</td><td class="v">270336</td><td>= 264K token。这是路由与 RoPE 的上限，不是每请求都会用满；真正能同时开多少长上下文由 KV 池决定。</td></tr>
+      <tr><td class="k">--max-running-requests</td><td class="v">64</td><td>单轮 decode 批内最多 64 条请求。它与 KV 池共同决定并发上限，谁先到就是谁。</td></tr>
+      <tr><td class="k">--chunked-prefill-size</td><td class="v">8192</td><td>一条长请求的 prefill 被切成 8192 token 的块，避免一次占满算力把 decode 饿死。</td></tr>
+      <tr><td class="k">--max-prefill-tokens</td><td class="v">16384</td><td>单个批次里 prefill token 总量上限，是 chunk 的两倍：允许一轮装两个 chunk。</td></tr>
+    </tbody>
+  </table>
+
+  <h4 class="micro">注意力 DSA 与 KV</h4>
+  <table>
+    <thead><tr><th>参数</th><th>值</th><th>为什么是这个值</th></tr></thead>
+    <tbody>
+      <tr><td class="k">--attention-backend</td><td class="v">dsa</td><td>prefill 与 decode 都走 <code>flashinfer_sparse_mla</code>：稀疏选择 + MLA 压缩 KV。</td></tr>
+      <tr><td class="k">--dsa-topk-backend</td><td class="v">sgl-kernel</td><td>top-k 选择用 sgl-kernel 里的融合算子，避免把打分矩阵物化回显存。</td></tr>
+      <tr><td class="k">--kv-cache-dtype</td><td class="v">fp8_e4m3</td><td>MLA 的 latent KV 存成 fp8：每 token 每层 576 字节而不是 1152，KV 池直接翻倍。</td></tr>
+      <tr><td class="k">index_topk</td><td class="v">2048</td><td>每条 query 只对 2048 个历史 key 做注意力（模型结构决定），270K 上下文下等于砍掉 99.2% 的注意力读取。</td></tr>
+    </tbody>
+  </table>
+
+  <h4 class="micro">投机解码 EAGLE</h4>
+  <table>
+    <thead><tr><th>参数</th><th>值</th><th>为什么是这个值</th></tr></thead>
+    <tbody>
+      <tr><td class="k">--speculative-algorithm</td><td class="v">EAGLE</td><td>draft 用 checkpoint 自带的 1 层 MTP，不需要额外模型。</td></tr>
+      <tr><td class="k">--speculative-num-steps</td><td class="v">4</td><td>草稿链长 4 步：一步猜一个 token，串成一条链。</td></tr>
+      <tr><td class="k">--speculative-eagle-topk</td><td class="v">1</td><td>每步只保留 1 个候选 —— 不做树搜索，延迟最低、最容易吃到图捕获。</td></tr>
+      <tr><td class="k">--speculative-num-draft-tokens</td><td class="v">5</td><td>交给目标模型一次 verify 的 token 行数。它同时决定批内行数与 all-reduce 消息大小。</td></tr>
+    </tbody>
+  </table>
+
+  <h4 class="micro">MoE 与图</h4>
+  <table>
+    <thead><tr><th>参数</th><th>值</th><th>为什么是这个值</th></tr></thead>
+    <tbody>
+      <tr><td class="k">--moe-runner-backend</td><td class="v">flashinfer_cutlass</td><td>SM120 上走 FlashInfer 的 cutlass MoE 内核，也是 NVFP4 权重能跑起来的前提。</td></tr>
+      <tr><td class="k">--disable-flashinfer-autotune</td><td class="v">开</td><td>跳过启动期 autotune，省掉数分钟启动时间（代价是没吃到逐形状的最优 tile）。</td></tr>
+      <tr><td class="k">--disable-shared-experts-fusion</td><td class="v">开</td><td>shared expert 是 bf16、没有 fp4 scale，与 routed 的 NVFP4 拼不到一个 kernel 里，融合会载入失败。</td></tr>
+      <tr><td class="k">--cuda-graph-max-bs-decode</td><td class="v">64</td><td>decode 图覆盖到 64 并发，桶 <code>1 2 3 4 6 8 12 16 24 32 48 64</code>，full backend。</td></tr>
+      <tr><td class="k">--cuda-graph-max-bs-prefill</td><td class="v">8</td><td>prefill 只有小批走图（breakable backend）：prefill 形状随 chunk 变化太大，收益低、风险高。</td></tr>
+      <tr><td class="k">--reasoning-parser / tool-call-parser</td><td class="v">glm45 / glm47</td><td>把 &lt;think&gt; 段与工具调用从输出流里解析成结构化字段，避免污染正文。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <b>脱敏说明</b>：本页保留全部结构与数值（层数、并行度、桶列表、字节量级、守卫阈值），但去掉了主机名、模型绝对路径、
+    内部脚本名与内部环境变量前缀（下文统一写作 <code>SGLANG_QUANT_AR</code>、<code>SGLANG_AR_MIN_MB</code>、<code>SGLANG_ATTN_TOPK_CAP</code>）。
+    文中的流程与代码路径对齐公开的 SGLang 实现，可直接对照源码阅读。
+  </div>
+
+  <h2 id="pre">前置知识：五个词就够读懂后面的流程</h2>
+
+  <h3 class="mini">① Prefill 与 Decode</h3>
+  <p>
+    <b>Prefill</b> 处理输入的全部 token（一次算很多个，算力受限）；<b>Decode</b> 每步只生成 1 个 token
+    （却要把全部权重和全部 KV 读一遍，访存受限）。两者计算形状完全不同，所以调度器会区别对待：
+    prefill 可以切块，decode 必须每轮都跑。<b>整个推理系统的参数设计，基本都是在调和这两者的冲突。</b>
+  </p>
+
+  <h3 class="mini">② 连续批处理（continuous batching）</h3>
+  <p>
+    不等一批请求全部结束才收新的：任何一条请求生成完就立刻退出批次，空出的槽位马上给排队中的下一条。
+    这是「批处理」在 LLM 推理里的形态 —— 也是为什么<b>批内每条请求的上下文长度各不相同</b>，
+    所有算子都得按「变长批」来写。
+  </p>
+
+  <h3 class="mini">③ 这套模型的两个特殊结构</h3>
+  <ul>
+    <li><b>DSA（稀疏注意力）</b>：注意力的 key/value 被压缩成 MLA 的 latent，且每条 query 只挑出 <code>index_topk = 2048</code> 个最相关的历史 key 参与计算。上下文再长，注意力的读取量也不涨（选择成本另算，见 <a href="#dsa">DSA 一节</a>）。</li>
+    <li><b>MoE（混合专家）</b>：78 层里有 75 层是 MoE，每层 256 个 routed 专家 + 1 个 shared 专家。每个 token 只激活少数专家，所以<b>总参数量很大但每 token 的计算量不大</b> —— 代价是权重全都要放在显存里。</li>
+  </ul>
+
+  <h3 class="mini">④ NVFP4 与「量化边界」</h3>
+  <p>
+    NVFP4 是 4 bit 浮点（E2M1）配 fp8 的块级 scale：权重的显存占用约为 bf16 的 <b>1/3.6</b>（每 16 个权重一个 scale 的额外开销）。
+    这套 checkpoint 只把 <b>routed experts</b> 量化成 NVFP4，attention / shared expert / router / 3 个 dense 层保持 bf16
+    （checkpoint 的 <code>ignore</code> 列表里有 231 条）。
+    <b>混精度不是偷懒，而是权衡</b>：专家占权重的大头（量化它省显存最多），而 attention 与 router 对数值精度更敏感（量化它掉点最多）。
+  </p>
+
+  <h3 class="mini">⑤ CUDA Graph</h3>
+  <p>
+    Decode 每步的算子序列和形状都一样，于是可以把整个前向录制成一张图，之后一次 <code>replay</code> 而不是逐个 launch kernel ——
+    省掉的是<b>启动开销</b>（每层几十个 kernel × 78 层，CPU 侧 launch 很容易成为瓶颈）。
+    代价是<b>形状必须固定</b>，所以要预先为一批批大小（桶）各录一张图。
+  </p>
+
+  <h2 id="topo">进程与设备拓扑：四个进程组，八个 GPU</h2>
+
+  <div class="topo">
+    <div class="prow"><span class="lbl">① 接入</span><span class="node hot">TokenizerManager</span>
+      <span class="node">HTTP / FastAPI</span><span class="node">对话模板</span><span class="node">分词</span>
+      <span class="node">reasoning / tool 解析器</span></div>
+    <div class="arrowdown">▼ 请求对象（tokenized）</div>
+    <div class="prow"><span class="lbl">② 调度</span><span class="node hot">Scheduler（兼 TP rank0）</span>
+      <span class="node">等待队列</span><span class="node">运行批次</span><span class="node">KV 分配</span><span class="node">radix 前缀树</span></div>
+    <div class="arrowdown">▼ 组批 + 广播到各 rank</div>
+    <div class="prow"><span class="lbl">③ 计算</span>
+      <div class="pciegroup"><span class="node gpu">GPU0 · TP0</span><span class="node gpu">GPU1 · TP1</span><span class="node gpu">GPU2 · TP2</span><span class="node gpu">GPU3 · TP3</span></div>
+      <div class="pciegroup"><span class="node gpu">GPU4 · TP4</span><span class="node gpu">GPU5 · TP5</span><span class="node gpu">GPU6 · TP6</span><span class="node gpu">GPU7 · TP7</span></div>
+    </div>
+    <div class="arrowdown">▲ 采样后的 token（含 logprob）</div>
+    <div class="prow"><span class="lbl">④ 输出</span><span class="node hot">DetokenizerManager</span>
+      <span class="node">id → 文本</span><span class="node">增量拼接</span><span class="node">流式回传</span></div>
+    <p class="hint" style="margin-bottom:0">两个虚线框 = 两组四卡 PCIe 组（无 NVLink）。跨组通信必须过主机桥，这就是<a href="#ar">通信一节</a>里所有优化的舞台。</p>
+  </div>
+
+  <p>
+    <b>为什么要知道进程边界？</b>因为它决定了延迟在哪：分词与模板在 CPU 上（<i>TokenizerManager</i>），
+    调度决策也在 CPU 上（<i>Scheduler</i>），GPU 只做前向与采样。所以「TTFT 高」可能是排队久（调度侧），
+    也可能是 prefill 慢（GPU 侧），两者的优化手段完全不同 —— <a href="#lat">延迟拆解</a>会把这条线拉直。
+  </p>
+
+  <p>
+    <b>还有一条容易忽略的拓扑事实</b>：MLA 的 latents 在所有 TP rank 上是<b>复制的</b>（每层每个 token 只有一份
+    576 维的 latent，所有头共享），代码里 KV 池的形状就是 <code>(size, 1, kv_cache_dim)</code>，头维为 1、不按 TP 切分。
+    这意味着<b>TP 并不会摊薄 KV 显存</b>：一条请求的 KV 在每张卡上都要占同样多的字节，容量账要按单卡算。
+  </p>
+
+  <h2 id="life">一条请求的完整生命周期</h2>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t">
+      <b>接入与分词</b>：HTTP 请求进来，套上对话模板，切成 token id，按解析器配置标记哪些段落算 reasoning / tool call。
+      <span class="sub2">这一步是纯 CPU 的，与 GPU 无关，但模板错了会让后面全部白算 —— 前缀缓存也是按 token 序列比对的。</span>
+      <span class="where">TokenizerManager 进程</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t">
+      <b>入队等待</b>：请求进入等待队列（waiting queue），此时<b>不占任何显存</b>。
+      <span class="sub2">队列长度 × 单步耗时 ≈ 排队延迟。这就是 <code>--max-running-requests</code> 与 KV 池共同决定吞吐上限的地方。</span>
+      <span class="where">Scheduler 进程</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t">
+      <b>组批与 KV 分配</b>：调度器每轮从队列里挑请求，先在 radix 前缀树上做最长前缀匹配 —— 命中的部分<b>直接复用 KV，不再计算</b>；
+      未命中的部分按 <code>chunked-prefill-size</code> 切块，并从 KV 池分配页。
+      <span class="sub2">这是「同一份系统提示只算一次」的实现位置，也是 TTFT 波动的主要来源。</span>
+      <span class="where">Scheduler 进程（CPU）</span></div></div>
+    <div class="step"><div class="i">4</div><div class="t">
+      <b>前向计算</b>：组好的批被送进模型，78 层依次执行「稀疏注意力 → MoE」，每层穿插两次 TP all-reduce 与两轮专家并行通信；
+      投机解码时这里一次要验证 5 个 token 行。
+      <span class="sub2">GPU 利用率、TPOT（每 token 耗时）几乎全部由这一步决定。</span>
+      <span class="where">8 个 TP worker 进程 / 8 张 GPU</span></div></div>
+    <div class="step"><div class="i">5</div><div class="t">
+      <b>采样与回传</b>：从 logits 采样出下一个 token，去 tokenizer 还原成文本片段，流式推给客户端。
+      <span class="sub2">投机解码下这一步会一次接受多个 token；结束条件（EOS / 长度 / stop 串）也在这里判定。</span>
+      <span class="where">GPU（采样）→ DetokenizerManager → TokenizerManager</span></div></div>
+    <div class="step"><div class="i">6</div><div class="t">
+      <b>回收与缓存</b>：请求结束后 KV 页被释放，但 radix 树上的前缀仍然保留（默认开启前缀缓存），
+      下一条同前缀请求可以直接命中。
+      <span class="sub2">如果开了分层缓存（HiCache），这里还会触发向主机内存的下沉。</span>
+      <span class="where">Scheduler + 显存池</span></div></div>
+  </div>
+
+  <h2 id="sched">调度器内部：每一轮它到底在决定什么</h2>
+
+  <p>
+    Scheduler 是<b>唯一的大脑</b>，它跑在一个 <code>while</code> 循环里（<code>event_loop_normal</code> 或
+    <code>event_loop_overlap</code>），每轮做四件事：<b>取批 → 前向 → 采样 → 收尾</b>。
+    关键函数是 <code>get_next_batch_to_run()</code>，它的决策顺序决定了所有请求的命运。
+  </p>
+
+  <pre><code>while True:
+    batch = get_next_batch_to_run()        # ① 组这一轮要算的批
+    if batch:  run_batch(batch)            # ② 前向 + 采样（GPU）
+    process_batch_result(batch)            # ③ 收尾：写回 KV、判定结束、回传 token
+                                           # ④ 与下一轮重叠：CPU 组批和 GPU 计算并行</code></pre>
+
+  <h3 class="mini">组批时的三个优先级</h3>
+  <ol>
+    <li><b>先把正在跑的 decode 排上</b>。decode 是延迟敏感的：每条请求每轮都要出一个 token，被跳过就意味着 TPOT 抖动。</li>
+    <li><b>再用剩余预算装 prefill</b>。等待队列按策略排序（默认 <code>LPM</code> 最长前缀匹配，让命中前缀的请求优先，省下最多的算力；
+      也可以选 <code>FCFS</code> 先来先服务）。装的时候由 <code>PrefillAdder</code> 逐条累加，
+      超过 <code>max-prefill-tokens = 16384</code> 或 KV 不够就停。</li>
+    <li><b>长请求切块</b>。单条请求的 prefill 超过 <code>chunked-prefill-size = 8192</code> 就只算 8192，
+      剩下的挂到下一轮（chunked req）。<b>这样长 prefill 不会独占 GPU 几秒钟</b>，decode 的 TPOT 才稳得住。</li>
+  </ol>
+
+  <div class="flow">
+    <div class="step"><div class="i">A</div><div class="t"><b>KV 够不够</b>
+      <span class="sub2">按「新请求的 chunk + 已有请求还要生成的 token 数」推算。不够就把它留在队列里，或者更激进地抢占（recompute / retract）。</span></div></div>
+    <div class="step"><div class="i">B</div><div class="t"><b>前缀命中多少</b>
+      <span class="sub2">radix 树上的最长匹配长度决定了要新算多少 token。命中 8000 token 的长系统提示，prefill 预算可以整段省掉。</span></div></div>
+    <div class="step"><div class="i">C</div><div class="t"><b>要不要跑投机</b>
+      <span class="sub2">decode 批会额外插入 draft 前向 + verify 前向，批内 token 行数变成 <code>请求数 × 5</code>（本部署的 draft 行数）。</span></div></div>
+  </div>
+
+  <div class="note">
+    <b>overlap 调度</b>：默认开启的 <code>event_loop_overlap</code> 让 CPU（组批、分配、收尾）与 GPU（前向）并行 ——
+    上一轮的 GPU 还在算，下一轮的批已经在 CPU 上准备好了。这能显著降低小批量的 TPOT，
+    代价是<b>增加了一轮流水延迟</b>：批的状态要等 GPU 结果回来才能定稿。投机解码与它天然冲突（verify 结果会影响下一轮批的构造），所以这类组合要么关掉 overlap，要么像本部署那样把状态更新改到 ring 上完成。
+  </div>
+
+  <h2 id="fwd">一次前向到底算了什么</h2>
+
+  <p>调度器组完批后，会把它变成一次 <code>ForwardBatch</code>；两种模式的准备方式不同：</p>
+  <ul>
+    <li><code>prepare_for_extend()</code>：prefill（含 chunk）。把多条请求的 token 拼成一条长序列，写 KV 到新分配的页，记录每条请求的 <code>seq_lens</code>。</li>
+    <li><code>prepare_for_decode()</code>：decode。每条请求只喂 1 个 token（投机的 verify 阶段是 5 个），KV 页已经存在，只需按 <code>out_cache_loc</code> 追加写入。</li>
+  </ul>
+
+  <h3 class="mini">78 层的结构</h3>
+  <div class="stack">
+    <div class="band">
+      <div class="dense">dense ×3</div>
+      <div class="moe">MoE + DSA 交替 ×75</div>
+      <div class="mtp">MTP ×1</div>
+    </div>
+    <p class="hint" style="margin-top:2px">前 3 层是普通 dense FFN（保持 bf16），中间 75 层是 MoE（routed 专家 NVFP4），最后 1 层 MTP 被当作 EAGLE 的 draft 模型。</p>
+    <div class="layerzoom">
+      <div class="box">
+        <h5>每个 MoE 层内部</h5>
+        <ul>
+          <li>输入 norm → <b>DSA 注意力</b>（稀疏 MLA，KV 为 fp8 latent）</li>
+          <li>→ 残差 → norm → <b>MoE</b>：router 打分 → 选中 routed 专家（NVFP4 权重）→ 与 shared 专家（bf16）求和</li>
+          <li>→ 残差 → 下一层</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h5>两次 all-reduce 的位置</h5>
+        <ul>
+          <li>注意力输出投影 <code>o_proj</code> 之后（按头切分，需要求和）</li>
+          <li>MLP 下投影 <code>down_proj</code> 之后（按中间维切分，需要求和）</li>
+          <li>75 个 MoE 层 × 2 ≈ <b>150 次 all-reduce/轮</b>（dense 层同样有，量级相同）</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <h2 id="dsa">DSA：270K 上下文为什么没有拖垮注意力</h2>
+
+  <p>
+    标准注意力的成本随上下文线性增长：每条 query 要对的 key 数量就是历史长度。
+    270K 上下文下，每层每 token 都要读 270K 份 KV —— 这是任何长上下文服务都过不去的墙。
+    DSA 把它拆成「先选，再算」两步：
+  </p>
+
+  <div class="dsa">
+    <div class="box">
+      <h5>第一步 · indexer 打分（便宜）</h5>
+      <p class="hint" style="margin:4px 0 8px">用一份低维的 index key（公开口径每层 128 维 fp8）算出每条 query 与所有历史 key 的相关性分数，取 top-2048。</p>
+      <div class="keys" id="keys"></div>
+      <div class="legend"><span><i style="background:#e2e8f4"></i>未选中</span><span><i style="background:#1d4ed8"></i>top-2048 入选</span></div>
+      <p class="hint" style="margin-top:8px">成本：O(L) 次低维点积，可融合成一个 kernel（<code>--dsa-topk-backend sgl-kernel</code>），不打分不进 HBM。</p>
+    </div>
+    <div class="box">
+      <h5>第二步 · 稀疏 MLA（省下的大头）</h5>
+      <p class="hint" style="margin:4px 0 8px">只对选中的 2048 个 key 做 MLA 注意力。KV 本身是压缩 latent，每 token 每层 576 字节（fp8）。</p>
+      <div class="bytes" style="height:26px">
+        <i class="b1" style="width:0.76%"></i><i class="b5" style="width:99.24%"></i>
+      </div>
+      <p class="hint" style="margin:6px 0 0">深色 = 真正参与计算的 2048 / 270336 ≈ <b>0.76%</b></p>
+      <p class="hint" style="margin-top:8px">节省：注意力读取量从 O(L) 变成 O(2048)，上下文越长收益越大，且与 L 解耦。</p>
+    </div>
+  </div>
+
+  <h4 class="micro">口径核对：一个 token 的 KV 到底占多少</h4>
+  <div class="eq" style="margin:12px 0;padding:14px 18px;border-radius:12px;background:var(--panel);border:1px solid var(--line);font:13px/2 var(--mono);overflow-x:auto;color:#28374f">
+    MLA latent：<span style="color:#657389">(kv_lora_rank 512 + qk_rope 64) × 78 层 × 1 B(fp8)</span> = <b>44.9 KiB / token</b><br>
+    DSA indexer：<span style="color:#657389">128 维 × 78 层 × 1 B ≈ 9.8 KiB / token</span><br>
+    合计 ≈ <b>54.7 KiB / token</b> —— 264K 上下文的一条请求就要 <b>≈ 14.1 GiB</b> KV。
+  </div>
+  <p class="hint">
+    这也是为什么 fp8 KV 与 MLA 缺一不可：若用 bf16 的标准 MHA（8 头 × 128 维 × 2 × 78 层），
+    每 token 要 312 KiB —— 同样一条请求需要 80 GiB，单卡根本放不下。
+  </p>
+
+  <h2 id="moe">MoE 与量化边界：为什么只有专家是 4 bit</h2>
+
+  <div class="box" style="margin:16px 0">
+    <h5>一个 token 在 MoE 层里走的路</h5>
+    <p class="hint" style="margin:4px 0 8px">hidden(6144) → router 打分（bf16）→ 选中 top-k 个 routed 专家 → 各自 NVFP4 矩阵乘 → 按路由权重加权求和 → 与 shared 专家（bf16，独立分支）相加 → 输出</p>
+    <div class="bytes" style="height:24px">
+      <i style="background:#8fd8c4;width:96%"></i><i style="background:#cfe3fb;width:4%"></i>
+    </div>
+    <div class="legend">
+      <span><i style="background:#8fd8c4"></i>routed experts · NVFP4（权重主体）</span>
+      <span><i style="background:#cfe3fb"></i>shared expert + router + attention · bf16</span>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>组件</th><th>精度</th><th>为什么</th></tr></thead>
+    <tbody>
+      <tr><td class="k">routed experts（256 个）</td><td class="v">NVFP4</td><td>占权重绝大多数，量化收益最大；专家是「各自独立的查表式」计算，误差不易在整个网络里累积。</td></tr>
+      <tr><td class="k">shared expert</td><td class="v">bf16</td><td>每 token 都会走，任何误差都会被放大；且 checkpoint 里没有 fp4 scale，强行融合会载入失败（本部署显式关掉了融合）。</td></tr>
+      <tr><td class="k">attention（DSA/MLA）</td><td class="v">bf16 权重 + fp8 KV</td><td>注意力对数值误差敏感；但 KV 只是被读取的数据，存 fp8 的精度损失可控，换来 KV 池翻倍。</td></tr>
+      <tr><td class="k">router 与 3 个 dense 层</td><td class="v">bf16</td><td>router 决定 token 去哪，抖动会放大成整层的选路错误；dense 层只有 3 层，量化省的显存可以忽略。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="ar">TP8 通信：每轮 150 次 all-reduce 是怎么被压下去的</h2>
+
+  <p>
+    这台机器<b>没有 NVLink</b>：8 张卡分处两组四卡 PCIe 组，跨组通信要过主机桥。前面算过，
+    每层两次 all-reduce、75 个 MoE 层 → <b>每轮 decode 上百次归约</b>，每次的载荷是
+    <code>行数 × hidden(6144) × 2B</code>。而「行数」在两种阶段差了一个数量级，这决定了它们走完全不同的路径：
+  </p>
+
+  <table>
+    <thead><tr><th></th><th>decode / verify</th><th>prefill（一个 chunk）</th></tr></thead>
+    <tbody>
+      <tr><td class="k">行数</td><td>并发 × 5 = 最多 320</td><td>最多 chunk 大小 8192</td></tr>
+      <tr><td class="k">载荷 P</td><td class="v">≈ 3.9 MB</td><td class="v">≈ 100.7 MB</td></tr>
+      <tr><td class="k">相对量化内核 16 MB 起征点</td><td>远低于 → 不用</td><td>落在 16–100 MB 窗口内 → 用</td></tr>
+      <tr><td class="k">实际走的路径</td><td>NCCL / 2-stage（字节 ÷4）</td><td>量化 int8 两阶段（字节 ÷8）</td></tr>
+    </tbody>
+  </table>
+
+  <p class="hint" style="margin-top:12px">
+    这张表解释了一件容易被误解的事：<b>量化 AR 不是给 decode 用的</b>。decode 的 verify 消息只有几 MB，
+    在那个尺度上多两个 barrier 的同步开销比省下的带宽更贵；真正吃到它的是 <b>prefill 的大消息</b> ——
+    一个 8192 token 的 chunk 打包成一次归约，才是这条路径上的带宽墙。
+  </p>
+
+  <div class="calc">
+    <div class="ctl"><label for="aRowsIn">批内 token 行数</label><input id="aRowsIn" type="range" min="64" max="16384" step="64" value="8192"><span class="mono" id="aRowsV">8192</span></div>
+    <p class="hint" style="margin:-4px 0 0">参考点：<b>320 行</b> = 64 并发 × 5 行（decode verify，P ≈ 3.9 MB）；<b>8192 行</b> = 一个满 chunk 的 prefill（P ≈ 100.7 MB）。</p>
+
+    <div class="glabel">这次归约的载荷</div>
+    <div class="row g3">
+      <div class="cell"><div class="k">载荷 P</div><div class="v" id="aP">—</div><div class="d">行数 × 6144 × 2B</div></div>
+      <div class="cell"><div class="k">1-stage bf16 每 rank 收</div><div class="v warn" id="aBase">—</div><div class="d">(N−1)·P</div></div>
+      <div class="cell"><div class="k">最优路径每 rank 收</div><div class="v good" id="aBest">—</div><div class="d" id="aBestD">—</div></div>
+    </div>
+
+    <div class="glabel">判定</div>
+    <div class="row g2">
+      <div class="cell"><div class="k">走哪条路径</div><div class="v" id="aPath">—</div><div class="d">窗口 16–100 MB（按收到字节）</div></div>
+      <div class="cell"><div class="k">相对原始 1-stage bf16</div><div class="v good" id="aRatio">—</div><div class="d">字节比</div></div>
+    </div>
+    <div id="aVerdict" class="verdictbox ok">—</div>
+    <p class="upd">守卫的口径按「2-stage 之后每 rank 实际收到的字节」折算：低于 16 MB 时同步开销盖过带宽收益（decode 就在这一侧），高于 100 MB 时手工内核打不过 NCCL 的多通道实现（超大 prefill 会落到这一侧）。</p>
+  </div>
+
+  <h3 class="mini">三条路径的字节账</h3>
+  <div class="lanes3">
+    <div class="lane3">
+      <div class="hd"><span class="t">① stock CAR / 1-stage bf16（改造前）</span><span class="n">每 rank 收 (N−1)·P = 7P</span></div>
+      <div class="bytes"><i class="b1" style="width:100%"></i></div>
+      <p class="hint" style="margin:0">NCCL 广播式归约，每张卡收 7 份完整 bf16 载荷。这是本部署最初 57% kernel 时间所在的那条路径（详见<a href="../comm-parallel/allreduce-1stage-vs-2stage/index.html">另一篇</a>）。</p>
+    </div>
+    <div class="lane3">
+      <div class="hd"><span class="t">② 2-stage bf16（reduce-scatter + all-gather）</span><span class="n">1.75P · 4× 更少</span></div>
+      <div class="bytes"><i class="b2" style="width:25%"></i><i class="b5" style="width:75%"></i></div>
+      <p class="hint" style="margin:0">把载荷切成 8 份，两个阶段各经手一遍。字节数与 TP 规模解耦 —— 这是 4 倍收益的来源。</p>
+    </div>
+    <div class="lane3">
+      <div class="hd"><span class="t">③ 2-stage + int8 量化（本部署注入的内核，服务 prefill 大消息）</span><span class="n">0.875P · 8× 更少</span></div>
+      <div class="bytes"><i class="b3" style="width:12.5%"></i><i class="b5" style="width:87.5%"></i></div>
+      <p class="hint" style="margin:0">在 ② 的结构上，把每份载荷先<b>本地量化成 int8</b> 再进 ring：字节数再砍一半。<b>两级优化是相乘的</b>：4× × 2× = 8×。</p>
+    </div>
+  </div>
+
+  <h3 class="mini">量化 AR 内核的四个守卫（工程上最值得学的部分）</h3>
+  <table>
+    <thead><tr><th>守卫</th><th>条件</th><th>为什么必须有</th></tr></thead>
+    <tbody>
+      <tr><td class="k">尺寸下界</td><td class="v">P ≥ 16 MB</td><td>小消息上 2-stage 要多两个 barrier，延迟主导，量化省下的带宽抵不过同步开销。</td></tr>
+      <tr><td class="k">尺寸上界</td><td class="v">P ≤ 100 MB</td><td>超大消息上手工内核打不过 NCCL 的成熟多 NIC / 多通道实现（实测 96 MiB 时反而更慢）。</td></tr>
+      <tr><td class="k">向量对齐</td><td class="v">n % 256 == 0</td><td>int8 内核按 256 元素向量化读取，不满足就回退 —— 否则会读到越界或触发慢路径。</td></tr>
+      <tr><td class="k">捕获期拒绝</td><td class="v">CUDA graph capture 中直接回退</td><td><b>最关键的一条</b>：图捕获时内核不会真正执行，barrier 计数器被 replay 会读到陈旧值 → 死锁或算错。所以捕获期一律走 NCCL。</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">
+    内核本身是「本地量化 → barrier → reduce-scatter → barrier → all-gather」的两阶段结构，
+    36 个 block × 512 线程，另有一个 tail-safe 变体处理不满向量的尾巴；异常一律兜底回退 NCCL 而不是抛错。
+    <b>这类改动的价值一半在快，一半在「任何异常都退回到已知正确路径」。</b>
+  </p>
+
+  <h2 id="spec">投机解码：一次前向验证 5 个 token</h2>
+
+  <p>
+    Decode 阶段每步只出一个 token，GPU 大量算力闲置。EAGLE 用模型自带的 MTP 层做草稿：
+    连续猜 4 步、每步只保留 1 个候选，串成一条链；然后让目标模型<b>一次前向</b>把这 5 个 token 全部验证 ——
+    猜对几个就白赚几个 token。
+  </p>
+
+  <div class="spec">
+    <div class="specrow">
+      <div class="s draft" style="flex:1">draft 1</div>
+      <div class="s draft" style="flex:1">draft 2</div>
+      <div class="s draft" style="flex:1">draft 3</div>
+      <div class="s draft" style="flex:1">draft 4</div>
+      <div class="s verify" style="flex:3">目标模型一次 verify（5 行）</div>
+    </div>
+    <div class="specrow">
+      <div class="s acc" style="flex:1">接受</div>
+      <div class="s acc" style="flex:1">接受</div>
+      <div class="s rej" style="flex:1">拒绝</div>
+      <div class="s rej" style="flex:1">丢弃</div>
+      <div class="s verify" style="flex:3">本轮产出 3 个 token（2 接受 + 1 个修正 token）</div>
+    </div>
+    <p class="hint" style="margin:6px 0 0">
+      接受长度是投机解码唯一的收益变量：接受 3 个 token，就等于一次目标模型前向换来 3 个输出。
+      拒绝位置之后的草稿全部丢弃，并从该位置重新开始下一轮。
+    </p>
+  </div>
+
+  <div class="calc">
+    <div class="ctl"><label for="sAcc">平均接受长度</label><input id="sAcc" type="range" min="1" max="5" step="0.1" value="2.6"><span class="mono" id="sAccV">2.6</span></div>
+    <div class="ctl"><label for="sCost">draft 开销（占目标前向比例）</label><input id="sCost" type="range" min="0" max="50" step="1" value="15"><span class="mono" id="sCostV">15%</span></div>
+    <div class="glabel">收益</div>
+    <div class="row g3">
+      <div class="cell"><div class="k">每轮产出 token</div><div class="v" id="sOut">—</div><div class="d">接受长度 + 1（修正位）</div></div>
+      <div class="cell"><div class="k">每轮耗时</div><div class="v" id="sTime">—</div><div class="d">1 + draft 开销</div></div>
+      <div class="cell"><div class="k">相对无投机的吞吐</div><div class="v good" id="sGain">—</div><div class="d">产出 ÷ 耗时</div></div>
+    </div>
+    <p class="upd">接受长度取决于模型与数据分布：创作类任务普遍高于代码补全；草稿链越长接受率越低，所以 4 步 / topk 1 是延迟与收益的折中。draft 开销按「draft 前向 + verify 多出的行数」的额外耗时计。</p>
+  </div>
+
+  <h2 id="graph">CUDA Graph：为什么 decode 要 12 张图、prefill 只要小桶</h2>
+
+  <p>
+    Decode 每步的算子序列固定，只是批大小不同。于是启动时按桶各录一张图：<b>1 2 3 4 6 8 12 16 24 32 48 64</b>。
+    运行时把实际批大小对到最近的桶（多余的槽位空跑），换来的是<b>把每步上百次 kernel launch 压成一次 replay</b>。
+  </p>
+
+  <div class="buckets">
+    <div style="height:30%"><span>1</span></div><div style="height:30%"><span>2</span></div><div style="height:34%"><span>3</span></div>
+    <div style="height:38%"><span>4</span></div><div style="height:44%"><span>6</span></div><div style="height:52%"><span>8</span></div>
+    <div style="height:60%"><span>12</span></div><div style="height:70%"><span>16</span></div><div style="height:82%"><span>24</span></div>
+    <div style="height:90%"><span>32</span></div><div style="height:96%"><span>48</span></div><div style="height:100%"><span>64</span></div>
+  </div>
+  <p class="hint" style="margin-top:26px">
+    桶加密（比如 1→2→3 而不是 1→2→4）是为了减少「对到更大的桶」带来的空跑浪费；
+    桶总数受显存限制 —— 每张图都要预留静态缓冲，12 张图本身就是一笔显存开销，这也是 <code>mem-fraction-static</code> 要留余量的原因之一。
+  </p>
+
+  <table>
+    <thead><tr><th></th><th>decode</th><th>prefill</th></tr></thead>
+    <tbody>
+      <tr><td class="k">是否捕获</td><td>全量捕获（full backend）到 bs=64</td><td>只到 bs=8，且用 breakable backend</td></tr>
+      <tr><td class="k">为什么</td><td>形状固定、每步都跑，收益最大</td><td>chunk 长度可变、形状不固定；大 prefill 本就算力受限，不值得为它承担图捕获的风险</td></tr>
+      <tr><td class="k">与量化 AR 的关系</td><td>捕获期必须回退 NCCL（见上文守卫）</td><td>同理，任何依赖 barrier 的算子在图里都不可用</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="cap">容量账：这套配置能同时扛多少上下文</h2>
+
+  <p>
+    每卡显存被切成三块：<b>权重</b>（NVFP4 专家 + bf16 其余）、<b>KV 池</b>（fp8 MLA latent + indexer）、
+    <b>运行时缓冲</b>（CUDA graph 静态缓冲、激活峰值、通信 buffer）。<code>--mem-fraction-static 0.90</code>
+    划定前两者之和的上限，剩下的才留给运行时。
+  </p>
+
+  <table>
+    <thead><tr><th>项</th><th>口径</th><th>量级</th></tr></thead>
+    <tbody>
+      <tr><td class="k">KV / token</td><td>78 层 × 576 B（MLA latent, fp8）+ 78 层 × 128 B（indexer）</td><td class="v">≈ 54.7 KiB</td></tr>
+      <tr><td class="k">8K 上下文</td><td>一条请求</td><td class="v">≈ 0.43 GiB</td></tr>
+      <tr><td class="k">32K 上下文</td><td>一条请求</td><td class="v">≈ 1.7 GiB</td></tr>
+      <tr><td class="k">128K 上下文</td><td>一条请求</td><td class="v">≈ 6.8 GiB</td></tr>
+      <tr><td class="k">264K 上下文</td><td>一条请求（用满 context-length）</td><td class="v">≈ 14.1 GiB</td></tr>
+    </tbody>
+  </table>
+
+  <div class="calc">
+    <div class="ctl"><label for="cConc">并发请求数</label><input id="cConc" type="range" min="1" max="64" step="1" value="16"><span class="mono" id="cConcV">16</span></div>
+    <div class="ctl"><label for="cLen">平均上下文长度（token）</label><input id="cLen" type="range" min="2048" max="270336" step="2048" value="32768"><span class="mono" id="cLenV">32K</span></div>
+    <div class="ctl"><label for="cPool">可用的 KV 预算（GiB）</label><input id="cPool" type="range" min="4" max="64" step="2" value="32"><span class="mono" id="cPoolV">32</span></div>
+    <div class="glabel">KV 占用</div>
+    <div class="row g3">
+      <div class="cell"><div class="k">单条请求</div><div class="v" id="cOne">—</div><div class="d">长度 × 54.7 KiB</div></div>
+      <div class="cell"><div class="k">全部并发</div><div class="v" id="cAll">—</div><div class="d">并发 × 单条</div></div>
+      <div class="cell"><div class="k">还能装几条</div><div class="v" id="cFit">—</div><div class="d">预算 ÷ 单条</div></div>
+    </div>
+    <div id="cVerdict" class="verdictbox ok">—</div>
+    <p class="upd">KV 预算 = 每卡显存 × mem-fraction-static − 权重占用。RTX 6000D 的实际可用显存请按你们机器的实际情况设这个滑块；这里的 54.7 KiB/token 也已包含 DSA indexer 的额外开销。</p>
+  </div>
+
+  <h2 id="lat">延迟拆解：TTFT 与 TPOT 分别由什么决定</h2>
+
+  <div class="box" style="margin:16px 0">
+    <h5>TTFT（首 token 延迟）= 排队 + 前缀匹配 + prefill + 首步采样</h5>
+    <ul>
+      <li><b>排队</b>：并发高、prefill 块小的时候最长。这是 <code>max-running-requests</code> 与准入策略的战场。</li>
+      <li><b>前缀匹配</b>：命中越多，这一项越小 —— 命中 100K token 的公共前缀，等于 prefill 工作量归零。</li>
+      <li><b>prefill</b>：算力受限，约等于 <code>token 数 × 2 × 参数量 ÷ 有效算力</code>（MoE 只算激活的专家）。chunked prefill 会把它切成多块，所以 TTFT 与 chunk 大小正相关。</li>
+      <li><b>首步采样</b>：可忽略。</li>
+    </ul>
+  </div>
+  <div class="box" style="margin:16px 0">
+    <h5>TPOT（每 token 延迟）= 权重读取 + KV 读取 + 通信 + 采样</h5>
+    <ul>
+      <li><b>权重读取</b>：每步都要把激活到的专家权重读一遍 —— NVFP4 的价值就在这里（读的字节少了 3.6 倍）。</li>
+      <li><b>KV 读取</b>：DSA 把它压到 2048 个 key；fp8 再砍一半。长上下文下这是最大的一项。</li>
+      <li><b>通信</b>：每轮上百次 all-reduce，PCIe-only 拓扑下是硬成本 —— 量化 AR 就是把这一项按字节砍。</li>
+      <li><b>采样</b>：小批时不可忽略；投机解码正是把「多次采样 + 多次前向」合并成一次的技巧。</li>
+    </ul>
+  </div>
+
+  <h2 id="myth">常见误解</h2>
+
+  <div class="myth">
+    <div class="w">✗「decode 慢是因为算力不够」</div>
+    <div class="r">正相反：decode 每步只算 1 个 token（投机的 verify 也只有 5 行），算术强度 ~1–2 FLOP/Byte，
+      算力大量闲置。<b>瓶颈是把权重和 KV 读一遍的带宽</b>。这也解释了 NVFP4、fp8 KV、稀疏注意力为什么有效 —— 它们都在减少字节。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「chunked prefill 让 prefill 变慢了，所以是坏事」</div>
+    <div class="r">它牺牲的是<b>单条长请求的 TTFT</b>，换来的是<b>所有在跑请求的 TPOT 稳定</b>。
+      一次 100K token 的 prefill 不切块会独占 GPU 好几秒，期间所有 decode 请求全部卡住。
+      8K 的块大小就是在这两者之间取的平衡点。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「已经用了 CUDA graph，就不需要关心 kernel launch 了」</div>
+    <div class="r">图只覆盖<b>被捕获的那部分</b>：解码路径、bs ≤ 64、且不含依赖 barrier 的算子。
+      量化 AR 在捕获期必须回退到 NCCL，prefill 大块完全不在图里 —— 这些路径的 launch 开销仍然是实打实的。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「量化 AR 就是把通信量砍一半，收益最多 2 倍」</div>
+    <div class="r">两层意思都要纠正。第一，它是<b>叠加在 2-stage 之上</b>的：2-stage 先把字节除以 4（N/2），
+      int8 再除以 2，相对原始 1-stage bf16 是 <b>8 倍</b>。第二，它<b>只在 prefill 的大消息上生效</b> ——
+      decode 的 verify 载荷只有几 MB，落在 16 MB 起征点之下，走的是 NCCL。同一个优化在不同阶段的有效性完全不同，
+      这也是为什么守卫要用尺寸窗口来分流，而不是全局打开。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">✗「前缀缓存命中率越高，吞吐就一定越高」</div>
+    <div class="r">还要看命中的是<b>多少 token</b>。命中 20 条请求各 100 token，省下的算力不如命中 1 条 10K token。
+      另外长前缀命中会把 KV 页留在池子里，可能挤掉并发 —— 命中率与并发之间有取舍。</div>
+  </div>
+
+  <h2 id="quiz">自测：能答上这六题，说明这套流程你通了</h2>
+
+  <details>
+    <summary>1. 投机解码的 <code>num-draft-tokens = 5</code> 如何影响 all-reduce 的耗时？</summary>
+    <div class="ans">verify 阶段一条请求产生 5 个 token 行，批内行数变成 <code>并发 × 5</code>。
+      64 并发 → 320 行 → 载荷 <code>P = 320 × 6144 × 2B ≈ 3.9 MB</code>。
+      <b>关键在于这个尺寸落到了哪里</b>：2-stage 之后每 rank 只收约 3.4 MB，<b>低于量化内核 16 MB 的起征点</b> ——
+      所以 decode 侧走的是 NCCL / 2-stage，量化 int8 在这里反而是负收益（两次 barrier 的同步开销盖过省下的带宽）。
+      量化内核真正服务的是 prefill：一个 8192 token 的 chunk 打包成一次归约，载荷约 100 MB，才落进窗口。</div>
+  </details>
+
+  <details>
+    <summary>2. 一次 100K token 的 prefill，为什么不能一次算完？</summary>
+    <div class="ans">会独占 GPU 若干秒，把同时段所有 decode 请求的 TPOT 打到几百毫秒级。
+      <code>chunked-prefill-size = 8192</code> 把它切成 13 轮，每轮之间还能插 decode。
+      代价是这条请求自己的 TTFT 变长（要等 13 轮调度），收益是其他请求的延迟稳定。</div>
+  </details>
+
+  <details>
+    <summary>3. 为什么量化 AR 在 CUDA graph 捕获期间必须回退？</summary>
+    <div class="ans">捕获时内核<b>不会真正执行</b>，只记录调用。手写内核里的 barrier 计数器依赖真实执行来推进，
+      图 replay 时会读到捕获时留下的陈旧值 → 要么死锁、要么算出错误结果。
+      所以守卫在 capture 阶段一律回退 NCCL —— 这是「宁可慢一点也不能算错」的典型取舍。</div>
+  </details>
+
+  <details>
+    <summary>4. shared expert 为什么不能和 routed 专家融合成一个 kernel？</summary>
+    <div class="ans">两者的量化口径不同：routed 是 NVFP4（带 fp8 块级 scale），shared 是 bf16（没有 scale）。
+      融合 kernel 期望同一套 dequant 路径，遇到没有 scale 的权重就会载入失败。
+      所以本部署显式 <code>--disable-shared-experts-fusion</code> —— <b>量化口径决定了算子能不能融合</b>，
+      混精度模型的「边界」比想象中更硬。</div>
+  </details>
+
+  <details>
+    <summary>5. 264K 上下文的一条请求，KV 大约占多少？这对并发意味着什么？</summary>
+    <div class="ans">≈ 54.7 KiB/token × 270336 ≈ <b>14.1 GiB</b>（含 indexer）。
+      这意味着<b>长上下文与高并发基本不可兼得</b>：KV 预算 20 GiB 时，要么跑 1–2 条满长度请求，
+      要么跑几十条 8K 的短请求。容量规划必须先确定「典型上下文长度」，而不是看最大值。</div>
+  </details>
+
+  <details>
+    <summary>6. 如果要把这套部署的吞吐再提高一档，你会先动哪个参数？为什么？</summary>
+    <div class="ans">按「改动的收益 ÷ 风险」排序：① <b>提高前缀命中率</b>（把公共系统提示做成长前缀、复用同一段 RAG 文档）——
+      直接减少 prefill，几乎零风险；② <b>调大 chunk 与批上限</b>，但要盯 TPOT 与 KV 水位；
+      ③ <b>继续压通信字节</b>（比如把量化 AR 的上下界按实际分布重新标定）；
+      ④ <b>提高接受长度</b>（换更好的 draft、或按任务调 draft 步数），它直接乘在吞吐上。
+      ——共同点是：<b>都在减少每轮要搬的字节或要算的 token，没人去动算力。</b></div>
+  </details>
+
+  <h2 id="read">延伸阅读</h2>
+  <ul class="links">
+    <li><a href="https://docs.sglang.io/" target="_blank" rel="noopener">SGLang 官方文档</a>
+      <span class="why">本页提到的所有启动参数（<code>--chunked-prefill-size</code>、<code>--cuda-graph-max-bs-decode</code>、投机与 DSA 相关）的权威出处。</span></li>
+    <li><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang / RadixAttention 论文</a>
+      <span class="why">前缀复用与调度策略的设计来源，读它才能理解「为什么 LPM 是默认策略」。</span></li>
+    <li><a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">PagedAttention / vLLM 论文</a>
+      <span class="why">KV 分页管理的起点。本页的「KV 池 / 页 / out_cache_loc」都源自这套抽象。</span></li>
+    <li><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener">Fast Inference from Transformers via Speculative Decoding</a>
+      <span class="why">投机解码原始论文：接受长度的期望值如何决定加速比，本页投机一节的公式来源。</span></li>
+    <li><a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener">FlashAttention</a>
+      <span class="why">「IO-aware」思路的源头，理解为什么 decode 是访存瓶颈、为什么分块与稀疏能省字节。</span></li>
+    <li><a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html" target="_blank" rel="noopener">NCCL · Collectives</a>
+      <span class="why">all-reduce 的等价算法与选路逻辑，配合<a href="../comm-parallel/allreduce-1stage-vs-2stage/index.html">AllReduce 那篇</a>看更清楚。</span></li>
+    <li><a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener">sgl-project/sglang</a>
+      <span class="why">本页提到的 <code>scheduler.py</code>、<code>schedule_policy.py</code>、<code>schedule_batch.py</code>、<code>speculative/eagle_worker_v2.py</code>、<code>layers/attention/dsa_backend.py</code> 都在这个仓库里。</span></li>
+  </ul>
+
+  <footer>
+    <p>结构、参数与字节量级取自一台 8 卡 PCIe 单机上在役部署的实测配置；流程与代码路径对齐公开的 SGLang 实现。
+      模型版本、主机名、内部路径、内部环境变量前缀与构建产物标识已做脱敏。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+</div>
+<script>
+// DSA 示意：270336 个 key 里点亮 2048 个（等比抽样展示）
+(function(){
+  var box = document.getElementById('keys');
+  if (!box) return;
+  var N = 260;                     // 画 260 个小方块代表整体
+  var sel = Math.max(2, Math.round(N * 2048 / 270336));  // ≈ 2 个
+  var idx = new Set();
+  while (idx.size < sel) idx.add(Math.floor(Math.random() * N));
+  var html = '';
+  for (var i = 0; i < N; i++) html += idx.has(i) ? '<i class="sel"></i>' : '<i></i>';
+  box.innerHTML = html;
+})();
+
+// 计算器 1：all-reduce 路径（按「2-stage 之后每 rank 收到的字节」判定窗口）
+(function(){
+  var rowsIn = document.getElementById('aRowsIn');
+  if (!rowsIn) return;
+  var HIDDEN = 6144, BYTES = 2, N = 8, MIN_MB = 16, MAX_MB = 100, BW = 35.5e9;
+  function fmtB(b){
+    if (b >= 1e6) return (b/1e6).toFixed(2)+' MB';
+    if (b >= 1e3) return (b/1e3).toFixed(0)+' KB';
+    return b+' B';
+  }
+  function us(b){ var t = b/BW*1e6; return t >= 1000 ? (t/1000).toFixed(2)+' ms' : t.toFixed(0)+' μs'; }
+  function upd(){
+    var rows = +rowsIn.value;
+    var P = rows * HIDDEN * BYTES;
+    var base = (N-1)*P;                    // 原始 1-stage bf16
+    var twoB = 2*(N-1)/N*P;                // 2-stage bf16
+    var twoI8 = twoB/2;                    // 2-stage + int8
+    var recvMB = twoI8/1e6;
+    document.getElementById('aRowsV').textContent = rows;
+    document.getElementById('aP').textContent = fmtB(P);
+    document.getElementById('aBase').textContent = fmtB(base);
+    var pathEl = document.getElementById('aPath'), v = document.getElementById('aVerdict');
+    var inWindow = recvMB >= MIN_MB && recvMB <= MAX_MB;
+    var best = inWindow ? twoI8 : twoB;
+    document.getElementById('aBest').textContent = fmtB(best);
+    document.getElementById('aBestD').textContent = inWindow ? '2-stage + int8' : '2-stage bf16（未过守卫）';
+    document.getElementById('aRatio').textContent = (base/best).toFixed(1)+'×';
+    if (recvMB < MIN_MB){
+      pathEl.textContent = 'NCCL / 2-stage bf16';
+      pathEl.className = 'v warn';
+      v.className = 'verdictbox no';
+      v.innerHTML = '2-stage 后每 rank 只收 <b>' + fmtB(twoB) + '</b>，低于 16 MB 起征点 —— ' +
+        '这个尺度上两次 barrier 的同步开销盖过省下的带宽，量化内核不划算（decode / verify 就落在这一侧）。' +
+        '能做的是 2-stage 结构本身：每 rank ' + fmtB(twoB) + '，相对 1-stage 的 ' + fmtB(base) +
+        ' 已经是 <b>' + (base/twoB).toFixed(1) + '×</b>，单次约 ' + us(twoB) + '。';
+    } else if (recvMB > MAX_MB){
+      pathEl.textContent = '回退 NCCL（超上限）';
+      pathEl.className = 'v warn';
+      v.className = 'verdictbox no';
+      v.innerHTML = '每 rank 需要收 ' + recvMB.toFixed(0) + ' MB，超过 100 MB 上限 —— ' +
+        '这种超大消息上手工内核打不过 NCCL 的多通道实现，守卫会回退。此时通信已是绝对瓶颈，' +
+        '应该从<b>减小 chunk 或降并发</b>入手，而不是继续优化内核。';
+    } else {
+      pathEl.textContent = '量化 int8 AR ✓';
+      pathEl.className = 'v good';
+      v.className = 'verdictbox ok';
+      v.innerHTML = '命中量化路径：每 rank 只收 <b>' + fmtB(twoI8) + '</b> —— 相对 2-stage bf16（' +
+        fmtB(twoB) + '）再砍一半，相对原始 1-stage bf16（' + fmtB(base) + '）是 <b>' +
+        (base/twoI8).toFixed(1) + '×</b>。按 35.5 GB/s 反推，单次归约约 ' + us(twoI8) +
+        '，而原始路径要约 ' + us(base) + '。<b>prefill 的大消息正是这条路径服务的对象</b>，' +
+        '一个 8192 token 的 chunk 打包成一次归约就落在这个窗口里。';
+    }
+  }
+  rowsIn.addEventListener('input', upd); upd();
+})();
+
+// 计算器 2：投机收益
+(function(){
+  var acc = document.getElementById('sAcc'), cost = document.getElementById('sCost');
+  if (!acc) return;
+  function upd(){
+    var a = +acc.value, c = +cost.value/100;
+    document.getElementById('sAccV').textContent = a.toFixed(1);
+    document.getElementById('sCostV').textContent = cost.value+'%';
+    var out = a + 1, time = 1 + c;
+    document.getElementById('sOut').textContent = out.toFixed(1);
+    document.getElementById('sTime').textContent = time.toFixed(2)+'×';
+    document.getElementById('sGain').textContent = (out/time).toFixed(2)+'×';
+  }
+  acc.addEventListener('input', upd); cost.addEventListener('input', upd); upd();
+})();
+
+// 计算器 3：KV 容量
+(function(){
+  var conc = document.getElementById('cConc'), len = document.getElementById('cLen'), pool = document.getElementById('cPool');
+  if (!conc) return;
+  var KVT = 44.9*1024 + 128*78;      // B/token ≈ 54.7 KiB
+  function gib(b){ return b/1073741824; }
+  function upd(){
+    var n = +conc.value, L = +len.value, budget = +pool.value;
+    document.getElementById('cConcV').textContent = n;
+    document.getElementById('cLenV').textContent = L >= 1024 ? (L/1024).toFixed(0)+'K' : L;
+    document.getElementById('cPoolV').textContent = budget+' GiB';
+    var one = KVT * L, all = one * n;
+    document.getElementById('cOne').textContent = gib(one).toFixed(2)+' GiB';
+    document.getElementById('cAll').textContent = gib(all).toFixed(1)+' GiB';
+    var fit = Math.floor(budget / gib(one));
+    document.getElementById('cFit').textContent = fit < 0 ? 0 : fit;
+    var v = document.getElementById('cVerdict');
+    if (gib(all) <= budget){
+      v.className = 'verdictbox ok';
+      v.innerHTML = '装得下：' + n + ' 条 × ' + (L/1024).toFixed(0) + 'K = ' + gib(all).toFixed(1) +
+        ' GiB，还剩 ' + (budget - gib(all)).toFixed(1) + ' GiB 给新请求。';
+    } else {
+      v.className = 'verdictbox no';
+      v.innerHTML = '装不下：需要 ' + gib(all).toFixed(1) + ' GiB，超出预算 ' + (gib(all)-budget).toFixed(1) +
+        ' GiB。同预算下最多 ' + fit + ' 条 —— 要么降并发，要么缩短上下文，要么扩 KV（fp8 已经用上了，下一步只能加卡或上分层缓存）。';
+    }
+  }
+  conc.addEventListener('input', upd); len.addEventListener('input', upd); pool.addEventListener('input', upd); upd();
+})();
+</script>
+</body>
+</html>
