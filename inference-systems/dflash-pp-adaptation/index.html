@@ -43,6 +43,18 @@
   th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
   th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;background:#f4f7fc;text-transform:uppercase}
   td.mono{font-family:var(--mono);font-size:12.5px;color:#28374f}
+
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;color:var(--ink);border-bottom:1px solid var(--line);
+         padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none;float:none}
+  }
   blockquote{margin:12px 0;padding:8px 14px;border-left:3px solid var(--line);color:var(--dim);font-size:14px}
   .final{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:26px;
          box-shadow:0 1px 2px rgba(16,24,40,.04)}
@@ -149,10 +161,10 @@
   <table>
     <thead><tr><th>draft 需要什么</th><th>在 PP 下它在哪里</th></tr></thead>
     <tbody>
-      <tr><td>目标模型<b>多个中间层</b>的 hidden state（本例捕获 6 层）</td><td class="mono">散落在 4 个阶段上</td></tr>
-      <tr><td><b>LM head</b>（把 hidden 变成词表 logits）</td><td class="mono">只在最后一段</td></tr>
-      <tr><td><b>输入 embedding</b> 与下一步的 draft 输入</td><td class="mono">在第 0 段</td></tr>
-      <tr><td>草稿模型自己（6 层，体积很小）</td><td class="mono">没有归属</td></tr>
+      <tr><td data-label="draft 需要什么" class="k">目标模型<b>多个中间层</b>的 hidden state（本例捕获 6 层）</td><td data-label="在 PP 下它在哪里" class="mono">散落在 4 个阶段上</td></tr>
+      <tr><td data-label="draft 需要什么" class="k"><b>LM head</b>（把 hidden 变成词表 logits）</td><td data-label="在 PP 下它在哪里" class="mono">只在最后一段</td></tr>
+      <tr><td data-label="draft 需要什么" class="k"><b>输入 embedding</b> 与下一步的 draft 输入</td><td data-label="在 PP 下它在哪里" class="mono">在第 0 段</td></tr>
+      <tr><td data-label="draft 需要什么" class="k">草稿模型自己（6 层，体积很小）</td><td data-label="在 PP 下它在哪里" class="mono">没有归属</td></tr>
     </tbody>
   </table>
   <p>
@@ -242,19 +254,19 @@ sequenceDiagram
     <thead><tr><th>方案</th><th>做法</th><th>代价</th></tr></thead>
     <tbody>
       <tr>
-        <td class="mono">A · 把 draft 也切分</td>
-        <td>6 层按 PP 切成 4 段，每段 1–2 层</td>
-        <td>draft 本来就小，切完每段只剩一两层，<b>通信与同步开销超过算力收益</b>；而且它要的 6 层 hidden 仍要跨段收集，复杂度反而更高</td>
+        <td data-label="方案" class="mono k">A · 把 draft 也切分</td>
+        <td data-label="做法">6 层按 PP 切成 4 段，每段 1–2 层</td>
+        <td data-label="代价">draft 本来就小，切完每段只剩一两层，<b>通信与同步开销超过算力收益</b>；而且它要的 6 层 hidden 仍要跨段收集，复杂度反而更高</td>
       </tr>
       <tr>
-        <td class="mono">B · 每段复制一份 draft</td>
-        <td>四个阶段各放一个完整 draft</td>
-        <td>显存与加载时间 ×4，但<b>只有 PP0 那份会真正工作</b>（draft 的输入 token 在 PP0 就确定了），纯浪费</td>
+        <td data-label="方案" class="mono k">B · 每段复制一份 draft</td>
+        <td data-label="做法">四个阶段各放一个完整 draft</td>
+        <td data-label="代价">显存与加载时间 ×4，但<b>只有 PP0 那份会真正工作</b>（draft 的输入 token 在 PP0 就确定了），纯浪费</td>
       </tr>
       <tr>
-        <td class="mono">C · 伪造 PP=1 单例组<br>（本次采用）</td>
-        <td>用 <code>world_size=1</code> 的 PP 组替换并行状态，draft 整体留在 PP0</td>
-        <td>PP0 承担全部 draft 计算成为<b>最忙的一段</b>；但改动局限在 scope 与数据流，不碰 draft 内部结构</td>
+        <td data-label="方案" class="mono k">C · 伪造 PP=1 单例组<br>（本次采用）</td>
+        <td data-label="做法">用 <code>world_size=1</code> 的 PP 组替换并行状态，draft 整体留在 PP0</td>
+        <td data-label="代价">PP0 承担全部 draft 计算成为<b>最忙的一段</b>；但改动局限在 scope 与数据流，不碰 draft 内部结构</td>
       </tr>
     </tbody>
   </table>
@@ -284,11 +296,11 @@ sequenceDiagram
   <table>
     <thead><tr><th>文件</th><th>改动</th><th>目的</th></tr></thead>
     <tbody>
-      <tr><td class="mono">scheduler.py (+24/-17)</td><td>DFlash+PP 时不再原地更新 batch 状态，改由 output ring 完成</td><td>"PP completion is handled on the output ring instead"</td></tr>
-      <tr><td class="mono">scheduler_pp_mixin.py (+94/-22)</td><td>加 <code>dflash_append_plan</code>；收发两侧挂 <code>add_result</code>/<code>restore_result</code>；信封一致性校验</td><td>携带 draft 状态穿过 ring</td></tr>
-      <tr><td class="mono">↳ 时序优化</td><td><strong>提前发 proxy</strong>："KV release can synchronize the host. Send the current proxy first so the peer can launch its forward before that wait."</td><td>让下游段早启动</td></tr>
-      <tr><td class="mono">base_runner.py (+14/-2)</td><td><code>residual_shape</code> 从 <code>(max_bs, hidden)</code> 改为 <code>(max_num_token, hidden)</code>；autotune 时伪造 aux 张量</td><td>verify 每请求多行</td></tr>
-      <tr><td class="mono">decode_cuda_graph_runner.py (+17/-1)</td><td>图内预分配 <code>dflash_aux_hidden</code> 缓冲</td><td>图捕获需要静态形状</td></tr>
+      <tr><td data-label="文件" class="mono k">scheduler.py (+24/-17)</td><td data-label="改动">DFlash+PP 时不再原地更新 batch 状态，改由 output ring 完成</td><td data-label="目的">"PP completion is handled on the output ring instead"</td></tr>
+      <tr><td data-label="文件" class="mono k">scheduler_pp_mixin.py (+94/-22)</td><td data-label="改动">加 <code>dflash_append_plan</code>；收发两侧挂 <code>add_result</code>/<code>restore_result</code>；信封一致性校验</td><td data-label="目的">携带 draft 状态穿过 ring</td></tr>
+      <tr><td data-label="文件" class="mono k">↳ 时序优化</td><td data-label="改动"><strong>提前发 proxy</strong>："KV release can synchronize the host. Send the current proxy first so the peer can launch its forward before that wait."</td><td data-label="目的">让下游段早启动</td></tr>
+      <tr><td data-label="文件" class="mono k">base_runner.py (+14/-2)</td><td data-label="改动"><code>residual_shape</code> 从 <code>(max_bs, hidden)</code> 改为 <code>(max_num_token, hidden)</code>；autotune 时伪造 aux 张量</td><td data-label="目的">verify 每请求多行</td></tr>
+      <tr><td data-label="文件" class="mono k">decode_cuda_graph_runner.py (+17/-1)</td><td data-label="改动">图内预分配 <code>dflash_aux_hidden</code> 缓冲</td><td data-label="目的">图捕获需要静态形状</td></tr>
     </tbody>
   </table>
 

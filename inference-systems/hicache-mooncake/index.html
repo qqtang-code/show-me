@@ -111,11 +111,12 @@
     table,tbody,tr,td{display:block;width:100%}
     thead{display:none}
     tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
-    td{border:0;padding:3px 0;display:flex;justify-content:space-between;gap:14px;text-align:right}
-    td::before{content:attr(data-label);color:var(--dim2);font-size:12px;text-align:left;flex:none}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
     td:first-child{display:block;text-align:left;font-size:15px;font-weight:600;
       border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
-    td:first-child::before{content:none}
+    td:first-child::before{content:none;float:none}
   }
 
   /* ---------- 职责边界 ---------- */
