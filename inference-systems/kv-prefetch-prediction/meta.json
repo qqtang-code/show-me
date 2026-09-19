@@ -1,0 +1,21 @@
+{
+  "title": "KV 预取与预测：该不该提前搬，以及提前搬什么",
+  "slug": "kv-prefetch-prediction",
+  "category": "inference-systems",
+  "date": "2026-09-19",
+  "tags": ["KV Cache", "预取", "稀疏注意力", "DSA", "投机解码", "评测方法", "HiCache"],
+  "one_liner": "把 KV 预取拆成两个问题——该不该提前搬（系统层四类信号）与提前搬什么（模型层预测），并给出判据「提前量 ≥ 传输时间」、五个必报指标与一套跨并发梯度的测试矩阵；模型层部分拆解 SparDA（层间 lookahead，提前量一层）与 DualDecoder（用投机 token 预测下一 decode step 的检索索引，KV 预测准确率 88%）。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "sess_028051f7",
+  "sources": [
+    "SGLang 本地分支代码核对：hiradix_cache.prefetch_from_storage()、HiCacheController.prefetch() / prefetch_rate_limited()、buffer_mode/storage_existence_cache.py、server_args 里的 prefetch 策略与重试参数",
+    "SparDA: Sparse Decoupled Attention for Efficient Long-Context LLM Inference（arXiv 2606.04511）原文（含 Limitations 与实现章节）",
+    "DualDecoder: Accelerate Long Context LLM Inference by Predictive Prefetch（arXiv 2607.26475）原文（含 KV 预测准确率 88% 与 2.62× 结论）",
+    "延伸阅读里的 10 篇前作均逐条核对过 arXiv 编号与标题",
+    "部署口径沿用本库《SGLang 推理全流程》一文（KV 54.7 KiB/token、8 卡 PCIe 单机、EAGLE 5 行 verify）"
+  ],
+  "visibility": "public",
+  "redactions": ["机型编号与主机名", "模型版本号与路径"],
+  "enriched": "2026-09-19"
+}

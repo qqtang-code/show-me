@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>4 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-19</span></p>
+  <p class="statline"><span>5 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-19</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -90,6 +90,25 @@
 </div>
 <script>
 const ENTRIES = [
+  {
+    "title": "KV 预取与预测：该不该提前搬，以及提前搬什么",
+    "slug": "kv-prefetch-prediction",
+    "category": "inference-systems",
+    "date": "2026-09-19",
+    "tags": [
+      "KV Cache",
+      "预取",
+      "稀疏注意力",
+      "DSA",
+      "投机解码",
+      "评测方法",
+      "HiCache"
+    ],
+    "one_liner": "把 KV 预取拆成两个问题——该不该提前搬（系统层四类信号）与提前搬什么（模型层预测），并给出判据「提前量 ≥ 传输时间」、五个必报指标与一套跨并发梯度的测试矩阵；模型层部分拆解 SparDA（层间 lookahead，提前量一层）与 DualDecoder（用投机 token 预测下一 decode step 的检索索引，KV 预测准确率 88%）。",
+    "artifact": "index.html",
+    "_dir": "inference-systems/kv-prefetch-prediction",
+    "extra_files": []
+  },
   {
     "title": "SGLang 推理全流程：一条请求从进到出的每一步",
     "slug": "sglang-request-lifecycle",
