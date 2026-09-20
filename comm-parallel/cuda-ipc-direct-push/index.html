@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CUDA IPC 直推：decode 小消息换的是固定开销，不是带宽</title>
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#ffffff; --panel2:#f8fafc; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --waste:#c2410c; --waste-bg:#fff4ec; --good:#0f766e; --good-bg:#eefbf8;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:15.5px;line-height:1.72;
+    padding:40px 20px 80px;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  .sub{color:var(--dim);margin:0 0 12px;font-size:14px}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+  code,.mono{font-family:var(--mono);font-size:.93em}
+  p code,li code,td code{background:#eef2f9;padding:1px 5px;border-radius:4px;color:#213049}
+
+  h2{font-size:19px;margin:40px 0 6px;letter-spacing:-.01em;color:var(--ink);
+     padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .lead{color:var(--dim)}
+  b{color:var(--ink)}
+  ul,ol{padding-left:20px}
+  li{margin:6px 0}
+
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}
+    .nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+  [id]{scroll-margin-top:20px}
+
+  /* ---- 成本式 ---- */
+  .eq{margin:18px 0;padding:16px 18px;border:1px solid var(--line);border-radius:12px;
+      background:var(--panel);font-family:var(--mono);font-size:13px;line-height:2;overflow-x:auto}
+  .eq .a{color:var(--waste)}
+  .eq .b{color:var(--accent)}
+  .eq .cm{color:var(--dim2);font-family:inherit;font-size:12px}
+
+  /* ---- 卡片 ---- */
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:20px 0 0}
+  @media (max-width:760px){.cols{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px 18px;min-width:0}
+  .card.bad{border-color:#f0d9c8;background:var(--waste-bg)}
+  .card.ok{border-color:#c9ece6;background:var(--good-bg)}
+  .card h3{margin:0 0 4px;font-size:15px}
+  .card.bad h3{color:var(--waste)}
+  .card.ok h3{color:var(--good)}
+  .card .algo{font-family:var(--mono);font-size:11.5px;color:var(--dim2);margin-bottom:10px;
+              overflow-wrap:anywhere}
+  .card p{font-size:13.5px;color:var(--dim);margin:8px 0 0}
+
+  /* ---- 数据通路图 ---- */
+  .pathpre{margin:16px 0;background:#0f172a;color:#dbe4f3;border-radius:12px;padding:16px 18px;
+           font:12px/1.85 var(--mono);overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .pathpre .c{color:#7f92b0}
+  .pathpre .hi{color:#7dd3fc}
+  .pathpre .bad{color:#fca5a5}
+  .pathpre .ok{color:#6ee7b7}
+
+  /* ---- 表格 ---- */
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font:600 12px var(--mono);color:var(--dim);background:var(--panel2);white-space:nowrap}
+  td.num{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  .tblwrap{border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+  .tblwrap table{margin:0}
+  .tblwrap th:first-child,.tblwrap td:first-child{padding-left:16px}
+  .tblwrap th:last-child,.tblwrap td:last-child{padding-right:16px}
+  @media (max-width:640px){
+    .tblwrap table,.tblwrap tbody,.tblwrap tr,.tblwrap td{display:block;width:100%}
+    .tblwrap thead{display:none}
+    .tblwrap tr{border-bottom:1px solid var(--line);padding:10px 0}
+    .tblwrap tr:last-child{border-bottom:none}
+    .tblwrap td{display:block;border:none;padding:4px 16px;text-align:right;overflow-wrap:anywhere;white-space:normal}
+    .tblwrap td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;
+                        color:var(--dim2);font:11.5px var(--mono);text-align:left}
+    .tblwrap td.k,.tblwrap td:first-child{text-align:left;font-weight:600;color:var(--ink);
+                        font-size:14.5px;padding-bottom:7px;margin-bottom:3px;border-bottom:1px solid #eef2f9}
+    .tblwrap td.k::before,.tblwrap td:first-child::before{content:none}
+  }
+
+  /* ---- 计算器 ---- */
+  .calc{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px 20px;margin:18px 0}
+  .calc h4{margin:0 0 14px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .ctl{display:flex;flex-wrap:wrap;gap:14px 22px;align-items:center;margin-bottom:14px}
+  .ctl label{font:12.5px var(--mono);color:var(--dim);display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-width:0}
+  .ctl input[type=range]{width:180px;max-width:100%;accent-color:var(--accent)}
+  .ctl select,.ctl input[type=number]{font:12.5px var(--mono);padding:4px 8px;border:1px solid var(--line);
+        border-radius:7px;background:var(--panel2);color:var(--ink);max-width:100%}
+  .ctl .v{font-family:var(--mono);color:var(--ink);font-weight:600;min-width:74px;display:inline-block}
+  .out{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  @media (max-width:700px){.out{grid-template-columns:1fr 1fr}}
+  @media (max-width:430px){.out{grid-template-columns:1fr}}
+  .out .o{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+  .out .o .lb{font:11px var(--mono);color:var(--dim2);display:block;margin-bottom:3px}
+  .out .o .vl{font:16px var(--mono);color:var(--ink);font-weight:600;overflow-wrap:anywhere}
+  .out .o.hi{background:var(--accent-soft);border-color:var(--accent-line)}
+  .out .o.hi .vl{color:var(--accent)}
+  .verdict{margin-top:14px;font-size:13.5px;color:var(--dim);padding:11px 14px;border-radius:10px;
+           background:var(--panel2);border:1px solid var(--line)}
+  .verdict b{color:var(--ink)}
+  .vbtn{font:12px var(--mono);padding:5px 10px;border:1px solid var(--line);border-radius:8px;
+        background:#eef2f9;color:#3f4c63;cursor:pointer}
+  .vbtn:hover{border-color:#bcd0f0;background:#e6eefb;color:var(--accent)}
+
+  .note{margin:18px 0;padding:14px 18px;border-left:3px solid var(--accent);background:var(--accent-soft);
+        border-radius:0 10px 10px 0;font-size:14px;color:#3b4860}
+  .note b{color:var(--ink)}
+  .warn{margin:18px 0;padding:14px 18px;border-left:3px solid var(--waste);background:var(--waste-bg);
+        border-radius:0 10px 10px 0;font-size:14px;color:#5b3a25}
+  .warn b{color:var(--ink)}
+
+  .quiz{margin:16px 0;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:0}
+  .quiz details{border-bottom:1px solid var(--line)}
+  .quiz details:last-child{border-bottom:none}
+  .quiz summary{cursor:pointer;padding:13px 18px;font-size:14px;color:var(--ink);list-style:none}
+  .quiz summary::-webkit-details-marker{display:none}
+  .quiz summary::before{content:"Q";font:600 11px var(--mono);color:var(--accent);margin-right:10px;
+        display:inline-block;width:19px;height:19px;line-height:19px;text-align:center;
+        background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:5px}
+  .quiz details[open] summary{color:var(--accent)}
+  .quiz .ans{padding:0 18px 16px 47px;font-size:13.5px;color:var(--dim)}
+  .quiz .ans b{color:var(--ink)}
+
+  .read{margin:16px 0 0;padding:0;list-style:none}
+  .read li{padding:12px 0;border-bottom:1px solid var(--line)}
+  .read li:last-child{border-bottom:none}
+  .read a{color:var(--accent);text-decoration:none;font-weight:600}
+  .read a:hover{text-decoration:underline}
+  .read .d{display:block;font-size:13px;color:var(--dim2);margin-top:2px}
+
+  footer{margin-top:52px;padding-top:20px;border-top:1px solid var(--line);
+         font-size:12.5px;color:var(--dim2)}
+  footer p{margin:6px 0}
+  footer .lic{font-family:var(--mono);display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  footer .lic a{color:var(--accent);text-decoration:none}
+  .sib{display:inline-block;font:12px var(--mono);color:var(--accent);text-decoration:none;
+       border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:8px;
+       padding:6px 11px;margin:4px 0 0}
+  .sib:hover{background:#e6eefb}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>
+    <span>comm-parallel</span><span class="sep">/</span>
+    <span>cuda-ipc-direct-push</span>
+  </div>
+
+  <h1>CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</h1>
+  <p class="sub">8 卡 PCIe 服务器（无 NVLink）· TP8 · 与「1-stage → 2-stage」是同一条成本式上的两项，按载荷尺寸分流，不是叠加</p>
+
+  <div class="metarow">
+    <span>2026-09</span><span>AllReduce</span><span>CUDA IPC</span><span>PCIe</span>
+    <span>TP8</span><span>延迟 vs 带宽</span>
+  </div>
+
+  <div class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#cost">成本式</a>
+    <a href="#axes">两条轴</a>
+    <a href="#src">源码对照</a>
+    <a href="#shunt">尺寸分流</a>
+    <a href="#change">IPC 改变了什么</a>
+    <a href="#cost2">代价</a>
+    <a href="#mul">为什么不能相乘</a>
+    <a href="#quiz">自测</a>
+    <a href="#read">延伸阅读</a>
+  </div>
+
+  <div class="tldr" id="tldr">
+    <h4>速览 · 30 秒</h4>
+    <ul>
+      <li><b>问题</b>：decode 每一步的归约只有 10 KB 量级。这个尺度上<b>带宽不是瓶颈，固定开销才是</b>——NCCL 每次 collective 都要把数据拷进通道缓冲、由 proxy 侧完成会合与握手，这套开销与消息大小基本无关。</li>
+      <li><b>改动</b>：把归约换成 <b>CUDA IPC 直推</b>。每个 rank 的 workspace 用 IPC 句柄导出、被所有 peer 映射进各自地址空间，kernel 一条 <code>st.global</code> 就写进对端显存；同步也改成 workspace 内的 device 侧 flag 自旋，不再有 host 参与的会合。</li>
+      <li><b>和「1-stage → 2-stage」的关系</b>：<b>不是叠加</b>。1-stage / 2-stage 是同一套 IPC 内核里的 <code>Variant</code> 选择（源码里的 seed 交叉点是 32 KiB），按载荷尺寸二选一；<b>decode 小消息上它选的正是 1-stage</b>——恰好是 2.1 的反方向。两条改动作用在成本式的不同项上，各自负责不同的尺寸区间。</li>
+    </ul>
+  </div>
+
+  <p class="lead">如果「2.1 Custom AllReduce：1-stage → 2-stage」那篇讲的是<b>搬多少字节</b>，这一页讲的是<b>每次归约的固定开销</b>。两件事经常被当成两个可以相乘的百分比，其实它们是同一条成本式上的两项，而且落在不同的尺寸区间。下面把这条式子拆开，再用源码对上。</p>
+
+  <p><a class="sib" href="../allreduce-1stage-vs-2stage/index.html">← 姊妹篇：1-stage → 2-stage，省下的是 4 倍字节</a></p>
+
+  <h2 id="cost"><span class="n">01</span>一次归约的时间拆成两项</h2>
+
+  <p>把单次 all-reduce 的耗时写成两项，后面所有讨论都挂在这条式子上：</p>
+
+  <div class="eq">
+    T &nbsp;≈&nbsp; <span class="a">α</span> &nbsp;+&nbsp; <span class="b">P<sub>eff</sub> / BW</span>
+    <br>
+    <span class="cm">α &nbsp;&nbsp;&nbsp;= 固定开销：launch、通道拷贝、proxy 会合、握手 —— 与消息大小<b>基本无关</b></span>
+    <br>
+    <span class="cm">P<sub>eff</sub> = 每个 rank 实际经手的字节数（≠ 载荷 P，差一个算法倍数）</span>
+    <br>
+    <span class="cm">BW &nbsp;= 链路有效带宽（这台机器上反推得 ≈ 35.5–39 GB/s）</span>
+  </div>
+
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>改动</th><th>砍的是哪一项</th><th>手段</th><th>主导的尺寸区间</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="k">1-stage → 2-stage</td>
+          <td data-label="砍的是哪一项">字节项 <span class="mono">P_eff</span></td>
+          <td data-label="手段">广播式搬法 → reduce-scatter + all-gather，TP8 上字节降到 1/4</td>
+          <td data-label="主导区间">大载荷（verify 4.6 MB、prefill 84 MB）</td>
+        </tr>
+        <tr>
+          <td class="k">换 CUDA IPC 直推</td>
+          <td data-label="砍的是哪一项">固定项 <span class="mono">α</span></td>
+          <td data-label="手段">对端显存直接映射进本进程；去掉通道拷贝与 proxy 会合</td>
+          <td data-label="主导区间">小消息（decode 单步 10 KB–数百 KB）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <b>一句话</b>：2.1 是「通信变少了」，IPC 是「通信变便宜了」。前者受带宽墙约束（省字节越多越赚），后者受固定开销约束（消息越小越赚）。<b>所以它们在 decode 这个尺度上方向相反</b>：小消息上字节项本来就小，把算法换成 2-stage 反而要多付几轮相位屏障。
+  </div>
+
+  <h2 id="axes"><span class="n">02</span>两条轴：谁砍 α，谁砍 P<sub>eff</sub></h2>
+
+  <p>把「传输层」和「算法」当成两条独立的轴看，可选的组合只有三种是真实存在的：</p>
+
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>传输层</th><th>算法</th><th>每 rank 经手字节</th><th>固定开销 α</th><th>谁在用</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="k">NCCL ring</td>
+          <td data-label="算法">结构性等价于 2-stage</td>
+          <td class="num" data-label="每rank字节">2(N−1)/N · P</td>
+          <td data-label="固定开销">大（通道 + proxy 会合）</td>
+          <td data-label="谁在用">兜底；IPC 未覆盖形状的回落</td>
+        </tr>
+        <tr>
+          <td class="k">CUDA IPC 直推</td>
+          <td data-label="算法"><code>Variant::kUnstaged</code>（1-stage）</td>
+          <td class="num" data-label="每rank字节">(N−1) · P</td>
+          <td data-label="固定开销">小（无通道、无会合、无相位屏障）</td>
+          <td data-label="谁在用">decode 小消息</td>
+        </tr>
+        <tr>
+          <td class="k">CUDA IPC 直推</td>
+          <td data-label="算法"><code>kStaged</code> / <code>kStagedRing</code>（2-stage）</td>
+          <td class="num" data-label="每rank字节">2(N−1)/N · P</td>
+          <td data-label="固定开销">小 + 多轮相位屏障</td>
+          <td data-label="谁在用">verify / prefill 大载荷</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>这张表里最值得注意的一点：<b>NCCL 的 ring 本来就搬 2(N−1)/N · P，它已经是字节最优的</b>。所以「省下 4 倍字节」这件事在 NCCL 上根本不存在——如果某次实验测到一条路径每 rank 收 7P，那必然是某个 one-shot 实现，不是 NCCL。这也顺手说明：<b>2.1 的收益和 IPC 的收益不可能是同一份</b>，因为 2.1 的字节节省只可能发生在 IPC 内核的 variant 之间。</p>
+
+  <h2 id="src"><span class="n">03</span>源码对照：variant 枚举与分派顺序</h2>
+
+  <h3 class="mini">3.1 「1-stage / 2-stage」在源码里就叫 Variant</h3>
+
+  <p>kernel 头文件里这个枚举，就是那条算法轴的原文（注释是源码自带的）：</p>
+
+  <div class="eq">
+    <span class="cm">// flashinfer …/comm/pcie_ipc_all_reduce.cuh</span><br>
+    enum class Variant : int {<br>
+    &nbsp;&nbsp;kUnstaged &nbsp;&nbsp; = 0, &nbsp;<span class="cm">// push to every peer at once &nbsp;← 1-stage</span><br>
+    &nbsp;&nbsp;kStaged &nbsp;&nbsp;&nbsp;&nbsp; = 1, &nbsp;<span class="cm">// staged pushes; island-decomposed at world_size 8</span><br>
+    &nbsp;&nbsp;kStagedRing &nbsp; = 2, &nbsp;<span class="cm">// staged pushes in neighbour order &nbsp;← 我们那次命中的</span><br>
+    &nbsp;&nbsp;kFlatStaged &nbsp; = 3, &nbsp;<span class="cm">// staged pushes without the island decomposition</span><br>
+    };
+  </div>
+
+  <p>内核名字直接标着算法：<code>rsag</code> = <b>r</b>educe-<b>s</b>catter-<b>a</b>ll-<b>g</b>ather，也就是 2-stage。而我们 84 MB prefill 那一次实测里站上榜首的内核是：</p>
+
+  <div class="eq">
+    flashinfer::comm::pcie_ipc::<span class="hi">ipc_topo_rsag8_ring_push_param_kernel</span>&lt;bf16&gt;<br>
+    <span class="cm">4,106 次调用 × 3.758 ms，载荷 84 MB，按算法搬 1.75 S = 147 MB ⇒ 39 GB/s</span><br>
+    <span class="cm">对比 NCCL 同载荷 4.64–4.90 ms（30–31.5 GB/s）：IPC 路径快 24–30%</span>
+  </div>
+
+  <p>而 1-stage 的内核是 <code>push_oneshot_param_kernel&lt;T,4&gt;</code>（world 4）和 <code>ipc_topo_rsag8_push_param_kernel&lt;T&gt;</code>（world 8）——同一个 <code>FI_PCIE_IPC_SELECT</code> 宏按 <code>(world_size, variant)</code> 分发。选哪个 variant 由 seed 策略给出兜底、由实测调优表逐形状决定：</p>
+
+  <div class="eq">
+    <span class="cm"># pcie_ipc_policy.py</span><br>
+    <span class="cm"># Payload above which reduce-scatter/all-gather beats pushing to every peer.</span><br>
+    _SEED_STAGE_BYTES = 32 * 1024 &nbsp;&nbsp;<span class="cm"># 32 KiB：字节项开始压过相位屏障成本</span><br><br>
+    <span class="cm"># 其余分支（节选，注释为源码原文）：</span><br>
+    world 2 → <span class="hi">UNSTAGED</span> &nbsp;&nbsp;<span class="cm"># “staging moves the same bytes it would have pushed”</span><br>
+    world 4 → <span class="hi">STAGED</span> &nbsp;&nbsp;&nbsp;&nbsp;<span class="cm"># “the all-to-all form pays only two barriers”</span><br>
+    world 8 → 载荷 ≥ 32 KiB ? <span class="hi">STAGED_RING</span> : <span class="hi">UNSTAGED</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cm"># “the island-partitioned push has no barriers, which is what the staged path's</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cm"># &nbsp;six island barriers must beat”</span>
+  </div>
+
+  <div class="warn">
+    <b>关键点：seed 只是兜底。</b>真正生效的是 autotune 跑出来的实测表（每个形状一行 tactic），seed 只负责没测过的形状。所以「decode 到底走了 1-stage 还是 2-stage」不能只按 32 KiB 猜，要读服务启动日志里的逐形状 tactic 打印（instrumentation 会对 rows = 1/4/8/16/32/64/128/512/8192 各打一行）。
+  </div>
+
+  <h3 class="mini">3.2 分派是互斥的：一个张量只走一条路</h3>
+
+  <div class="eq">
+    <span class="cm">// parallel_state.py —— 返回单一方法名，先匹配者胜</span><br>
+    ca &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <span class="bad">CustomAllreduce（本机被硬性禁用，见下）</span><br>
+    <span class="hi">pcie_ipc</span> &nbsp;→ <span class="ok">PCIe-IPC 直推（本机第一个真正生效的加速分支）</span><br>
+    qr &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ QuickAllReduce（需 NVLink/multicast）<br>
+    pymscclpp → 需自有 fabric<br>
+    torch_symm_mem → …<br>
+    pynccl &nbsp;&nbsp;→ …<br>
+    <span class="bad">None</span> &nbsp;&nbsp;&nbsp;&nbsp;→ 回落到 NCCL
+  </div>
+
+  <p><code>ca</code> 排在 <code>pcie_ipc</code> 前面，看起来像「先试 CustomAllreduce，不行再 IPC」。但这台机器上 <b>CustomAllreduce 是被硬性禁用的</b>，不是「效果差」：</p>
+
+  <div class="eq">
+    <span class="cm"># custom_all_reduce_utils.py</span><br>
+    if world_size &gt; 2 and not full_nvlink:<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="bad">"…is disabled because it's not supported on more than two PCIe-only GPUs"</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;return &nbsp;<span class="cm"># → full_nvlink = None</span><br><br>
+    <span class="cm"># custom_all_reduce.py → should_custom_ar()</span><br>
+    if self.world_size == 2 or self.full_nvlink:<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;return inp_size &lt;= self.max_size<br>
+    return <span class="bad">False</span> &nbsp;&nbsp;<span class="cm"># ← TP8 无 NVLink：对**所有**形状返回 False</span>
+  </div>
+
+  <p>所以在 8 卡无 NVLink 的 TP8 上，classic CustomAllreduce 对每一个形状都拒收（启动时会打一条 warning），另一个 <code>CustomAllReduceV2</code> 也没有接进 <code>parallel_state</code>。这也解释了一个容易被忽略的事实：<b>当 IPC 不可用时，回落目标是 NCCL，而不是 CustomAllreduce</b>——因为后者在这台机器上根本不工作。</p>
+
+  <h2 id="shunt"><span class="n">04</span>尺寸分流：最终配方是按消息大小开路</h2>
+
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>载荷区间</th><th>走哪条路</th><th>本轮实测</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="k">1–64 行<br><span class="mono">≈ 10–650 KB</span></td>
+          <td data-label="走哪条路">IPC 直推 + <b>1-stage</b>（<code>kUnstaged</code>）</td>
+          <td data-label="实测">延迟最优：1 个 kernel + 最少同步。字节项本来就小，2-stage 的相位屏障反而更贵</td>
+        </tr>
+        <tr>
+          <td class="k">verify 4.6 MB<br><span class="mono">374 行 × hidden × 2B</span></td>
+          <td data-label="走哪条路">IPC 直推 + <b>2-stage</b>（rsag）</td>
+          <td data-label="实测">单次归约 <b>907 → 222.6 μs</b>（4.07×）；反推带宽 35.5 → 36.2 GB/s，与微基准 39.1 GB/s 同量级 ⇒ 纯带宽受限</td>
+        </tr>
+        <tr>
+          <td class="k">prefill 84 MB<br><span class="mono">8192 × hidden × 2B</span></td>
+          <td data-label="走哪条路">IPC 直推 + <b>2-stage</b>（<code>kStagedRing</code>）</td>
+          <td data-label="实测">单次 <b>3.997 ms vs NCCL 4.641 ms</b>（快 14%），等效 36.8 vs 31.7 GB/s；把 prefill 归约从 NCCL 搬到 IPC 后，NCCL 占总 kernel 时间 <b>46.5% → 1.4%</b></td>
+        </tr>
+        <tr>
+          <td class="k">更大（早期 96 MiB 试验）</td>
+          <td data-label="走哪条路">当时保留原路径</td>
+          <td data-label="实测">早期 IPC 候选在 96 MiB 上 3.71 ms，比参考路径慢 ⇒ 大消息不继续加码；后来 <code>kStagedRing</code> 把 84 MB 做成了赢</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <b>这就是「不是叠加」的实操含义</b>：最终配方是<b>按消息尺寸分流</b>，而不是全量替换。每个形状只吃自己那条路的收益——小张量吃延迟收益，大载荷吃字节收益，<b>不存在把两者相加或相乘的配置</b>。你自己那篇 2.1 的边界一节写的就是这句话（「小消息上 1-stage 反而更快，所以还要为 1–64 行的小张量单独做 IPC 路径」）。严格说：那篇讲的是「按 N 和消息大小分流」，这一页讲的是「同一个分流表里，小尺寸格子里装的是 IPC + 1-stage」。
+  </div>
+
+  <h2 id="change"><span class="n">05</span>源码侧：采用 CUDA IPC 之后改变了什么</h2>
+
+  <h3 class="mini">5.1 「直推」指的是数据不再经过通道缓冲</h3>
+
+  <p>先把两条通路并排画出来（<code>r0</code> 的视角，N = 8）：</p>
+
+  <div class="pathpre">
+<span class="c">── NCCL 通路（固定开销 α 大）：数据必须先进通道缓冲 ──────────────</span>
+  r0 计算出的部分和
+    │
+    ├─▶ <span class="bad">拷贝进 NCCL 的 send channel 缓冲</span>        <span class="c">← 与消息大小无关的成本</span>
+    │
+    ├─▶ <span class="bad">proxy / host 侧会合，按 ring 顺序 send/recv</span>  <span class="c">← 每次 collective 都要重来一遍</span>
+    │
+    ├─▶ PCIe（经过 CPU root complex）
+    │
+    └─▶ 落到本地 recv channel 缓冲 ─▶ 再拷出到输出张量 ─▶ 本机归约
+
+<span class="c">── CUDA IPC 直推（固定开销 α 小）：对端显存是本进程里的一个合法指针 ──</span>
+  启动时一次性： cudaMalloc slab → cudaIpcGetMemHandle → all_gather 句柄
+                 → <span class="hi">cudaIpcOpenMemHandle</span> 把每个 peer 的 slab 映射进本进程
+                 → <span class="hi">make_peer_views()</span> 算出 per-peer 指针（偏移此后固定不变）
+
+  运行时（kernel 内部）：
+    r0 计算出的部分和
+      │
+      └─▶ <span class="ok">st.global 直接写进对端 slab</span>   <span class="c">← 没有通道，没有拷贝，没有 host 参与</span>
+            │
+            └─▶ 同步也在这个 slab 里：<span class="ok">device 侧 flag 自旋 + __threadfence_system()</span>
+  </div>
+
+  <p>所谓「直推」（push），就是<b>发送方的 kernel 直接往接收方的显存里写</b>，而不是把数据交给一个通信库去搬运。能做到这一点，唯一的前提是那个地址在本进程里合法——这正是 <code>cudaIpcOpenMemHandle</code> 给的。</p>
+
+  <h3 class="mini">5.2 改变了四件事</h3>
+
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>维度</th><th>NCCL / 通道语义</th><th>CUDA IPC 直推</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="k">地址空间</td>
+          <td data-label="NCCL">每个 rank 只有自己的显存是合法地址，所以必须有 channel 缓冲承载「别人的数据」</td>
+          <td data-label="IPC">对端 slab 的每一个区域都映射为本进程里的合法指针（<code>ipc_ptrs[]</code>），可以直接寻址</td>
+        </tr>
+        <tr>
+          <td class="k">谁发起传输</td>
+          <td data-label="NCCL">ring 语义：每个 rank 往邻居发自己那一份（<code>send/recv</code>），带宽最优但要走库的调度</td>
+          <td data-label="IPC">push 语义：自己那一份直接推进对端（<code>st.global</code>），发起方就是算完的那个 kernel</td>
+        </tr>
+        <tr>
+          <td class="k">怎么同步</td>
+          <td data-label="NCCL">per-collective 的会合/握手，涉及 proxy 与 host 侧进展</td>
+          <td data-label="IPC">带内同步：同一个 slab 里划出 signal 区（epoch 槽 / barrier 相位 / barrier flag 三段互不相交），kernel 自己写 flag、自旋等待</td>
+        </tr>
+        <tr>
+          <td class="k">拓扑是否烘死</td>
+          <td data-label="NCCL">库在运行时按拓扑选算法</td>
+          <td data-label="IPC">workspace 在首次归约时<b>一次性</b>分配，peer 偏移烘进 handle，此后不可增长</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mini">5.3 没有改变的两件事（这是最容易被误读的地方）</h3>
+
+  <ul>
+    <li><b>物理链路与带宽上限没变。</b>还是那根 PCIe，还是过 CPU root complex。「直推」省掉的是软件层的通道与会合，不是链路本身。所以它抢不到任何带宽红利——大载荷上它能赢，靠的仍然是 variant 换了算法（省字节），不是 IPC 让链路变快了。</li>
+    <li><b>staged 变体的字节数也没变。</b>源码注释写得很直白：<i>“Total bytes are unchanged, only the order.”</i>——<code>kUnstaged</code> 在无 switch 的机器上 all-to-all 写会塌，所以 staged 变体把推送重排成「任意时刻每个 rank 恰好一个出站流、一个入站流」。字节数相同，只是次序变了。</li>
+  </ul>
+
+  <h2 id="cost2"><span class="n">06</span>代价：workspace 是一块一次性、不可增长的显存</h2>
+
+  <p>直推要求 buffer 常驻且被所有 peer 映射，所以必须提前申请。布局函数把它的构成写得完全确定：</p>
+
+  <div class="eq">
+    <span class="cm">// compute_workspace_layout()</span><br>
+    signal_bytes &nbsp;=&nbsp; align128(4B × (epoch 槽 + 相位屏障槽 + flag 槽 + scratch 状态))<br>
+    payload_bytes =&nbsp; align128(max_numel × elem_size)<br>
+    scratch_bytes =&nbsp; align128(<span class="hi">2 × world_size</span> × payload_bytes) &nbsp;<span class="cm">← epoch 双缓冲 × world_size 个 peer 槽</span><br>
+    total_bytes &nbsp;=&nbsp; signal_bytes + <span class="hi">2 ×</span> scratch_bytes<br>
+    <span class="cm">⇒ 量级上 total ≈ 4 × world_size × max_numel × elem_size</span>
+  </div>
+
+  <p>末行那个 <code>2 ×</code> 是两套协议族（sentinel 内核与 barrier 内核）各占一份 scratch。<code>max_numel</code> 由服务侧传入（默认取 decode 宽度 × hidden，可用 env 覆盖到 prefill 规模）。把它代进我们的实际配置可以验一下账：</p>
+
+  <div class="calc">
+    <h4>workspace 占用计算器</h4>
+    <div class="ctl">
+      <label>TP 规模 N
+        <select id="wsN"><option value="2">2</option><option value="4">4</option><option value="8" selected>8</option></select>
+      </label>
+      <label>max_numel
+        <input type="number" id="wsM" value="41943040" min="1024" step="1024">
+      </label>
+      <label>dtype
+        <select id="wsD"><option value="2" selected>bf16 / fp16（2B）</option></select>
+      </label>
+      <button class="vbtn" id="wsPreset">填入本轮实际配置</button>
+    </div>
+    <div class="out">
+      <div class="o hi"><span class="lb">每卡 workspace 占用</span><span class="vl" id="wsOut">—</span></div>
+      <div class="o"><span class="lb">其中 payload 部分</span><span class="vl" id="wsPay">—</span></div>
+      <div class="o"><span class="lb">等价于多少张卡的 24 GB</span><span class="vl" id="wsPct">—</span></div>
+    </div>
+    <div class="verdict" id="wsNote">—</div>
+  </div>
+
+  <p>实测印证：<code>max_numel = 41,943,040</code>（= 8192 × 5120）、bf16、N = 8 时算得 <b>2.68 GB/卡</b>，与启动日志观测到的「显存 +2.7 GB/卡」一致——这条式子可以直接用来估任何配置的代价。</p>
+
+  <div class="warn">
+    <b>两条硬约束</b>：<br>
+    ① <b>不能增长</b>。偏移在 <code>init()</code> 时就烘进 handle，超过 <code>max_numel</code> 的形状会让 <code>supports()</code> 返回 False 并回落 NCCL，而不是报错——所以「要不要开大」是在显存与覆盖率之间做取舍。<br>
+    ② <b>不能跨主机</b>。数据面是 CUDA IPC，句柄只在同一台主机内有效，代码里对跨主机的 process group 直接抛错。<b>而且回落是整组粒度的</b>：一个 TP 组里只要出现两台主机，节点内那几对 rank 也一起退回 NCCL——这个实现不提供「跨节点 slow + 节点内 fast」的混合模式。
+  </div>
+
+  <div class="calc">
+    <h4>字节数计算器：1-stage 与 2-stage 的倍数从哪来</h4>
+    <div class="ctl">
+      <label>TP 规模 N
+        <select id="szN"><option value="2">2</option><option value="4">4</option><option value="8" selected>8</option></select>
+      </label>
+      <label>载荷 P
+        <input type="range" id="szP" min="0" max="26" step="0.25" value="12.2">
+        <span class="v" id="szPv">—</span>
+      </label>
+    </div>
+    <div class="out">
+      <div class="o"><span class="lb">1-stage 每 rank 收 (N−1)·P</span><span class="vl" id="sz1">—</span></div>
+      <div class="o hi"><span class="lb">2-stage 每 rank 收 2(N−1)/N·P</span><span class="vl" id="sz2">—</span></div>
+      <div class="o"><span class="lb">字节节省倍数 = N/2</span><span class="vl" id="szR">—</span></div>
+    </div>
+    <div class="verdict" id="szNote">—</div>
+  </div>
+
+  <h2 id="mul"><span class="n">07</span>为什么两个收益不能相乘</h2>
+
+  <ul>
+    <li><b>分派层互斥。</b><code>_resolve_outplace_all_reduce_method()</code> 返回的是一个方法名，一个张量只会走一条路，不存在「两条路的收益都拿到」。</li>
+    <li><b>两条轴在同一套内核里。</b>「1-stage ↔ 2-stage」不是外挂在 IPC 之外的第二个开关，它就是 IPC 内核的 <code>Variant</code>。所以对 decode 而言，「换 IPC」与「换回 1-stage」是同一个动作的两面。</li>
+    <li><b>Amdahl 是加权，不是乘法。</b>端到端收益 = 归约时间在总时间里的占比 × 局部加速比。不同形状的占比不同（prefill 高的场景里归约占比低），所以两个局部加速比不会以乘积形式传导到端到端。</li>
+    <li><b>一台机器上只有一份「省字节」的空间。</b>TP8 的最优字节下界是 2(N−1)/N·P，谁先到谁拿走；NCCL 的 ring 本来就在这个下界上，所以 2.1 的 4 倍节省只能来自 IPC 内核内部的 variant 切换。</li>
+  </ul>
+
+  <div class="note">
+    <b>正确的说法</b>：两条改动是同一个决策表的两个维度，按<b>载荷尺寸</b>与<b>TP 规模</b>分流。要判断某个配置该拿多少收益，先问「这个形状落在哪个格子」，再取那个格子的路——而不是把两个百分比加起来。
+  </div>
+
+  <h2 id="quiz"><span class="n">08</span>自测</h2>
+
+  <div class="quiz">
+    <details>
+      <summary>decode 小消息上，2-stage 明明省 4 倍字节，为什么反而更慢？</summary>
+      <div class="ans">
+        因为小消息上<b>字节项不是主导项</b>。以 N=8、P=10 KB 为例：1-stage 收 7P = 70 KB，2-stage 收 1.75P = 17.5 KB，按 36 GB/s 折算差 <b>1.5 μs</b>；而 2-stage 要多付数轮相位屏障。我们 84 MB 那次实测把 0.579 ms 残差归因到 7 个相位（≈ 83 μs/相位，含 <code>__threadfence_system</code>），相位成本是<b>固定量级、不随载荷缩小</b>，所以小消息上它直接吃掉全部字节收益还倒亏。源码里那句「the island-partitioned push has no barriers, which is what the staged path's six island barriers must beat」讲的就是这个取舍。
+      </div>
+    </details>
+    <details>
+      <summary>为什么说「省 4 倍字节」这件事不可能发生在 NCCL 上？</summary>
+      <div class="ans">
+        NCCL 的 ring 结构本身就是 reduce-scatter + all-gather，每 rank 经手 <b>2(N−1)/N·P</b>，已经在字节下界上。所以任何测到「每 rank 收 7P」的路径都必然是一个 one-shot（广播式）实现，不是 NCCL。这条推理的用处：它能在不看实现的情况下，判断一次「省字节」的改动是在哪个后端上发生的。
+      </div>
+    </details>
+    <details>
+      <summary>这台机器上 CustomAllreduce 是「效果差」还是「被禁用」？后果是什么？</summary>
+      <div class="ans">
+        <b>被硬性禁用</b>。<code>world_size &gt; 2 and not full_nvlink</code> 直接 return，<code>should_custom_ar()</code> 对所有形状返回 False，启动时还会打一条 warning。后果是：当 PCIe-IPC 不可用时（显存不够、形状超界、跨主机），回落目标是 <b>NCCL</b>，而不是 CustomAllreduce——后者在这台机器上本来就不工作。所以测「IPC 关掉会掉多少」时，对照组是 NCCL 基线，不是 ca。
+      </div>
+    </details>
+    <details>
+      <summary>workspace 为什么必须一次性申请、且不能增长？</summary>
+      <div class="ans">
+        因为 peer 的偏移量在 <code>init()</code> 时就烘进了 kernel 的 handle 并分发给所有 rank，运行期不能再重新分配（重新分配需要所有 rank 在「所有 peer 解除映射」与「各自 cudaFree」之间做一次集体屏障，析构函数表达不了）。代价是必须按「模型会发出的最大归约」来定尺寸：decode 宽度 × hidden，或直接用 env 覆盖到 prefill 规模。超出即 <code>supports() = False</code> 静默回落。
+      </div>
+    </details>
+    <details>
+      <summary>为什么这页的三条实测都反推出「同一个带宽量级」是重要证据？</summary>
+      <div class="ans">
+        因为它排除了「换了算法但其实走了别的路径」这类误判。verify 4.6 MB：32.2 MB ÷ 907 μs = <b>35.5 GB/s</b>；2-stage：8.05 MB ÷ 222.6 μs = <b>36.2 GB/s</b>；prefill 84 MB 的 rsag：147 MB ÷ 3.758 ms = <b>39 GB/s</b>；独立微基准 push/pull/双向 = 39.1/38.6/41.1 GB/s。四处同量级 ⇒ 这些路径都是<b>纯带宽受限</b>的 PCIe 交换，差别只在「搬了多少」与「固定开销付了几次」。
+      </div>
+    </details>
+  </div>
+
+  <h2 id="read"><span class="n">09</span>延伸阅读</h2>
+  <ul class="read">
+    <li>
+      <a href="../allreduce-1stage-vs-2stage/index.html">1-stage → 2-stage：省下的是 4 倍字节</a>
+      <span class="d">本页的姊妹篇。先看那篇建立「字节倍数 = N/2」的直觉，再看这页的固定开销项。</span>
+    </li>
+    <li>
+      <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html">NCCL · Collectives 文档</a>
+      <span class="d">想搞清楚生产库怎么按消息大小分流、以及 ring/tree 各自的适用区间，从这里入手。</span>
+    </li>
+    <li>
+      <a href="https://github.com/sgl-project/sglang">sgl-project/sglang</a>
+      <span class="d">后端分派（<code>_resolve_outplace_all_reduce_method</code>）与各 communicator 的实现都在仓库里，可以对照本文的分派顺序读代码。</span>
+    </li>
+    <li>
+      <a href="https://github.com/flashinfer-ai/flashinfer">flashinfer-ai/flashinfer</a>
+      <span class="d"><code>comm/pcie_ipc_*.py</code> 与 <code>include/flashinfer/comm/pcie_ipc_all_reduce.cuh</code>：Variant 枚举、workspace 布局、Tactic 调优表都在这里；cudaIpc 的封装在 <code>comm/cuda_ipc.py</code>。</span>
+    </li>
+  </ul>
+
+  <footer>
+    <p>数据来自 2026-09 的一次内部优化实验：8 卡 PCIe 服务器（无 NVLink）、TP8、MoE 模型 hidden 5120、投机解码 verify 负载。
+      单次归约 907 → 222.6 μs、prefill 84 MB 的 3.997 ms vs NCCL 4.641 ms、NCCL 占比 46.5% → 1.4%、workspace +2.7 GB/卡 均为实测；
+      带宽数字由字节数 ÷ 时间反算，微基准 39.1/38.6/41.1 GB/s 独立测得。上游记录（12 KiB 上 5.3 μs vs NCCL 205.1 μs，8×SM120 / hidden 6144）为引用。
+      内部主机名、IP、文档标识与模型版本信息已做脱敏。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  function fmtB(b){
+    if (b >= 1e9) return (b/1e9).toFixed(2)+' GB';
+    if (b >= 1e6) return (b/1e6).toFixed(2)+' MB';
+    if (b >= 1e3) return (b/1e3).toFixed(1)+' KB';
+    return b+' B';
+  }
+
+  /* ---------- workspace 计算器 ---------- */
+  var wsN = document.getElementById('wsN'),
+      wsM = document.getElementById('wsM'),
+      wsD = document.getElementById('wsD'),
+      wsOut = document.getElementById('wsOut'),
+      wsPay = document.getElementById('wsPay'),
+      wsPct = document.getElementById('wsPct'),
+      wsNote = document.getElementById('wsNote');
+
+  function wsCalc(){
+    var n = +wsN.value, m = Math.max(1024, +wsM.value || 1024), es = +wsD.value;
+    var total = 4 * n * m * es;
+    var pay = m * es;                     // max_payload per rank
+    wsOut.textContent = fmtB(total);
+    wsPay.textContent = fmtB(pay);
+    wsPct.textContent = (total/24e9*100).toFixed(1) + '%';
+    var decodeOnly = 64 * 5120 * 2;       // 默认推导值：decode 宽度 64 × hidden 5120
+    var html = '按 <b>total ≈ 4 × N × max_numel × elem_size</b> 计算。';
+    if (m === 41943040 && n === 8){
+      html += ' 这就是本轮实际配置（max_numel = 8192 × 5120，把 prefill 规模的归约也覆盖进来），启动日志观测到的显存增量 <b>+2.7 GB/卡</b> 与此吻合。';
+    } else if (m <= 327680){
+      html += ' 这是只按 decode 宽度推导的默认尺寸（64 × 5120 = ' + (327680).toLocaleString() + ' 元素 ≈ ' + fmtB(4*n*327680*es) + '/卡），prefill 规模的归约不会走 IPC，而是回落 NCCL。';
+    } else {
+      html += ' 每卡占用与 N、max_numel 成正比，与 dtype 字节数成正比——开大覆盖率是拿显存换的。';
+    }
+    wsNote.innerHTML = html;
+  }
+  document.getElementById('wsPreset').addEventListener('click', function(){
+    wsN.value = '8'; wsM.value = 41943040; wsD.value = '2'; wsCalc();
+  });
+  [wsN, wsM, wsD].forEach(function(el){ el.addEventListener('input', wsCalc); });
+  wsCalc();
+
+  /* ---------- 字节数计算器 ---------- */
+  var szN = document.getElementById('szN'),
+      szP = document.getElementById('szP'),
+      szPv = document.getElementById('szPv'),
+      sz1 = document.getElementById('sz1'),
+      sz2 = document.getElementById('sz2'),
+      szR = document.getElementById('szR'),
+      szNote = document.getElementById('szNote');
+  var BW = 36; // GB/s，本轮反推值
+
+  function szCalc(){
+    var n = +szN.value;
+    var pKB = Math.pow(2, +szP.value);          // 2^x KB
+    var pB = pKB * 1024;
+    var b1 = (n-1) * pB, b2 = 2*(n-1)/n * pB;
+    var ratio = b2 > 0 ? b1/b2 : 1;
+    var t1 = b1/(BW*1e9)*1e6, t2 = b2/(BW*1e9)*1e6;  // µs
+    szPv.textContent = fmtB(pB);
+    sz1.textContent = fmtB(b1);
+    sz2.textContent = fmtB(b2);
+    szR.textContent = ratio.toFixed(2) + '×' + (ratio <= 1.001 ? '（无收益）' : '');
+    var html = '按 <b>36 GB/s</b> 折算：1-stage ≈ ' + t1.toFixed(1) + ' μs，2-stage ≈ ' + t2.toFixed(1) +
+               ' μs，差 ' + (t1-t2).toFixed(1) + ' μs —— <b>这就是 2-stage 在小消息上能拿到的全部字节收益</b>。';
+    if (pB < 32768){
+      html += ' 载荷低于 seed 交叉点 <b>32 KiB</b>：seed 策略会给 1-stage（<code>kUnstaged</code>、0 相位屏障）。';
+    } else {
+      html += ' 载荷高于 32 KiB：seed 策略会给 2-stage（<code>kStagedRing</code>），但最终以实测调优表为准。';
+    }
+    html += ' 别忘了 2-stage 还要多付数轮相位屏障（实测 ≈ 83 μs/相位量级），小消息上那一项远大于上面这个差值。';
+    szNote.innerHTML = html;
+  }
+  [szN, szP].forEach(function(el){ el.addEventListener('input', szCalc); });
+  szCalc();
+})();
+</script>
+</body>
+</html>

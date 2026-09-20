@@ -1,0 +1,25 @@
+{
+  "title": "CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽",
+  "slug": "cuda-ipc-direct-push",
+  "category": "comm-parallel",
+  "date": "2026-09-20",
+  "tags": ["AllReduce", "CUDA IPC", "PCIe", "张量并行", "通信优化", "延迟vs带宽"],
+  "one_liner": "decode 小消息把 AllReduce 换成 CUDA IPC 直推，砍的是成本式里的固定开销 α（不是带宽）；1-stage ↔ 2-stage 是同一套 IPC 内核里的 Variant 选择（seed 交叉点 32 KiB），按载荷尺寸分流——两条改动的收益不能相乘。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "sess_f72fea5d",
+  "sources": [
+    "上游 flashinfer PR #4393（已合并）：Variant 枚举、compute_workspace_layout()、cudaIpc 封装、world size 2/4/8 与「不得跨主机」约束的出处",
+    "上游 sglang PR #34528（开放中）：pcie_ipc 适配器、后端分派顺序、workspace sizing 与「prefill stays on NCCL」的出处",
+    "2026-09 一次内部部署优化实验的实测数据（8 卡 PCIe 服务器 · 无 NVLink · TP8 · MoE 模型 hidden 5120 · 投机解码 verify 负载）",
+    "本页保留全部数字与推导：单次归约 907 → 222.6 μs、prefill 84 MB 3.997 vs NCCL 4.641 ms、NCCL 占比 46.5% → 1.4%、workspace +2.7 GB/卡、微基准 39.1/38.6/41.1 GB/s"
+  ],
+  "visibility": "public",
+  "redactions": [
+    "主机名与内网 IP",
+    "内部文档名称与绝对路径",
+    "模型版本号（统一写作「MoE 模型 / hidden 5120」）",
+    "内部环境变量名（workspace 上限开关只描述语义，不给变量名）"
+  ],
+  "enriched": "2026-09-20"
+}

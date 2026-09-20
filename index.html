@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>5 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-19</span></p>
+  <p class="statline"><span>6 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-20</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -168,6 +168,24 @@ const ENTRIES = [
     "extra_files": [
       "notes.md"
     ]
+  },
+  {
+    "title": "CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽",
+    "slug": "cuda-ipc-direct-push",
+    "category": "comm-parallel",
+    "date": "2026-09-20",
+    "tags": [
+      "AllReduce",
+      "CUDA IPC",
+      "PCIe",
+      "张量并行",
+      "通信优化",
+      "延迟vs带宽"
+    ],
+    "one_liner": "decode 小消息把 AllReduce 换成 CUDA IPC 直推，砍的是成本式里的固定开销 α（不是带宽）；1-stage ↔ 2-stage 是同一套 IPC 内核里的 Variant 选择（seed 交叉点 32 KiB），按载荷尺寸分流——两条改动的收益不能相乘。",
+    "artifact": "index.html",
+    "_dir": "comm-parallel/cuda-ipc-direct-push",
+    "extra_files": []
   },
   {
     "title": "1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节",
