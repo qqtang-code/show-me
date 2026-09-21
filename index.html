@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>6 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-20</span></p>
+  <p class="statline"><span>7 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-21</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -90,6 +90,27 @@
 </div>
 <script>
 const ENTRIES = [
+  {
+    "title": "MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别",
+    "slug": "moe-a2a-megamoe",
+    "category": "inference-systems",
+    "date": "2026-09-21",
+    "tags": [
+      "SGLang",
+      "DeepGEMM",
+      "MegaMoE",
+      "MoE",
+      "EP / A2A",
+      "DeepEP",
+      "FlashInfer",
+      "对称内存",
+      "源码走读"
+    ],
+    "one_liner": "对着 SGLang 与 DeepGEMM 源码讲三件事：MegaMoE 把一个 MoE 层的 dispatch、两次分组 GEMM、激活、combine 归约压进同一个全网格持久内核（拉取式 dispatch + L1 输出直落 L2 池 + 结果直推源 rank）；设与不设 --moe-a2a-backend 之间，换的是「层尾那次稠密 all-reduce」与「dispatch/combine」的取舍，并顺带改写 ep=tp、共享专家融合、CUDA graph 等七项参数；而 runner 后端与 A2A 后端是两层正交的东西，靠一张按 DispatchOutputFormat 注册的表决定谁能配谁。",
+    "artifact": "index.html",
+    "_dir": "inference-systems/moe-a2a-megamoe",
+    "extra_files": []
+  },
   {
     "title": "KV 预取与预测：该不该提前搬，以及提前搬什么",
     "slug": "kv-prefetch-prediction",

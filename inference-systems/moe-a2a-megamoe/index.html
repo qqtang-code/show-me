@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</title>
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased;overflow-wrap:break-word}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px;
+       overflow-wrap:anywhere}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      max-width:100%;font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .c{color:#7b8aa3}
+  pre .k{color:#a03123}
+  pre .add{color:#0b6b3f}
+  pre .del{color:#b23a10}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+    .prow .lbl{min-width:0;flex:1 0 100%}
+    .prow{flex-wrap:wrap;min-width:0}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr p{margin:0 0 10px;font-size:14.5px}
+  .tldr p:last-child{margin-bottom:0}
+  .tldr .qt{font:600 12px var(--mono);color:var(--accent);letter-spacing:.05em;display:block;margin-bottom:2px}
+
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none;float:none}
+  }
+  .tw{overflow-x:auto}
+
+  /* ---------- 流程 / 拓扑 ---------- */
+  .flow{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .flow .step{display:grid;grid-template-columns:26px 1fr;gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52;min-width:0}
+  .flow .step .t b{color:var(--ink)}
+  .flow .step .t .sub2{display:block;color:var(--dim);font-size:13px;margin-top:3px}
+  .flow .step .t .where{font:11.5px var(--mono);color:var(--dim2);margin-top:4px;display:block;overflow-wrap:anywhere}
+
+  .topo{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px;margin:16px 0}
+  .prow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0;min-width:0}
+  .prow .lbl{font:11.5px var(--mono);color:var(--dim2);min-width:104px;flex:none}
+  .node{border:1px solid #cfd8e8;background:#f7f9ff;border-radius:8px;padding:6px 11px;
+        font:12px var(--mono);color:#1b2740;flex:none;max-width:100%;overflow-wrap:anywhere}
+  .node.hot{background:#e8eefb;border-color:#b9cdf0;font-weight:600}
+  .node.gpu{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .node.dim{background:#f4f6fa;border-color:#e2e8f2;color:#657389}
+  .arrowdown{text-align:center;color:var(--dim2);font-size:14px;margin:2px 0}
+  .lane{display:flex;gap:6px;flex-wrap:wrap;padding:8px;border:1px dashed #c9d6ea;border-radius:10px;background:#fbfcff}
+  .lane .np{border:1px solid #cfd8e8;background:#eef2f9;border-radius:6px;padding:4px 8px;font:11.5px var(--mono);color:#3f4c63}
+
+  .box{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;min-width:0}
+  .box h5{margin:0 0 6px;font:600 12.5px var(--mono);color:#1b2740;letter-spacing:.03em}
+  .box ul{margin:0;padding-left:16px;font-size:13px;color:#3b4860}
+  .box li{margin:3px 0}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+  /* 网格子项默认 min-width:auto，里面的 pre 会把轨道撑宽 —— 显式收回来，让 pre 自己横向滚动 */
+  .two>*{min-width:0}
+  .box pre{max-width:100%}
+  @media (max-width:700px){.two{grid-template-columns:1fr}}
+
+  /* ---------- 计算器 ---------- */
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc h4{margin:0 0 4px;font-size:14.5px;color:var(--ink)}
+  .calc .ctl{display:grid;grid-template-columns:200px 1fr 116px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px;min-width:0}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr 1fr;gap:6px 10px}
+    .calc .ctl label{grid-column:1/-1}.calc .ctl span{text-align:right}
+    .calc select{grid-column:1/-1}}
+  .calc .ctl>*{min-width:0;max-width:100%}
+  .calc input[type=range]{width:100%;accent-color:var(--accent);min-width:0}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff;color:var(--fg);max-width:100%;min-width:0}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,1fr)}
+  .calc .row.g3{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:1fr}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px;min-width:0}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:18px/1.35 var(--mono);font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+  .calc .cell .v.good{color:var(--good)} .calc .cell .v.warn{color:var(--waste)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .upd{font-size:12.5px;color:var(--dim);margin-top:14px}
+  .verdictbox{margin-top:14px;border-radius:10px;padding:11px 14px;font-size:13.5px;border:1px solid;overflow-wrap:anywhere}
+  .verdictbox.ok{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .verdictbox.no{background:#fff4ec;border-color:#f0d9c8;color:#9a4d06}
+
+  /* 对比条：段内不放文字，标签一律走图例 */
+  .bars{margin:14px 0 0}
+  .brow{display:grid;grid-template-columns:112px 1fr;gap:10px;align-items:center;margin:7px 0;min-width:0}
+  .brow .bl{font:11.5px var(--mono);color:var(--dim2);overflow-wrap:anywhere}
+  .track{display:flex;height:22px;border-radius:5px;overflow:hidden;border:1px solid var(--line);background:#f0f3f9}
+  .track i{display:block;height:100%;min-width:2px}
+  .track i.r1{background:#f0a184}
+  .track i.r2{background:#a8ecc4}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:10px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
+
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:11px 14px;font-size:13.5px;color:#4a3a1c;margin:16px 0}
+  .src{font:11.5px var(--mono);color:var(--dim2);display:block;margin-top:6px;overflow-wrap:anywhere}
+
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>inference-systems<span class="sep">/</span>moe-a2a-megamoe
+  </div>
+
+  <h1>MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</h1>
+  <p class="sub">对着 SGLang 与 DeepGEMM 的源码，讲清三件事：MegaMoE 到底把哪些步骤塞进了一个 kernel；
+  <code>--moe-a2a-backend</code> 设与不设之间，跑的不是同一条路；以及「MoE 后端」和「MoE A2A 后端」为什么是两层正交的东西。</p>
+
+  <div class="metarow">
+    <span>2026-09-21</span><span>SGLang</span><span>DeepGEMM</span><span>MoE</span><span>EP / A2A</span><span>源码走读</span>
+  </div>
+
+  <div class="nav">
+    <a href="#tldr">三句话</a>
+    <a href="#two">两个 MegaMoE</a>
+    <a href="#inner">MegaMoE 拆开</a>
+    <a href="#buf">对称缓冲区（算一算）</a>
+    <a href="#kernel">mega kernel 六段</a>
+    <a href="#switch">A2A 开关改了什么</a>
+    <a href="#bytes">通信量（算一算）</a>
+    <a href="#two-layers">两层正交</a>
+    <a href="#a2a-table">A2A 后端表</a>
+    <a href="#runner-table">runner 后端表</a>
+    <a href="#matrix">组合矩阵</a>
+    <a href="#pick">怎么选</a>
+    <a href="#map">源码地图</a>
+  </div>
+
+  <div class="tldr" id="tldr">
+    <p><span class="qt">一、MegaMoE 是一类「把 EP 通信塞进 GEMM 里」的内核设计，不是某一个内核</span>
+    SGLang 里有两个同名的实现：<b>DeepGEMM 版</b>（<code>--moe-a2a-backend megamoe</code>，挂在 DeepSeek 系模型自己的 forward 里）和
+    <b>FlashInfer 版</b>（<code>--moe-a2a-backend flashinfer_megamoe</code>，走标准 FusedMoE 注册表）。
+    共同点是：<b>没有独立的 dispatch / combine kernel，没有 permute 索引张量，也没有 L2 输出再进 reduce 的那一步</b>。
+    一个持续占用全网格的 kernel 里，dispatch warp 直接从远端 rank 的对称缓冲区把 FP8 token 拉过来算，算完把 bf16 结果直接推进源 rank 的 combine 槽位。</p>
+
+    <p><span class="qt">二、A2A 后端的开关，换的是「怎么把各 rank 的 partial 求和」</span>
+    不设（<code>none</code>）时，每个 MoE 层尾部有一次<b>稠密 all-reduce</b>：<code>tensor_model_parallel_all_reduce(final_hidden_states)</code>。
+    设了任意 A2A 后端，这一次 all-reduce 就被 dispatch/combine 取代 —— 而且是<b>被替换掉</b>，不是叠加。
+    这条替换链还顺手改了七件别的事（强制 ep=tp、关共享专家融合、关 cuda graph、共享专家退化成 tp1 等），
+    所以「开 A2A」从来不是一个纯通信选项。</p>
+
+    <p><span class="qt">三、「MoE 后端」和「MoE A2A 后端」是两层，靠一张注册表正交起来</span>
+    runner 后端（<code>--moe-runner-backend</code>）决定<b>专家 GEMM 用谁的 kernel</b>；A2A 后端（<code>--moe-a2a-backend</code>）决定
+    <b>token 怎么跨 rank 摆布</b>。两者通过 <code>DispatchOutputFormat</code> 对接：
+    一个 runner 只有在「对应 dispatch 格式」上注册了 permute 或 fused func 才能配对。
+    结果是 <b>deep_gemm 是唯一能长期配任意 A2A 后端的 runner</b>，而 triton / marlin / hpc_ops / flashinfer_* 系列基本只在 <code>none</code> 下工作
+    （flashinfer 家族额外支持自家的 <code>flashinfer</code> A2A）。</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="two"><span class="n">1</span>两个 MegaMoE</h2>
+  <p>名字一样，血缘不同。先分清是谁在跑，后面才不会串。</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>项目</th><th>DeepGEMM 版</th><th>FlashInfer 版</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="项目">开关</td>
+          <td class="v" data-label="DeepGEMM 版">--moe-a2a-backend megamoe<br>（--moe-runner-backend megamoe 是别名，会被改写成前者）</td>
+          <td class="v" data-label="FlashInfer 版">--moe-a2a-backend flashinfer_megamoe<br>--moe-runner-backend flashinfer_megamoe</td></tr>
+      <tr><td class="k" data-label="项目">内核</td>
+          <td class="v" data-label="DeepGEMM 版">DeepGEMM <code>fp8_fp4_mega_moe</code>（JIT 编译的 CuTe/CUTLASS 内核，SM100；SM90 走 <code>fp8_mega_moe</code>）</td>
+          <td class="v" data-label="FlashInfer 版">FlashInfer <code>moe_ep.MoEEpMegaLayer</code>（megakernel，SM100）</td></tr>
+      <tr><td class="k" data-label="项目">挂载点</td>
+          <td class="v" data-label="DeepGEMM 版">模型 forward 里直调：<br>deepseek_v2.py:885 <code>should_use_mega_moe()</code>；<br>kimi_k3.py:773 <code>_forward_mega_experts()</code></td>
+          <td class="v" data-label="FlashInfer 版">标准注册表：<br><code>@register_fused_func("flashinfer_megamoe","flashinfer_megamoe")</code></td></tr>
+      <tr><td class="k" data-label="项目">dispatcher</td>
+          <td class="v" data-label="DeepGEMM 版">StandardDispatcher（空转：A2A 在 kernel 里）</td>
+          <td class="v" data-label="FlashInfer 版">StandardDispatcher（空转：A2A 在 kernel 里）</td></tr>
+      <tr><td class="k" data-label="项目">模型范围</td>
+          <td class="v" data-label="DeepGEMM 版">DeepSeek 系（<code>models/deepseek_v2.py</code> 覆盖的各代）通用；Kimi 系 MoE 另有独立分支</td>
+          <td class="v" data-label="FlashInfer 版">模型无关，但架构要在白名单里（DeepseekV2/V3/V32/V4、GLM4-MoE、Nemotron、Qwen2/3-MoE）</td></tr>
+      <tr><td class="k" data-label="项目">量化</td>
+          <td class="v" data-label="DeepGEMM 版">FP8（SM90 与 SM100）<br>MXFP4 权重 W4A8<br>W4A4 <code>mxf4xmxf4</code>（--enable-w4a4-mxfp4-megamoe）</td>
+          <td class="v" data-label="FlashInfer 版">MXFP8 / ModelOpt NVFP4 / FP4-expert 检查点<br>（标准 FP8 MoE 检查点不支持）</td></tr>
+      <tr><td class="k" data-label="项目">硬条件</td>
+          <td class="v" data-label="DeepGEMM 版">ep = tp；<code>SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK</code> ≥ 每 rank token 峰值；<br>DSV4 路径强制开启 chunked prefill</td>
+          <td class="v" data-label="FlashInfer 版">SM100；<code>dp_size == tp_size</code> 且开 DP attention；<br>combine dtype 与 in-kernel fc2 reduce 互斥</td></tr>
+      <tr><td class="k" data-label="项目">跑不动时</td>
+          <td class="v" data-label="DeepGEMM 版">DeepSeek 系<b>逐 forward 回退</b>到普通 fused MoE；<br>Kimi 系<b>没有回退</b>，直接 assert</td>
+          <td class="v" data-label="FlashInfer 版">启动期就 assert 掉（架构 / 量化 / dp 拓扑任一不符即拒）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <span class="src">arg_groups/mega_moe_hook.py:21-38 · arg_groups/moe_hook.py:264-286 · layers/moe/flashinfer_megamoe.py:582 · models/deepseek_v2.py:885 · models/kimi_k3.py:773</span>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t"><b>命令行</b>
+      <span class="sub2">用户写 <code>--moe-a2a-backend megamoe</code>，或写别名 <code>--moe-runner-backend megamoe</code>。别名会在参数解析阶段把自己改写成前者（并把 runner 打回 auto）。</span>
+      <span class="where">arg_groups/mega_moe_hook.py: handle_moe_runner_backend_alias()</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t"><b>权重加载</b>
+      <span class="sub2">量化方法的 <code>process_weights_after_loading</code> 里检出 mega 后端，改走 mega 的权重准备函数，然后 <code>return</code> —— 普通路径的权重准备被整体跳过。</span>
+      <span class="where">quantization/fp8.py:1850（FP4 expert）· :1886（SM90 FP8）· mega_moe.py:353</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t"><b>首次 forward</b>
+      <span class="sub2">分配 / 命中对称缓冲区（缓存在 <code>_MEGA_MOE_SYMM_BUFFER</code>，键含 group id、形状、mma_type、num_sms）。</span>
+      <span class="where">mega_moe.py:89-124</span></div></div>
+    <div class="step"><div class="i">4</div><div class="t"><b>每层 forward</b>
+      <span class="sub2">路由 → pre-dispatch（量化 + 摊平到缓冲区）→ 一个 mega kernel（拉取 + L1 + 激活 + L2 + 推回 + 归约）→ 加共享专家。</span>
+      <span class="where">mega_moe.py:147-311</span></div></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="inner"><span class="n">2</span>MegaMoE 拆开看：四段源码</h2>
+
+  <h3 class="mini">2.1 权重准备：为了「一遍读完就出 SwiGLU」而重排</h3>
+  <p>GEMM 之前的权重不是原来的形状了。两处重排，都只为了让 kernel 少一次访存：</p>
+
+  <pre><code><span class="c"># layers/moe/mega_moe.py:314-339, 353-410（精简）</span>
+def _interleave_mega_moe_gate_up(t, gran=8):
+    <span class="c"># [gate | up]  →  [gate:0..7, up:0..7, gate:8..15, up:8..15, ...]</span>
+    num_groups, n, *rest = t.shape
+    half = n // 2
+    gate = t[:, :half].reshape(num_groups, half // gran, gran, *rest)
+    up   = t[:, half:].reshape(num_groups, half // gran, gran, *rest)
+    <span class="k">if</span> gran == 16:   <span class="c"># MXFP4：打包成偶/奇两组 16 元素块</span>
+        result = torch.cat([gate[:, :, 0::2], up[:, :, 0::2],
+                            gate[:, :, 1::2], up[:, :, 1::2]], dim=2).reshape(num_groups, n, *rest)
+    <span class="k">else</span>:            <span class="c"># FP8：连续的 gran-8 块</span>
+        result = torch.stack([gate, up], dim=2).reshape(num_groups, n, *rest)
+    <span class="k">return</span> torch.empty_like(t).copy_(result)
+
+def _transpose_mega_moe_sf_for_utccp(sf):
+    <span class="c"># 每个 128 元素组内，把 4x32 的 scale 子块转置 —— tcgen05 的 UTCCP 指令要求</span>
+    num_groups, mn, packed_sf_k = sf.shape
+    <span class="k">return</span> sf.reshape(num_groups, -1, 4, 32, packed_sf_k).transpose(2, 3).reshape(num_groups, mn, packed_sf_k)
+
+<span class="k">def</span> build_mega_moe_experts_weights(experts):
+    w13, w13_sf = _interleave_mega_moe_l1_weights((w13, w13_sf), mma_type)
+    experts.mega_l1_weights = (experts.w13_weight.data,     _transpose_mega_moe_sf_for_utccp(w13_sf))
+    experts.mega_l2_weights = (experts.w2_weight.data,      _transpose_mega_moe_sf_for_utccp(w2_sf))
+</code></pre>
+
+  <div class="two">
+    <div class="box"><h5>为什么 gate/up 要交错</h5>
+      切分后的 L1 权重按 N 方向交错存放，kernel 一次 TMA 取到的块里就同时含 gate 和 up，
+      SwiGLU 可以直接在同一份 smem 上算完再写出去 —— 不用把 gate 和 up 分两趟读。</div>
+    <div class="box"><h5>为什么 SF 要转置</h5>
+      UTCCP 是 Blackwell 上给 MMA 搬 scale 的专用通路，它期望的 4×32 子块顺序与常规行主序不同。
+      转置在权重加载时做一次，之后每层省掉的是逐次搬运的 shuffle。</div>
+  </div>
+
+  <div class="note"><b>只多了一份 scale：</b>w13 的<b>权重张量</b>被原地替换成交错布局，同时仍挂在 <code>w13_weight.data</code> 上供普通 deep-ep 路径复用；
+  只有 scale 走 UTCCP 版本是额外分配的。源码注释明确写了这是刻意的复用（mega_moe.py:389-394）。</div>
+
+  <h3 class="mini" id="buf">2.2 对称缓冲区：八个切片，跨 rank 的同一份地址空间</h3>
+  <p>MegaMoE 的全部通信都发生在这一块显存里。它由 <code>torch.distributed._symmetric_memory</code> 分配，
+  各 rank <code>rendezvous</code> 后拿到彼此的指针表；kernel 里 <code>sym_buffer.map(ptr, dst_rank)</code> 就是
+  「把你的指针加到我这份的偏移上」，于是任意 rank 可以直接读写任意 rank 的这块区域，不需要显式通信调用。</p>
+
+  <div class="topo">
+    <div class="prow"><span class="lbl">rank r 的视图</span>
+      <span class="node hot">buffer 基址（本 rank）</span>
+      <span class="node dim">offset[0]</span><span class="node dim">offset[1]</span><span class="node dim">…</span>
+      <span class="node dim">offset[R-1]</span>
+    </div>
+    <div class="arrowdown">▼ 同一块 buffer 内部按用途切成八段</div>
+    <div class="prow"><span class="lbl">输入段（本 rank 写）</span>
+      <span class="node">x&nbsp;<span class="hint">FP8 token</span></span>
+      <span class="node">x_sf&nbsp;<span class="hint">UE8M0 逐32通道</span></span>
+      <span class="node">topk_idx</span><span class="node">topk_weights</span>
+    </div>
+    <div class="prow"><span class="lbl">工作池（R 段，跨 rank 读）</span>
+      <span class="node gpu">l1_acts&nbsp;<span class="hint">拉取落点</span></span>
+      <span class="node gpu">l1_acts_sf</span>
+      <span class="node gpu">l2_acts&nbsp;<span class="hint">= L1 输出</span></span>
+      <span class="node gpu">l2_acts_sf</span>
+    </div>
+    <div class="prow"><span class="lbl">combine 段</span>
+      <span class="node hot">[top_k][max_tokens_per_rank][hidden]&nbsp;<span class="hint">bf16，按槽位收</span></span>
+    </div>
+    <div class="prow"><span class="lbl">workspace（前部）</span>
+      <span class="node dim">barrier 信号</span><span class="node dim">每专家收发计数</span>
+      <span class="node dim">L1 到达计数</span><span class="node dim">L2 到达掩码</span>
+      <span class="node dim">源 token 索引</span><span class="node dim">TokenSrcMetadata</span>
+    </div>
+  </div>
+  <span class="src">deep_gemm/mega/__init__.py:50-53（八个切片）· deep_gemm/include/deep_gemm/layout/mega_moe.cuh:40-97（workspace 布局）· sym_buffer.cuh:31-37（map）</span>
+
+  <p>这块缓冲区有多大，是部署时的硬约束 —— 它和 KV 池抢显存。下面这个计算器用的就是源码里的公式：</p>
+
+  <div class="calc" id="calcA">
+    <h4>对称缓冲区大小（每 rank）</h4>
+    <p class="hint" style="margin:0 0 6px">公式取自 <code>layout::Workspace::get_num_bytes()</code> 与 <code>get_symm_buffer_size_for_mega_moe()</code>。
+    池容量 = align_up(R×M×min(topk, 每rank专家数) + 每rank专家数×191, 384)。
+注意第一项是 <b>R×M</b>（每个专家的按容量按「所有 rank 的 token 都发给它」预留），不是 R×M×topk / 专家数 —— 缓冲区是按最坏路由情况定容的，这正是它比直觉大一个数量级的原因。</p>
+
+    <div class="ctl"><label>EP / TP 组大小 R</label>
+      <input type="range" id="aR" min="2" max="64" step="1" value="8"><span id="aRV">8</span></div>
+    <div class="ctl"><label>每 rank 最大 token 数 M</label>
+      <input type="range" id="aM" min="1024" max="16384" step="128" value="8320"><span id="aMV">8320</span></div>
+    <div class="ctl"><label>top_k</label>
+      <input type="range" id="aK" min="1" max="32" step="1" value="16"><span id="aKV">16</span></div>
+    <div class="ctl"><label>每 rank 专家数</label>
+      <input type="range" id="aE" min="1" max="128" step="1" value="32"><span id="aEV">32</span></div>
+    <div class="ctl"><label>hidden</label>
+      <input type="range" id="aH" min="1024" max="8192" step="128" value="3584"><span id="aHV">3584</span></div>
+    <div class="ctl"><label>MoE intermediate</label>
+      <input type="range" id="aI" min="512" max="8192" step="128" value="2048"><span id="aIV">2048</span></div>
+
+    <div class="glabel">结果</div>
+    <div class="row g2">
+      <div class="cell"><span class="k">缓冲区合计 / rank</span><span class="v" id="aTotal">–</span>
+        <span class="d" id="aTotalD">–</span></div>
+      <div class="cell"><span class="k">其中 L1 池（token 落点）</span><span class="v" id="aL1">–</span>
+        <span class="d" id="aL1D">–</span></div>
+      <div class="cell"><span class="k">其中 L2 池（激活中转）</span><span class="v" id="aL2">–</span>
+        <span class="d" id="aL2D">–</span></div>
+      <div class="cell"><span class="k">其中 combine 段</span><span class="v" id="aCb">–</span>
+        <span class="d" id="aCbD">–</span></div>
+    </div>
+    <div class="row g3" style="margin-top:12px">
+      <div class="cell"><span class="k">池 token 容量</span><span class="v" id="aPool">–</span>
+        <span class="d">全部本地专家共享一个池</span></div>
+      <div class="cell"><span class="k">输入 + workspace</span><span class="v" id="aWs">–</span>
+        <span class="d">含 barrier / 计数 / 源索引</span></div>
+      <div class="cell"><span class="k">占 8 卡单机总显存</span><span class="v" id="aFleet">–</span>
+        <span class="d">R × 每 rank</span></div>
+    </div>
+    <div class="verdictbox" id="aVerdict">–</div>
+    <p class="upd">对照实验里把这台机器的 <code>NUM_MAX_TOKENS_PER_RANK</code> 设成 8320 是为了覆盖并发 32 的每 rank token 峰值；
+    往下拖 M 会看到缓冲区近似线性缩小 —— 这就是为什么这个环境变量同时是个<b>显存旋钮</b>，不只是容量旋钮。</p>
+  </div>
+
+  <h3 class="mini">2.3 pre-dispatch：只量化、只摊平，不做任何跨 rank 通信</h3>
+  <p>进 mega kernel 之前，SGLang 先用一个 JIT 编译的 CUDA kernel 把 bf16 token 变成 FP8 + UE8M0 scale，并把路由结果摊进缓冲区。
+  它<b>一个 CTA 一行 token</b>，grid 里多出来的 CTA 负责「补零区」：</p>
+
+  <pre><code><span class="c">// python/sglang/kernels/jit/csrc/deepseek_v4/mega_moe_pre_dispatch.cuh（改写为伪码）</span>
+grid = num_tokens + num_pad_blocks      <span class="c">// 每 CTA 一行 token</span>
+block = min(hidden / 8, 1024)           <span class="c">// 每线程一次吃 8 个 bf16 = 16B</span>
+
+PDLWaitPrimary()                        <span class="c">// PDL：不等前一个 kernel 完全结束即可启动</span>
+<span class="k">if</span> (bid &lt; num_tokens):
+    <span class="k">for</span> chunk in 本行按 blockDim 跨步的 16B 块:
+        load 8×bf16 ; local_max = max(|v|)
+        local_max = warp_reduce_max&lt;group_size/8&gt;(local_max)   <span class="c">// 一组的线程求 absmax</span>
+        raw   = local_max / 448.0                               <span class="c">// FP8_E4M3_MAX</span>
+        ue8m0 = cast_to_ue8m0(raw)                              <span class="c">// 取指数，1 字节</span>
+        inv   = __uint_as_float((127+127-ue8m0) &lt;&lt; 23)          <span class="c">// 2^-e，位运算免除法</span>
+        pack 8×fp8 -&gt; buf_x
+        <span class="k">if</span> 本线程是组内第一个: buf_x_sf[token_id*stride + group_id] = ue8m0
+    <span class="k">if</span> (tid &lt; top_k):  buf_topk_idx / buf_topk_weights ← 本行副本
+<span class="k">else</span>:                                   <span class="c">// 补零区：把 [num_tokens, padded_max) 写成 (-1, 0)</span>
+    buf_topk_idx[slot] = -1 ; buf_topk_weights[slot] = 0.0
+PDLTriggerSecondary()
+</code></pre>
+
+  <div class="two">
+    <div class="box"><h5>三个值得记的细节</h5>
+      <ul>
+        <li><b>补零区必须写死了才有意义。</b>缓冲区是复用的，多出来的槽位若不写 <code>-1</code>，上一轮的脏 token 会被 GEMM 当真算进去。</li>
+        <li><b>scale 区是行主序、一 group 一字节。</b>但 DeepGEMM 可能为了 TMA 对齐给每行补 padding（源码举的例子：H=2304 时逻辑宽 72B、物理 80B），所以 kernel 用 <code>buf_x_sf_stride_bytes</code> 而不是自己想当然的宽。</li>
+        <li><b>hidden &gt; 8192 时要求 hidden % 256 == 0。</b>因为分组归约用的是 full-mask 的 warp shuffle，尾部那一次迭代必须由完整的 warp 进入。</li>
+      </ul>
+    </div>
+    <div class="box"><h5>FP4 走的是另一个实现</h5>
+      <p style="margin:0;font-size:13px;color:#3b4860">MMA 类型是 <code>mxf4xmxf4</code> 时，改调 DeepGEMM 自己的
+      <code>mega_moe_pre_dispatch</code>，因为 E2M1 的打包方式不同（两个 FP4 挤一个字节）；SGLang 这个 JIT 版本只发 FP8。
+      两个实现的分工写在调用点：</p>
+      <pre style="margin:8px 0 0"><code><span class="k">if</span> mma_type == "mxf4xmxf4":
+    deep_gemm.mega_moe_pre_dispatch(..., group_size=32, mma_type=mma_type)
+<span class="k">else</span>:
+    mega_moe_pre_dispatch(...)   <span class="c"># SGLang JIT，只出 FP8</span></code></pre>
+    </div>
+  </div>
+  <span class="src">mega_moe.py:259-286 · mega_moe_pre_dispatch.cuh:47-142, 186-234</span>
+
+  <div class="note"><b>这条路径踩过的坑（可作为版本体检项）：</b>FP4 的激活被按 E2M1 打包成宽度 1792（两值一字节），
+  但校验仍按未打包的 3584 走，于是 W4A4 启动即报 <code>expected 3584 but got 1792</code>。
+  修好之前这条 W4A4 路径是拿不到数据的 —— 只能退回 W4A8 评估。这说明两套 pre-dispatch 实现的接口约定必须对齐版本。</div>
+
+  <h3 class="mini" id="kernel">2.4 mega kernel：一个 kernel 里的六段流水</h3>
+  <p>真正的活在这里。它是一个持续占满全网格的、warp 特化的内核：</p>
+
+  <div class="topo">
+    <div class="prow"><span class="lbl">线程分工</span>
+      <span class="node">dispatch 128 线程</span>
+      <span class="node">MMA 非 epilogue 128 线程</span>
+      <span class="node">epilogue + combine 128×k 线程</span>
+    </div>
+    <div class="prow"><span class="lbl">资源</span>
+      <span class="node gpu">2-CTA cluster（ClusterTransactionBarrier）</span>
+      <span class="node gpu">TMEM Allocator2Sm</span>
+      <span class="node gpu">全对称缓冲区当通信层</span>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t"><b>发布路由计数</b>
+      <span class="sub2">每个 rank 把自己「每个专家的 token 数」写到<b>目的 rank</b> 的 recv-count 计数器里，并原子累加到 recv-count-sum。这一步之后谁该收多少 token，全网已知。</span>
+      <span class="where">sm100_fp8_fp4_mega_moe.cuh:386-401</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t"><b>grid sync + NVLink barrier</b>
+      <span class="sub2">先全网格栅栏，再跨 rank 信号（只有 SM 0 参与跨 rank 那一段）。源码注释标了代价：约 4 µs。这个屏障每个 MoE 层都要付。</span>
+      <span class="where">comm/barrier.cuh:26-52 · impl sm100…cuh:404-410, 1213-1218</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t"><b>拉取（pull）—— 这是「没有 dispatch kernel」的原因</b>
+      <span class="sub2">dispatch warp 按<b>本地专家</b>的顺序遍历本地 token 池的槽位，用「迭代剥最小」的轮转算法把槽位映射回
+      <code>(源 rank, 源 token, 源 topk 槽)</code>，读出远端写下的源索引，然后
+      <b>用 TMA 直接从远端 rank 的对称缓冲区把这段 FP8 字节搬进本地 L1 池</b>（按 ≤4096B 分块，staged 过 smem）。
+      没有独立的 dispatch kernel，没有 permute 索引张量 —— 交换融进了 GEMM 自己的取数循环。</span>
+      <span class="where">impl sm100…cuh:415-585 · 分块阈值 heuristics/mega_moe.hpp:235-241</span></div></div>
+    <div class="step"><div class="i">4</div><div class="t"><b>L1 分组 GEMM + SwiGLU(+clamp)，输出直接落进 L2 池</b>
+      <span class="sub2">关键在这一行：<code>tensor_map_l1_output</code> 指向的就是 <code>l2_acts</code> —— L1 的 epilogue 把激活后的 FP8 直接写成本层的 L2 激活，
+      省掉一次全局往返和一次独立的 activation kernel。</span>
+      <span class="where">impl sm100…cuh:160-166（注释原文：L1 output and L2 activations are essentially the same tensor）</span></div></div>
+    <div class="step"><div class="i">5</div><div class="t"><b>L2 分组 GEMM，结果直接推回源 rank</b>
+      <span class="sub2">epilogue 读出每个池 token 的 <code>TokenSrcMetadata{rank_idx, token_idx, topk_idx}</code>，
+      把 bf16 结果<b>push 到源 rank 的 combine 缓冲第 <code>topk_idx</code> 个槽</b>。这一步是普通的 <code>float4</code> 存 + 跨 rank 寻址，不是一条消息通道。</span>
+      <span class="where">impl sm100…cuh:1181-1199 · 缓冲形状 mega_moe.cuh:84-87</span></div></div>
+    <div class="step"><div class="i">6</div><div class="t"><b>本地归约 top_k 个 partial</b>
+      <span class="sub2">再来一次 NVLink barrier 之后，每个 rank 遍历自己的 token，把 combine 缓冲里的 top_k 个槽（2 级 smem 流水的 TMA 读）在 float 寄存器里累加，写回 <code>y</code>。
+      <b>combine 的「求和」就发生在这里</b> —— 所以外部那次 all-reduce 必须被去掉，否则重复计数。</span>
+      <span class="where">impl sm100…cuh:1223-1360</span></div></div>
+  </div>
+
+  <div class="two">
+    <div class="box"><h5>它省掉了什么</h5>
+      <ul>
+        <li>一次独立的 dispatch kernel、一次独立的 combine kernel</li>
+        <li>permute / unpermute 的索引张量（几分之一个 token 的显存 + 随机访存）</li>
+        <li>L1 输出回全局显存再进 L2 的那趟往返</li>
+        <li>通信与计算之间的串行点：拉取是按池块细粒度流水推进的，某个专家的 token 一到齐就能开算</li>
+      </ul></div>
+    <div class="box"><h5>它付出了什么</h5>
+      <ul>
+        <li><b>全网格持久内核 + 每层两次跨 rank 屏障</b>，很难和别的 kernel 重叠</li>
+        <li><b>SM 预算要让出来</b>：调用前把 DeepGEMM 的 num_sms 压到「物理 SM 数 − 保留数（默认 2）」并向下取偶（簇启动要求偶数 CTA）</li>
+        <li><b>缓冲区按 M 线性吃显存</b>（见上面的计算器），和 KV 池直接竞争</li>
+        <li><b>M 超过上限就整层回退</b>，同一进程里可能混着两条路径</li>
+      </ul></div>
+  </div>
+  <span class="src">mega_moe.py:52-86（SM 预算）· environ.py:1223,1226（M 默认 8192、保留 2 SM）</span>
+
+  <div class="note"><b>回退条件的源码：</b><code>should_use_mega_moe()</code> 依次检查「是不是 mega 后端 → 权重建好了没 → SM90 有没有对应 API →
+  捕获模式直接放行 → 否则算每 rank token 峰值，超过 <code>NUM_MAX_TOKENS_PER_RANK</code> 就返回 False」。
+  也就是 DeepSeek 系在 prefill 大 batch 时会自动走回普通 fused MoE；Kimi 系没有这条路，超限直接 assert。</div>
+
+  <details>
+    <summary>实测侧的一个观察：这台 8 卡 B300 上，MegaMoE W4A8 并没有打赢 FlashInfer MXFP4 基线</summary>
+    <div class="ans">
+      <p>同一模型、同一 Low-Latency 配置，仅把 MoE 换成 MegaMoE（W4A8；W4A4 因上面那条打包 bug 起不来），
+      六个测量点的总吞吐都低于原有 FlashInfer MXFP4 基线，16K→512 场景约低 31%–33%。</p>
+      <p>但同一批数据里有一个方向性信号：<b>16K 高并发下 TPOT 反而更低</b>（并发 128 时 P50 低 22%）。这和「通信被融合进 GEMM」的预期一致 ——
+      Decode 阶段每 token 的通信占比高，融合的收益体现出来了；而 Prefill 段被 W4A8 的计算开销和排队吃掉了。</p>
+      <p><b>怎么读这个结论：</b>这不是一次干净的 backend A/B（量化路径不同、部分点的总请求数也不同），所以只能当方向判断，
+      不能当「MegaMoE 比 FlashInfer 慢 31%」的定论。要下定论得先把 W4A4 修好，再用相同请求数重跑。</p>
+    </div>
+  </details>
+
+  <!-- ============================================================ -->
+  <h2 id="switch"><span class="n">3</span>设与不设 <code>--moe-a2a-backend</code>，差在哪</h2>
+
+  <h3 class="mini">3.1 不设的时候：一层 MoE 尾部有一次稠密 all-reduce</h3>
+  <p>默认值是 <code>none</code>。这条路上没有 A2A 通信，dispatcher 只是把「全局专家 id」翻译成「本 rank 的局部专家 id」，
+  不属于本 rank 的专家映射成 <code>-1</code>（丢弃哨兵）：</p>
+
+  <pre><code><span class="c"># layers/moe/token_dispatcher/standard.py:188-241（精简）</span>
+<span class="k">if</span> self.moe_ep_size &gt; 1 and not self.skip_local_expert_mapping:
+    self.local_expert_mapping = full((num_experts,), -1)        <span class="c"># 不属于我的专家 → -1</span>
+    self.local_expert_mapping[ep_rank*E_local : (ep_rank+1)*E_local] = arange(E_local)
+topk_ids_local = self.local_expert_mapping[topk_output.topk_ids] <span class="c"># 纯查表，零通信</span>
+
+<span class="c"># layers/moe/fused_moe_triton/layer.py:1591 —— 本层收尾</span>
+final_hidden_states = self.dispatcher.combine(combine_input)     <span class="c"># 直通，什么都不做</span>
+<span class="k">if</span> self.reduce_results and (self.moe_tp_size &gt; 1 or self.moe_ep_size &gt; 1):
+    final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)   <span class="c"># ← 关键这一步</span>
+</code></pre>
+
+  <p>丢掉的那些专家，就靠这一次 all-reduce 补回来：各 rank 只算自己那部分专家，求和之后才是完整的 top-k 结果。
+  这也是为什么同一个 all-reduce 能同时服务两种切分 —— <code>moe_tp_size × moe_ep_size = tp_size</code>，
+  专家组和中间维组是同一批 rank 的两种分法，而 DeepSeek 系这一步用的就是 TP 组（两种切分都被同一个组覆盖）：</p>
+
+  <div class="topo">
+    <div class="prow"><span class="lbl">a2a = none，两种切分</span>
+      <span class="node">ep = 1 &nbsp;→&nbsp; moe_tp = 8：<b>按中间维切</b>，all-reduce 求和的是同一个专家的 8 片</span></div>
+    <div class="prow"><span class="lbl">&nbsp;</span>
+      <span class="node gpu">ep = 8 &nbsp;→&nbsp; moe_tp = 1：<b>按专家切</b>，all-reduce 求和的是不同专家对同一 token 的贡献</span></div>
+  </div>
+  <span class="src">parallel_state.py:2767（moe_tp_size × moe_ep_size = tp_size）· deepseek_v2.py:1182-1185 · qwen3_moe.py:340-347（hybrid EP+TP 的模型会拆成 moe_ep 组与 moe_tp 组两次 reduce，本页讨论的 DeepSeek 系没有这一步）</span>
+
+  <p>配合 DP attention 时，MoE 的输入是 DP-gather 后的<b>全局 batch</b>（否则跨 rank 的专家贡献无法在同一行上对齐），
+  算完再 <code>dp_scatter</code> / <code>reduce_scatterv</code> 切回各自的 shard。这就是内部文档里说的「MoE 尾部的密集 AllReduce」。</p>
+  <span class="src">communicator.py:1279-1284（dp_gather_replicate/partial）· :1514-1523（reduce_scatterv / dp_scatter）· layers/moe/utils.py:700-717</span>
+
+  <h3 class="mini">3.2 设了之后：这一次 all-reduce 被替换掉</h3>
+  <pre><code><span class="c">--- a/layers/moe/fused_moe_triton/layer.py:1591</span>
+ final_hidden_states = self.dispatcher.combine(combine_input)
+<span class="del">-if self.reduce_results and (self.moe_tp_size &gt; 1 or self.moe_ep_size &gt; 1):</span>
+<span class="del">-    final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)</span>
+<span class="add">+if should_skip_post_experts_all_reduce(is_tp_path=False):</span>
+<span class="add">+    pass   # flashinfer / pplx / flashinfer_megamoe：combine 已把 topk partial 求和写回源 rank</span>
+<span class="add">+       # deepep / mori / nixl / mooncake / deepep_v2：dispatcher.combine 本身就是那次归约</span>
+
+<span class="c">--- a/models/deepseek_v2.py:830（哪些后端算「真 A2A」）</span>
+ self._enable_a2a_moe = (
+     get_moe_a2a_backend().is_deepep() or is_mooncake() or is_nixl() or is_mori()
+     or is_ascend_fuseep() or is_flashinfer() or is_deepep_v2()
+ )
+<span class="c"># 注意：megamoe / flashinfer_megamoe 不在这张表里 —— 它们在更前面就被 should_use_mega_moe() 拦走了，</span>
+<span class="c"># 根本走不到这个分支；而 flashinfer_megamoe 的求和发生在它自己的 fused func 内部。</span>
+</code></pre>
+  <span class="src">layers/moe/utils.py:733-771（should_skip_post_experts_all_reduce 的完整理由列表）· models/deepseek_v2.py:830-838, 885-893</span>
+
+  <h3 class="mini">3.3 服务器还顺手改了七件事</h3>
+  <p>这是最容易被忽略的部分：<code>--moe-a2a-backend</code> 不是「换个通信库」，它是一个会重写其他参数的开关。
+  下面每一条都出自 <code>arg_groups/</code> 里的参数解析钩子：</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>被改写的东西</th><th>规则</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="被改写的东西">ep_size</td>
+          <td data-label="规则"><b>强制 = tp_size</b>，并打印一行 info。所有 A2A 后端都在这个集合里（含 megamoe、flashinfer_megamoe、pplx、deepep_v2…）。</td>
+          <td class="v" data-label="出处">overrides.py:1634-1656<br>_A2A_EP_SPANNING_BACKENDS</td></tr>
+      <tr><td class="k" data-label="被改写的东西">deepep_mode</td>
+          <td data-label="规则">auto 会被解析成具体值：mori → <code>normal</code>；pplx → <code>low_latency</code>；deepep + flashinfer_cutedsl → <code>low_latency</code>（否则 prefill 会崩）。</td>
+          <td class="v" data-label="出处">moe_hook.py:288-308, 455-461, 477-483</td></tr>
+      <tr><td class="k" data-label="被改写的东西">CUDA graph</td>
+          <td data-label="规则"><code>deepep_mode=normal</code> → prefill 和 decode 的图都关；<code>deepep_v2</code> → 只关 prefill（要读 host 计数）。</td>
+          <td class="v" data-label="出处">moe_hook.py:309-324, 359-365</td></tr>
+      <tr><td class="k" data-label="被改写的东西">共享专家融合</td>
+          <td data-label="规则"><code>flashinfer</code> / <code>flashinfer_megamoe</code> / <code>deepep_v2</code> 会强制 <code>--disable-shared-experts-fusion</code>。</td>
+          <td class="v" data-label="出处">overrides.py:1592-1615</td></tr>
+      <tr><td class="k" data-label="被改写的东西">共享专家并行度</td>
+          <td data-label="规则">DeepSeek 系在 A2A 后端下把共享专家退化为 <b>tp1（每卡完整复制）</b>，于是不再需要单独为它做 all-reduce —— 代价是权重显存上升（内部评估里这一项约 23.7 GiB/卡）。</td>
+          <td class="v" data-label="出处">models/deepseek_v2.py:703-736</td></tr>
+      <tr><td class="k" data-label="被改写的东西">runner 后端</td>
+          <td data-label="规则"><code>deepep_v2</code> + auto → <code>deep_gemm</code>；<code>pplx</code> → <code>deep_gemm</code>；<code>flashinfer_megamoe</code> → 同名 runner；<code>flashinfer</code> + trtllm → <code>trtllm_routed</code>。冲突时直接报错而不是静默。</td>
+          <td class="v" data-label="出处">moe_hook.py:326-345, 424-434, 443-453</td></tr>
+      <tr><td class="k" data-label="被改写的东西">反过来被改写</td>
+          <td data-label="规则"><code>--enable-waterfill</code> 要求 deepep 或 megamoe，否则把后端强行改成 <code>deepep</code>。</td>
+          <td class="v" data-label="出处">overrides.py:1634-1648</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="myth">
+    <div class="w">常见误读：「a2a=none 时 ep_size 必须为 1」</div>
+    <div class="r">不是。<b>tout court</b> 约束是 <code>ep_size × moe_dp_size ≤ tp_size</code>，<code>ep &gt; 1</code> 时才要求等号。
+    所以 <code>none</code> 下可以 ep&lt;tp（此时 moe_tp&gt;1，专家的中间维被 TP 切分），
+    也可以 ep=tp（moe_tp=1，专家的数量被 EP 切分）—— 两种都靠同一个 all-reduce 收尾。
+    <b>而设了 A2A 后端，ep 会被强制等于 tp</b>，等于把「专家数切分」这条唯一的路固定下来。</div>
+  </div>
+
+  <h3 class="mini" id="bytes">3.4 通信量：A2A 赢的不是字节数</h3>
+  <p>这是最反直觉的一点，值得算一遍。设全局 batch = B 个 token，TP=EP=R，hidden = H，top_k = K。
+  不设 A2A 时，每个 rank 上被 reduce 的是 DP-gather 后的 <b>B</b> 个 token：
+  ring all-reduce 的每 rank 通信量 = <code>2·(R−1)/R · (B·H·2)</code>。
+  设了 A2A，每个 rank 只持有 <b>B/R</b> 个 token，发送量 = <code>(B/R)·K·H·d_disp</code>，收回量 = <code>(B/R)·K·H·2</code>。</p>
+
+  <div class="calc" id="calcB">
+    <h4>每层 MoE 的通信量：稠密 all-reduce vs routed A2A（每 rank）</h4>
+    <div class="ctl"><label>全局 batch B（token/次 forward）</label>
+      <input type="range" id="bB" min="8" max="4096" step="8" value="64"><span id="bBV">64</span></div>
+    <div class="ctl"><label>并行度 R = TP = EP</label>
+      <input type="range" id="bR" min="2" max="64" step="1" value="8"><span id="bRV">8</span></div>
+    <div class="ctl"><label>hidden H</label>
+      <input type="range" id="bH" min="1024" max="8192" step="128" value="7168"><span id="bHV">7168</span></div>
+    <div class="ctl"><label>top_k K</label>
+      <input type="range" id="bK" min="1" max="16" step="1" value="8"><span id="bKV">8</span></div>
+    <div class="ctl"><label>dispatch 精度</label>
+      <select id="bD"><option value="1">FP8（DeepEP / Mooncake / NIXL 默认）</option>
+        <option value="2">BF16</option></select><span></span></div>
+
+    <div class="glabel">每 rank 每层</div>
+    <div class="row g2">
+      <div class="cell"><span class="k">none：稠密 all-reduce</span><span class="v" id="bNone">–</span>
+        <span class="d" id="bNoneD">2·(R−1)/R · B·H·2</span></div>
+      <div class="cell"><span class="k">A2A：dispatch + combine</span><span class="v" id="bA2A">–</span>
+        <span class="d" id="bA2AD">(B/R)·K·H·(d+2)</span></div>
+    </div>
+    <div class="row g2" style="margin-top:12px">
+      <div class="cell"><span class="k">比值 A2A / none</span><span class="v" id="bRatio">–</span>
+        <span class="d">＜1 表示 A2A 更省字节</span></div>
+      <div class="cell"><span class="k">整机（R 卡）合计</span><span class="v" id="bFleet">–</span>
+        <span class="d" id="bFleetD">两侧都是同样的全局工作量，可直接比</span></div>
+    </div>
+
+    <div class="bars">
+      <div class="brow"><span class="bl">none</span>
+        <div class="track"><i class="r1" id="barNone"></i></div></div>
+      <div class="brow"><span class="bl">A2A</span>
+        <div class="track"><i class="r2" id="barA2A"></i></div></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:#f0a184"></i>稠密 all-reduce（阻塞在层尾）</span>
+      <span><i style="background:#a8ecc4"></i>routed A2A（点到点，可重叠）</span>
+    </div>
+    <div class="verdictbox" id="bVerdict">–</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">常见误读：「上 A2A 一定省带宽」</div>
+    <div class="r">把 top_k 拖到 8、R 拖到 8，你会看到两者几乎持平；把 top_k 拖到 16，<b>A2A 反而更费字节</b>。
+    因为 all-reduce 的量与 K 无关，A2A 的量随 K 线性增长。
+    <b>真正换来的是三件事</b>：① 通信是点到点的，可以和 GEMM 重叠（all-reduce 是层尾的阻塞点，还要等最慢的 rank）；
+    ② all-reduce 的延迟随 R 线性增长（ring 要 2(R−1) 步），A2A 是一次往返；
+    ③ <b>更关键的是可扩展性</b>：<code>none</code> 这条路要求所有专家贡献在同一次 all-reduce 里对齐，
+    而 A2A 让每个 token 只去它选中的专家所在的 rank，于是 EP 可以跨节点铺开而不用把全局 batch 也一起搬过去。
+    另外别忘了 none 路径还要额外付 DP-gather 的代价，那部分没算在上面。</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="two-layers"><span class="n">4</span>MoE 后端 vs MoE A2A 后端：两层正交</h2>
+
+  <p>两个 flag 管的是完全不同的两件事，只是被一张注册表接在一起：</p>
+
+  <div class="topo">
+    <div class="prow"><span class="lbl">--moe-a2a-backend</span>
+      <span class="node hot">token 怎么跨 rank 摆布</span>
+      <span class="node dim">deepep / mooncake / nixl / mori / pplx / flashinfer / deepep_v2 / megamoe / flashinfer_megamoe / none</span>
+    </div>
+    <div class="arrowdown">▼ 输出一个带格式标签的 DispatchOutput</div>
+    <div class="prow"><span class="lbl">传输层</span>
+      <span class="node gpu">DispatchOutputFormat：standard / deepep_normal / deepep_ll / flashinfer / deepep_v2 / ascend_tp</span>
+    </div>
+    <div class="arrowdown">▼ 注册表按 (格式 → kernel) 查表</div>
+    <div class="prow"><span class="lbl">--moe-runner-backend</span>
+      <span class="node hot">专家 GEMM 用谁的 kernel</span>
+      <span class="node dim">deep_gemm / triton / marlin / humming / flashinfer_* / hpc_ops / aiter …</span>
+    </div>
+  </div>
+
+  <p>对接机制有两套，只有一套是「格式级」的：</p>
+  <div class="two">
+    <div class="box"><h5>permute 表：按 dispatch 格式（跨 A2A 后端通用）</h5>
+      <code>get_pre_permute(dispatch_format, runner_backend)</code>。
+      注册键是 <code>("deepep_ll", "deep_gemm")</code> 这样的组合，
+      所以 <b>任何产出该格式的 A2A 后端都能配上</b> —— mori / nixl / mooncake / pplx 都故意复用
+      <code>deepep_normal</code> / <code>deepep_ll</code> 这两个标签，就是为了直接复用现成的 masked / contiguous GEMM 通路。</div>
+    <div class="box"><h5>fused func 表：按 A2A 后端名（一配一）</h5>
+      <code>FusedOpPool.get_fused_func(a2a_backend.value, runner_backend.value)</code>。
+      键里含 A2A 后端名，所以 <code>("deepep", "flashinfer_cutedsl")</code> 和
+      <code>("flashinfer", "flashinfer_cutedsl")</code> 是两条独立注册 —— 换了 A2A 后端就换函数。</div>
+  </div>
+  <span class="src">moe_runner/runner.py:163-187 · moe_runner/base.py:137-275（两个池）· token_dispatcher/base.py:170-200（格式枚举）</span>
+
+  <h3 class="mini" id="a2a-table">4.1 九个 A2A 后端</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>A2A 后端</th><th>引擎 / 包</th><th>布局与精度</th><th>缓冲容量旋钮（默认）</th><th>要点</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="A2A 后端">deepep</td><td class="v" data-label="引擎 / 包">deep_ep.Buffer<br>（NVSHMEM）</td>
+          <td data-label="布局与精度">normal = permuted；<br>low_latency = masked。<br>bf16 / fp8 / NVFP4(仅 LL)</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_DEEPEP_<br>NUM_MAX_DISPATCH_TOKENS_PER_RANK<br>(128)</td>
+          <td data-label="要点">唯一同时具备「真 recv-hook」和通信/计算 overlap 信号管道的实现；<br>LL 的 combine 原生支持与 GEMM 重叠。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">deepep_v2</td><td class="v" data-label="引擎 / 包">deep_ep.ElasticBuffer</td>
+          <td data-label="布局与精度">按 batch 组成自选：decode = 展开/masked，<br>extend = 连续 permuted。bf16 + fp8（必须与专家权重同精度）</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_DEEPEP_V2_<br>NUM_MAX_DISPATCH_TOKENS_PER_RANK<br>(128)</td>
+          <td data-label="要点">强绑 <code>--moe-runner-backend deep_gemm</code>；<br>未实现 TBO/SBO；关 prefill 图。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">flashinfer</td><td class="v" data-label="引擎 / 包">flashinfer.comm.MoeAlltoAll<br>（MNNVL / TorchDistributed）</td>
+          <td data-label="布局与精度">固定几何 <code>[ep, max_tokens]</code> 工作区；<br>bf16 / NVFP4 / MXFP8</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_FLASHINFER_<br>NUM_MAX_DISPATCH_TOKENS_PER_RANK<br>(None → max(cps, 4096))</td>
+          <td data-label="要点">要求 dp_size == tp_size + DP attention；<br>extend batch 直接绕开 A2A 走 all-gather/reduce-scatter；<br>combine 已归约 → 外部 all-reduce 必须跳过。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">mori</td><td class="v" data-label="引擎 / 包">mori.ops.EpDispatchCombineOp<br>（ROCm）</td>
+          <td data-label="布局与精度">normal = packed；LL = AsyncLL 掩码，<br>拆分 send/recv。bf16 / fp8 / fp4 / mxfp8</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_MORI_<br>NUM_MAX_DISPATCH_TOKENS_PER_RANK<br>(4096)</td>
+          <td data-label="要点">按 world_size 自动选 intra/inter-node 内核；<br>AMD 专用。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">nixl</td><td class="v" data-label="引擎 / 包">nixl_ep.Buffer<br>（NIXL RDMA）</td>
+          <td data-label="布局与精度">仅 masked LL；fp8 默认（bf16 需开关）</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_NIXL_EP_<br>NUM_MAX_DISPATCH_TOKENS_PER_RANK<br>(128)</td>
+          <td data-label="要点">为弹性 EP 设计：按 max_ep_size 预分配，支持 rank 加入。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">mooncake</td><td class="v" data-label="引擎 / 包">mooncake.mooncake_ep_buffer.Buffer<br>（Mooncake 传输引擎）</td>
+          <td data-label="布局与精度">仅 masked LL；dispatch 侧固定 use_fp8=True</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_MOONCAKE_EP_<br>NUM_MAX_DISPATCH_TOKENS_PER_RANK<br>(128)</td>
+          <td data-label="要点">首次调用用阻塞模式做初始化（timeout −1），之后 10s。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">pplx</td><td class="v" data-label="引擎 / 包">pplx_kernels.AllToAll<br>（NVSHMEM）</td>
+          <td data-label="布局与精度">masked、按专家分批的固定缓冲；bf16 / fp8</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_PPLX_<br>NUM_MAX_DISPATCH_TOKENS_PER_RANK<br>(128)</td>
+          <td data-label="要点">要 dp_size ≥ 2 且开 DP attention；<br>只支持 LL；强绑 deep_gemm。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">megamoe</td><td class="v" data-label="引擎 / 包">DeepGEMM<br>（对称缓冲区，无独立通信库调用）</td>
+          <td data-label="布局与精度">FP8 输入 + FP8/FP4 权重；<br>kernel 内 pull + push</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_OPT_DEEPGEMM_<br>MEGA_MOE_NUM_MAX_TOKENS_PER_RANK<br>(8192)</td>
+          <td data-label="要点">dispatcher 退化空转；<br>权重与 token 缓冲都要先备好；<br>超限逐层回退（Kimi 系不回退）。</td></tr>
+      <tr><td class="k" data-label="A2A 后端">flashinfer_<br>megamoe</td><td class="v" data-label="引擎 / 包">FlashInfer<br>moe_ep.MoEEpMegaLayer</td>
+          <td data-label="布局与精度">MXFP8 / NVFP4 / FP4-expert；<br>combine dtype 可选 bf16/mxfp8/nvfp4</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_FLASHINFER_<br>MEGAMOE_MAX_TOKENS_PER_RANK<br>(0 → 自动推导，兜底 1024)</td>
+          <td data-label="要点">模型无关，但启动期校验架构+量化+拓扑；<br>要求 SM100；层状态必须预热，不能在捕获里懒建。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">另有 <code>ascend_fuseep</code>（昇腾 FuseEP，绕过 dispatcher 抽象）与 <code>ascend_tp</code>（昇腾本地路由，参数解析阶段会被改写成 none）。</p>
+  <span class="src">token_dispatcher/*.py 各文件头部 · environ.py 对应条目 · layers/moe/utils.py:34-101（枚举与谓词）</span>
+
+  <h3 class="mini" id="runner-table">4.2 runner 后端：只决定 GEMM</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>runner</th><th>内核来源</th><th>支持的量化</th><th>架构 / 平台</th><th>能接哪种 A2A</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="runner">deep_gemm<br><span class="hint">(默认 auto 的主选)</span></td>
+          <td class="v" data-label="内核来源">DeepGEMM 分组 GEMM（contig / masked / bf16 各一套）+ SGLang 的 ep_scatter/ep_gather 前处理</td>
+          <td data-label="支持的量化">FP8 blockwise（典型 128×128）、per-tensor（会被展成 128 块）、MXFP8(1×32)、BF16、FP4-expert</td>
+          <td data-label="架构 / 平台">SM90+；SM120 有独立 contig 通路（要求不在 EP 下、token ≥1024）</td>
+          <td data-label="能接哪种 A2A"><b>全部</b>：standard / deepep_normal / deepep_ll / deepep_v2 / flashinfer / megamoe</td></tr>
+      <tr><td class="k" data-label="runner">triton</td><td class="v" data-label="内核来源">Triton fused_moe_kernel 序列</td>
+          <td data-label="支持的量化">bf16 / fp16、W8A8（含 block）、W8A16、W4A16（AWQ/GPTQ）、gfx95 上的 MXFP8</td>
+          <td data-label="架构 / 平台">CUDA + ROCm 通用</td>
+          <td data-label="能接哪种 A2A">仅 none（只注册了 <code>("none","triton")</code> 与 standard 格式的 permute）</td></tr>
+      <tr><td class="k" data-label="runner">triton_kernel</td><td class="v" data-label="内核来源">外部 triton_kernels 包</td>
+          <td data-label="支持的量化">bf16，可选 PrecisionConfig（MXFP4 权重走这里）</td>
+          <td data-label="架构 / 平台">CUDA</td><td data-label="能接哪种 A2A">仅 none；且要求自带的 topk 格式</td></tr>
+      <tr><td class="k" data-label="runner">marlin</td><td class="v" data-label="内核来源">fused_marlin_moe</td>
+          <td data-label="支持的量化">W4A16 / W8A16（AWQ、GPTQ、compressed-tensors）、NVFP4</td>
+          <td data-label="架构 / 平台">SM80–89 上 NVFP4 的 auto 选择</td><td data-label="能接哪种 A2A">仅 none</td></tr>
+      <tr><td class="k" data-label="runner">humming</td><td class="v" data-label="内核来源">外部 humming 包 + SGLang permute/unpermute</td>
+          <td data-label="支持的量化">FP8 block-128、W4A8、DSV4 的 MXFP4-E8M0</td>
+          <td data-label="架构 / 平台">CUDA</td>
+          <td data-label="能接哪种 A2A">none / deepep_normal / deepep_ll（三种 permute 都注册了）</td></tr>
+      <tr><td class="k" data-label="runner">flashinfer_<br>cutlass</td><td class="v" data-label="内核来源">flashinfer.fused_moe.cutlass_fused_moe</td>
+          <td data-label="支持的量化">bf16 / FP8 / NVFP4 / MXFP4（SM90 W4A16 与 Humming 风格 W4A8、SM120 MXFP8×MXFP4）</td>
+          <td data-label="架构 / 平台">SM80+（子路径各自有门槛）</td><td data-label="能接哪种 A2A">none / flashinfer</td></tr>
+      <tr><td class="k" data-label="runner">flashinfer_<br>mxfp4</td><td class="v" data-label="内核来源">同名 cutlass 实现或 SM100 TRT-LLM gen（按 quant_info 类型分派）</td>
+          <td data-label="支持的量化">MXFP4</td><td data-label="架构 / 平台">SM90 / SM100 / SM120 分档</td><td data-label="能接哪种 A2A">仅 none</td></tr>
+      <tr><td class="k" data-label="runner">flashinfer_<br>cutedsl</td><td class="v" data-label="内核来源">CuteDslMoEWrapper / masked grouped GEMM</td>
+          <td data-label="支持的量化">NVFP4（w4a4 或 w4a16）</td><td data-label="架构 / 平台">SM100 系</td><td data-label="能接哪种 A2A">none / flashinfer / deepep（后者只有 LL 掩码布局）</td></tr>
+      <tr><td class="k" data-label="runner">flashinfer_<br>trtllm<br>(_routed)</td><td class="v" data-label="内核来源">TRT-LLM gen kernels</td>
+          <td data-label="支持的量化">FP8 blockwise / per-tensor、MXFP8、NVFP4、MXFP4、BF16</td>
+          <td data-label="架构 / 平台">Blackwell 系（capability ≥ 10.0）</td><td data-label="能接哪种 A2A">none / flashinfer（flashinfer 下会自动切到 _routed 变体）</td></tr>
+      <tr><td class="k" data-label="runner">hpc_ops</td><td class="v" data-label="内核来源">腾讯 HPC-Ops fuse_moe(_blockwise)</td>
+          <td data-label="支持的量化">仅 FP8（128×128 block 或 per-tensor）</td>
+          <td data-label="架构 / 平台"><b>硬性 SM90</b>，构造时断言</td>
+          <td data-label="能接哪种 A2A">仅 none；且挂在 standard dispatcher 上时需要全局专家 id（会反过来校验 runner）</td></tr>
+      <tr><td class="k" data-label="runner">aiter</td><td class="v" data-label="内核来源">ROCm AITER fused_moe</td>
+          <td data-label="支持的量化">bf16 / W8A8 per-token / FP8 128×128 / per-1x32（含 fp4x2）</td>
+          <td data-label="架构 / 平台">ROCm（HIP）</td>
+          <td data-label="能接哪种 A2A">none / deepep / mooncake / nixl / mori（由 <code>supports_aiter()</code> 决定）</td></tr>
+      <tr><td class="k" data-label="runner">ascend</td><td class="v" data-label="内核来源">昇腾 grouped matmul MoE 方法</td>
+          <td data-label="支持的量化">NPU 未量化 / W8A8 / W4A8 MXFP4 / MXFP8 / GGUF</td>
+          <td data-label="架构 / 平台">Ascend NPU</td><td data-label="能接哪种 A2A">ascend_tp / deepep_normal / deepep_ll</td></tr>
+      <tr><td class="k" data-label="runner">cutlass</td><td class="v" data-label="内核来源">SGLang 自带 cutlass_moe</td>
+          <td data-label="支持的量化">FP8</td><td data-label="架构 / 平台">SM120（其余平台被标为 deprecated）</td>
+          <td data-label="能接哪种 A2A">仅 none；而且没注册 fused func —— 量化方法要绕过 MoeRunner 直接调</td></tr>
+      <tr><td class="k" data-label="runner">intel_xpu</td><td class="v" data-label="内核来源">—</td><td data-label="支持的量化">—</td><td data-label="架构 / 平台">XPU</td>
+          <td data-label="能接哪种 A2A">枚举里有，但 MoeRunner 没有对应分支，构造即 NotImplementedError</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <span class="src">layers/moe/moe_runner/*.py · arg_groups/choices.py:139-167 · arg_groups/moe_hook.py 的逐 runner 断言</span>
+
+  <h3 class="mini" id="matrix">4.3 组合矩阵：哪些配对真的能跑</h3>
+  <p>把「runner 能吃哪种 dispatch 格式」画出来，可选的 A2A 后端自然就出来了 —— 因为每个 A2A 后端产出的格式是固定的：</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>runner ＼ dispatch 格式</th><th>standard</th><th>deepep_normal</th><th>deepep_ll</th><th>deepep_v2</th><th>flashinfer</th><th>ascend_tp</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">deep_gemm</td><td data-label="standard">✓</td><td data-label="deepep_normal">✓</td><td data-label="deepep_ll">✓</td><td data-label="deepep_v2">✓</td><td data-label="flashinfer">✓（仅 bf16）</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">triton</td><td data-label="standard">✓</td><td data-label="deepep_normal">—</td><td data-label="deepep_ll">—</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">—</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">triton_kernel</td><td data-label="standard">✓</td><td data-label="deepep_normal">—</td><td data-label="deepep_ll">—</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">—</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">marlin</td><td data-label="standard">✓</td><td data-label="deepep_normal">—</td><td data-label="deepep_ll">—</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">—</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">humming</td><td data-label="standard">✓</td><td data-label="deepep_normal">✓</td><td data-label="deepep_ll">✓</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">—</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">aiter</td><td data-label="standard">✓</td><td data-label="deepep_normal">✓</td><td data-label="deepep_ll">✓</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">—</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">ascend</td><td data-label="standard">—</td><td data-label="deepep_normal">✓</td><td data-label="deepep_ll">✓</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">—</td><td data-label="ascend_tp">✓</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">flashinfer_cutlass</td><td data-label="standard">✓</td><td data-label="deepep_normal">—</td><td data-label="deepep_ll">—</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">✓</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">flashinfer_cutedsl</td><td data-label="standard">✓</td><td data-label="deepep_normal">—</td><td data-label="deepep_ll">✓</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">✓</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">flashinfer_trtllm(_routed)</td><td data-label="standard">✓</td><td data-label="deepep_normal">—</td><td data-label="deepep_ll">—</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">✓</td><td data-label="ascend_tp">—</td></tr>
+      <tr><td class="k" data-label="runner ＼ dispatch 格式">hpc_ops / cutlass</td><td data-label="standard">✓</td><td data-label="deepep_normal">—</td><td data-label="deepep_ll">—</td><td data-label="deepep_v2">—</td><td data-label="flashinfer">—</td><td data-label="ascend_tp">—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">「✓」= 该 runner 在这个格式上注册了 pre/post-permute，或注册了对应 A2A 后端名的 fused func。
+  megamoe 与 flashinfer_megamoe 不在这张表里：它们的 dispatcher 是空转的 StandardDispatcher，
+  通信发生在自己的 kernel 内部，所以从矩阵看像是「standard」，实际语义完全不同。</p>
+
+  <h3 class="mini">4.4 配错了会怎样：报错长什么样</h3>
+  <pre><code><span class="c"># 1) dispatch 格式没人认领：permute 查表断言失败</span>
+AssertionError  <span class="c"># get_pre_permute("deepep_ll", "triton") 未注册</span>
+<span class="c"># 典型触发：--moe-a2a-backend deepep --moe-runner-backend triton</span>
+
+<span class="c"># 2) 启动期就被钩子拦下，报错里直接写清允许的取值</span>
+ValueError: flashinfer_cutedsl supports moe_a2a_backend='none', 'deepep', or 'flashinfer', got 'mooncake'.
+ValueError: DeepEP v2 MoE currently supports only --moe-runner-backend deep_gemm. Got 'triton'.
+ValueError: moe_a2a_backend='pplx' requires --enable-dp-attention with at least 2 DP groups.
+ValueError: FP8/MXFP8 Cutlass MoE is only supported with ep_size == 1
+ValueError: FlashInfer MegaMOE is only supported with dp_size == tp_size and --enable-dp-attention
+
+<span class="c"># 3) 容量类：能启动，但跑到大 batch 才炸（所以钩子里有提前校验）</span>
+ValueError: DeepEP v2 per-rank prefill budget exceeds SGLANG_DEEPEP_V2_NUM_MAX_DISPATCH_TOKENS_PER_RANK:
+            required=8192, capacity=128. ...
+ValueError: num_tokens (...) exceeds max_num_tokens (...)      <span class="c"># flashinfer 工作区</span>
+AssertionError: mega MoE: num_tokens=... exceeds cap SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK=...  <span class="c"># mega moe 自己的容量断言</span>
+</code></pre>
+  <span class="src">moe_runner/base.py:216-254 · arg_groups/moe_hook.py · arg_groups/deepseek_v4_hook.py:19-101 · mega_moe.py:226-231</span>
+
+  <div class="myth">
+    <div class="w">常见误读：「MoE A2A 后端就是 DeepEP，其他都是换皮」</div>
+    <div class="r">机械上确实有共性 —— nixl / mooncake / pplx / mori 都<b>故意复用</b> DeepEP 的
+    <code>deepep_ll</code> / <code>deepep_normal</code> 格式标签，好让现成的 masked / contiguous GEMM 通路直接吃下它们的输出
+    （它们导出的 CombineInput 类型基本只是一张格式签）。但差别在<b>引擎与拓扑</b>：DeepEP 走 NVSHMEM 的 NVL+RDMA 双缓冲，
+    Mooncake 走自己的传输引擎，NIXL 为弹性成员数预分配，pplx 是 NVSHMEM 上的按专家分批固定几何，
+    mori 是 ROCm 的 AsyncLL 拆分 send/recv。<b>选型时要看的是「谁在你的互连上跑得动」</b>，
+    而不是「它们是不是同一套 API」—— 在只有 PCIe 的机器上，这一点尤其致命。</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="pick"><span class="n">5</span>怎么选</h2>
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t"><b>先问互连</b>
+      <span class="sub2">节点内有 NVLink/NVSwitch → DeepEP 类（deepep / deepep_v2）、FlashInfer A2A、MegaMoE 都可能；
+      只有 PCIe → 优先看 moonlight/mooncake、nixl 这类为弱互连设计的实现，并且<b>务必先做纯通信 smoke</b>（不加载模型），
+      再谈接模型。这一步失败的话，后面所有性能数据都拿不到。</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t"><b>再问「装不装得下」</b>
+      <span class="sub2">A2A 后端会强制 ep=tp、共享专家退化成 tp1（每卡复制），这两条都吃显存。
+      MegaMoE 还要额外拿一块随 max_tokens_per_rank 线性增长的对称缓冲区。先按上面的计算器把预算算出来，再决定拓扑。</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t"><b>然后问 runner 能不能配</b>
+      <span class="sub2">检查量化 → runner → A2A 三者是否在矩阵里。这张表里没有的组合，启动期就会给出明确的 ValueError ——
+      与其改参数硬凑，不如先确认哪一层是真正的约束（经常是量化格式，而不是通信）。</span></div></div>
+    <div class="step"><div class="i">4</div><div class="t"><b>最后才谈性能</b>
+      <span class="sub2">同一批数据里对比「TTFT / TPOT / 吞吐 / 每层 MoE 耗时 / dispatch+combine 耗时 / 剩余 all-reduce 次数」。
+      注意 prefill 和 decode 的结论经常相反（MegaMoE 的实测就是 decode 的 TPOT 变好、prefill 段变差），
+      所以别只报一个端到端数字。</span></div></div>
+  </div>
+
+  <details>
+    <summary>自测：为什么「A2A 打开了但不能忘了删 all-reduce」这件事不会出错？</summary>
+    <div class="ans">
+      因为删除动作是<b>按后端名硬编码</b>的，不是靠数值容错。
+      对 flashinfer / pplx / flashinfer_megamoe，<code>should_skip_post_experts_all_reduce()</code> 直接返回 True，
+      源码注释写明理由：dispatcher 的 <code>combine</code> 已经把各 token 的专家输出求和回源 rank，
+      再做一次 all-reduce 会<b>重复计数并让 bf16 溢出</b>。
+      对 deepep / mori / nixl / mooncake / deepep_v2，模型层的 <code>_enable_a2a_moe</code> 分支会改走
+      <code>forward_deepep()</code>，那条函数根本没有层尾 all-reduce。
+      <b>所以「遗漏删除」在代码层面不可能发生，真正会发生的错误是配错组合</b> —— 这正好是参数钩子要拦的事。
+    </div>
+  </details>
+
+  <details>
+    <summary>自测：MegaMoE 的 W4A4 路径为什么在本机起不来，而 W4A8 可以？</summary>
+    <div class="ans">
+      两条路走的是<b>两个不同的 pre-dispatch 实现</b>：
+      <code>mxf4xmxf4</code> 走 DeepGEMM 自己的 <code>mega_moe_pre_dispatch</code>，FP8 走 SGLang 的 JIT kernel。
+      FP4 激活按 E2M1 打包后宽度是 1792（两值一字节），而校验仍按未打包的 3584 检查，
+      于是 W4A4 在 pre-dispatch 就被尺寸断言挡住。
+      <b>可迁移的教训</b>：当同一功能有两套实现（一套出 FP8、一套出 FP4）时，接口约定要跟着量化格式一起版本化，
+      否则「编译通过但跑不起来」的失败会出现在最贵的时刻。
+    </div>
+  </details>
+
+  <h2 id="map"><span class="n">6</span>源码地图</h2>
+  <pre><code>python/sglang/srt/
+├── arg_groups/
+│   ├── fields/exec_.py            <span class="c"># --moe-a2a-backend 的 choices 与 --moe-runner-backend</span>
+│   ├── overrides.py               <span class="c"># ep=tp 强制、共享专家融合调整、waterfill 反向改写</span>
+│   ├── moe_hook.py                <span class="c"># 逐 (a2a, runner) 的兼容性断言与侧效</span>
+│   ├── mega_moe_hook.py           <span class="c"># runner=「megamoe」别名 → a2a=megamoe</span>
+│   └── deepseek_v4_hook.py        <span class="c"># MegaMoE 的每 rank token 预算校验</span>
+├── layers/moe/
+│   ├── utils.py                   <span class="c"># MoeA2ABackend / MoeRunnerBackend 两个枚举、skip-allreduce 判定</span>
+│   ├── mega_moe.py                <span class="c"># MegaMoE 主路径：权重准备、缓冲区、pre-dispatch+内核调用</span>
+│   ├── mega_moe_sm90.py           <span class="c"># SM90 变体（FP8、group_size=128、recipe 128/128/128）</span>
+│   ├── flashinfer_megamoe.py      <span class="c"># FlashInfer 版：权重预处理 + fused func + 工作区共享</span>
+│   ├── fused_moe_triton/layer.py  <span class="c"># create_moe_dispatcher()、FusedMoE.forward_impl、层尾 all-reduce</span>
+│   ├── moe_runner/
+│   │   ├── runner.py              <span class="c"># FusedOpPool / PermuteMethodPool 的查表与断言</span>
+│   │   ├── base.py                <span class="c"># register_fused_func / register_pre_permute</span>
+│   │   └── deep_gemm.py           <span class="c"># 五种 dispatch 格式各自的 pre/post permute</span>
+│   └── token_dispatcher/
+│       ├── base.py                <span class="c"># DispatchOutputFormat / CombineInputFormat 枚举</span>
+│       ├── standard.py            <span class="c"># none 路径：id 重映射 + 直通 combine</span>
+│       ├── deepep.py              <span class="c"># normal（permuted）与 low_latency（masked）两套实现</span>
+│       ├── deepep_v2.py           <span class="c"># ElasticBuffer，按 batch 组成选自适应布局</span>
+│       ├── flashinfer.py          <span class="c"># MoeAlltoAll，固定几何工作区</span>
+│       └── {mooncake,nixl,moriep,pplx}.py
+├── kernels/jit/csrc/deepseek_v4/
+│   └── mega_moe_pre_dispatch.cuh  <span class="c"># 一行一 CTA 的量化+摊平内核（FP8 路径）</span>
+├── models/
+│   ├── deepseek_v2.py             <span class="c"># should_use_mega_moe 分支、_enable_a2a_moe、_shared_expert_tp1</span>
+│   └── kimi_k3.py                 <span class="c"># _forward_mega_experts（无回退）</span>
+└── environ.py                     <span class="c"># 各后端的 NUM_MAX_DISPATCH_TOKENS_PER_RANK 与 MEGA_MOE_* 旋钮</span>
+
+DeepGEMM/
+├── deep_gemm/mega/__init__.py                      <span class="c"># SymmBuffer / fp8_fp4_mega_moe / 权重变换</span>
+├── csrc/apis/mega.hpp                              <span class="c"># 缓冲区尺寸与八切片的 host 侧定义</span>
+├── csrc/jit_kernels/heuristics/mega_moe.hpp        <span class="c"># block/stage/线程划分/拉取分块的选择逻辑</span>
+├── csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp  <span class="c"># TMA 描述符与启动配置</span>
+├── include/deep_gemm/layout/mega_moe.cuh           <span class="c"># workspace 布局、TokenSrcMetadata、池容量公式</span>
+├── include/deep_gemm/layout/sym_buffer.cuh         <span class="c"># 跨 rank 指针映射 map()</span>
+├── include/deep_gemm/comm/barrier.cuh              <span class="c"># grid_sync 与 NVLink barrier</span>
+└── include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh  <span class="c"># 内核本体：拉取 / GEMM / 推回 / 归约</span>
+</code></pre>
+
+  <h2>延伸</h2>
+  <ul class="links">
+    <li><a href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</a>
+      <span class="why">理解「none 路径尾部那次 all-reduce」到底花在哪，以及 ring 的延迟为什么随 R 线性增长。</span></li>
+    <li><a href="../../comm-parallel/cuda-ipc-direct-push/index.html">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</a>
+      <span class="why">小消息时序的直觉，用来判断 A2A 在 decode 阶段的收益来自哪里。</span></li>
+    <li><a href="../sglang-request-lifecycle/index.html">SGLang 推理全流程：一条请求从进到出的每一步</a>
+      <span class="why">本页讲的 MoE 段在整个 forward 里的位置，以及 LayerCommunicator 的 gather/scatter 时机。</span></li>
+    <li><a href="https://github.com/deepseek-ai/DeepGEMM" target="_blank" rel="noopener">deepseek-ai/DeepGEMM</a>
+      <span class="why">MegaMoE 的六个内核文件都在这里，<code>csrc/apis/mega.hpp</code> 是最短的入口。</span></li>
+    <li><a href="https://github.com/deepseek-ai/DeepEP" target="_blank" rel="noopener">deepseek-ai/DeepEP</a>
+      <span class="why">normal / low_latency 两种模式的源实现，以及它对 NVLink + RDMA 的假设。</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/main/docs/design_docs/moe_ep_architecture.md" target="_blank" rel="noopener">FlashInfer · MoE-EP 架构设计文档</a>
+      <span class="why">把 EP 明确分成「通信计算分离的 split path」与「融合的 mega path」，本页第 1 节的两分法就来自这套表述。</span></li>
+  </ul>
+
+  <footer>
+    <p>源码版本为公开的 SGLang 主分支与 DeepGEMM 对应版本。实测数据来自一台 8 卡单机（TP8/EP8）上的内部 A/B 实验；
+      主机名、内部路径、镜像地址、内部文档链接与模型版本号已做脱敏，测量数值与推导过程保留。</p>
+    <p>口径说明：计算器里的公式逐条对应源码函数；A2A 的通信量只计 dispatch + combine 的 payload，
+      不含工作区元数据、屏障和 all-reduce 之外的 gather/scatter 代价。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+
+  /* ---------- 计算器 A：对称缓冲区大小 ---------- */
+  var aIds = ['aR','aM','aK','aE','aH','aI'];
+  function alignUp(x, a){ return Math.ceil(x / a) * a; }
+  function gib(b){ return b / 1073741824; }
+  function fmtGiB(b){
+    var g = gib(b);
+    if (g >= 1) return g.toFixed(2) + ' GiB';
+    return (b / 1048576).toFixed(1) + ' MiB';
+  }
+  function poolTokens(R, M, topk, Er){
+    var recv = R * M;
+    var maxE = Math.min(topk, Er);
+    return alignUp(recv * maxE + Er * 191, 384);
+  }
+  function sfPadded(pool){
+    var bms = [8,16,32,64,96,128,192], mx = 0;
+    for (var i = 0; i < bms.length; i++){
+      var bm = bms[i];
+      var v = Math.floor(pool / bm) * alignUp(bm, 128);
+      if (v > mx) mx = v;
+    }
+    return mx;
+  }
+  function calcA(){
+    var R = +$('aR').value, M = +$('aM').value, topk = +$('aK').value;
+    var Er = +$('aE').value, H = +$('aH').value, I = +$('aI').value;
+    $('aRV').textContent = R; $('aMV').textContent = M; $('aKV').textContent = topk;
+    $('aEV').textContent = Er; $('aHV').textContent = H; $('aIV').textContent = I;
+
+    var pool = poolTokens(R, M, topk, Er);
+    var padded = sfPadded(pool);
+    var PB = Math.floor(pool / 8);
+    var recv = R * M;
+    var ws = 32 + R * Er * 16 + Er * 8 + alignUp(PB, 2) * 4 + PB * 8 + Er * R * recv * 4 + pool * 12;
+    ws = alignUp(ws, 16);
+
+    var inputTok = M * H, inputSf = M * (H / 32), inputIdx = M * topk * 8, inputW = M * topk * 4;
+    var l1Tok = pool * H, l1Sf = padded * (H / 32), l1W = pool * 4;
+    var l2Tok = pool * I,   l2Sf = padded * (I / 32);
+    var combine = topk * M * H * 2;
+    var total = ws + inputTok + inputSf + inputIdx + inputW + l1Tok + l1Sf + l1W + l2Tok + l2Sf + combine;
+
+    $('aTotal').textContent = fmtGiB(total);
+    $('aTotalD').textContent = '≈ ' + (gib(total) / Math.max(M,1) * 1048576).toFixed(1) + ' KiB / 池内 token 槽（近似）';
+    $('aL1').textContent = fmtGiB(l1Tok + l1Sf + l1W);
+    $('aL1D').textContent = 'pool×H + padded_sf×H/32';
+    $('aL2').textContent = fmtGiB(l2Tok + l2Sf);
+    $('aL2D').textContent = 'pool×I + padded_sf×I/32';
+    $('aCb').textContent = fmtGiB(combine);
+    $('aCbD').textContent = 'top_k × M × H × 2（bf16）';
+    $('aPool').textContent = pool.toLocaleString();
+    $('aWs').textContent = fmtGiB(ws + inputTok + inputSf + inputIdx + inputW);
+    $('aFleet').textContent = fmtGiB(total * R);
+
+    var g = gib(total), v = $('aVerdict');
+    if (g >= 8){
+      v.className = 'verdictbox no';
+      v.innerHTML = '每 rank ' + g.toFixed(1) + ' GiB × ' + R + ' 卡 = ' + fmtGiB(total*R) +
+        '。这台机器的 KV 池要在这之后才分得到显存 —— M 设得越大，KV 越少，能塞的并发越低。' +
+        '注意缓冲区随 R 也线性增长（池容量含 R×M 项），所以扩 EP 的同时会再吃一轮显存。';
+    } else {
+      v.className = 'verdictbox ok';
+      v.innerHTML = '每 rank ' + fmtGiB(total) + '，整机 ' + fmtGiB(total*R) +
+        '。相对可用显存属于可控范围，可以按这个 M 上线；但 M 一旦不足以覆盖 prefill 的每 rank token 峰值，' +
+        'DeepSeek 系会静默回退到普通 fused MoE（Kimi 系会直接 assert）。';
+    }
+  }
+  aIds.forEach(function(id){ if ($(id)) $(id).addEventListener('input', calcA); });
+  if ($('aTotal')) calcA();
+
+  /* ---------- 计算器 B：all-reduce vs A2A ---------- */
+  function fmtB(b){
+    if (b >= 1048576) return (b/1048576).toFixed(2) + ' MiB';
+    if (b >= 1024) return (b/1024).toFixed(1) + ' KiB';
+    return b.toFixed(0) + ' B';
+  }
+  function calcB(){
+    var B = +$('bB').value, R = +$('bR').value, H = +$('bH').value;
+    var K = +$('bK').value, d = +$('bD').value;
+    $('bBV').textContent = B; $('bRV').textContent = R; $('bHV').textContent = H; $('bKV').textContent = K;
+
+    var none = 2 * (R - 1) / R * (B * H * 2);
+    var a2a  = (B / R) * K * H * (d + 2);
+    var ratio = a2a / none;
+
+    $('bNone').textContent = fmtB(none);
+    $('bNoneD').textContent = '2·(' + R + '−1)/' + R + ' · ' + B + '×' + H + '×2 = ' + fmtB(none);
+    $('bA2A').textContent = fmtB(a2a);
+    $('bA2AD').textContent = '(' + B + '/' + R + ')·' + K + '·' + H + '·(' + d + '+2) = ' + fmtB(a2a);
+    $('bRatio').textContent = ratio.toFixed(2) + '×';
+    $('bRatio').className = 'v ' + (ratio < 1 ? 'good' : 'warn');
+    $('bFleet').textContent = fmtB(none * R) + ' vs ' + fmtB(a2a * R);
+    $('bFleetD').textContent = ratio < 1 ? 'A2A 侧更省 ' + fmtB(none*R - a2a*R) : 'A2A 侧多花 ' + fmtB(a2a*R - none*R);
+
+    var mx = Math.max(none, a2a);
+    $('barNone').style.width = (none / mx * 100).toFixed(1) + '%';
+    $('barA2A').style.width = (a2a / mx * 100).toFixed(1) + '%';
+
+    var v = $('bVerdict');
+    var perTok = a2a / (B / R) / 1024;
+    if (ratio > 1.05){
+      v.className = 'verdictbox no';
+      v.innerHTML = 'A2A 的字节数是稠密 all-reduce 的 ' + ratio.toFixed(2) + ' 倍（每 token 约 ' + perTok.toFixed(1) +
+        ' KiB 发出去）。此时 A2A 的价值不在省带宽，而在：逐 token 的负载更均衡、能与 GEMM 重叠、' +
+        '以及 EP 可以铺到 all-reduce 铺不到的拓扑上。如果你追求的是纯带宽，这条路是亏的。';
+    } else if (ratio < 0.95){
+      v.className = 'verdictbox ok';
+      v.innerHTML = 'A2A 比稠密 all-reduce 省 ' + ((1 - ratio) * 100).toFixed(0) + '% 字节（比值 ' + ratio.toFixed(2) +
+        '）。注意这里还没算 none 路径额外的 DP-gather 开销，也没算 all-reduce 的阻塞延迟。';
+    } else {
+      v.className = 'verdictbox ok';
+      v.innerHTML = '两者基本持平（比值 ' + ratio.toFixed(2) + '）。这正是 K≈R 时的典型结果：' +
+        'A2A 的收益不来自字节数，而来自「点到点可重叠」与「延迟不随 R 线性增长」。';
+    }
+  }
+  ['bB','bR','bH','bK','bD'].forEach(function(id){ if ($(id)) $(id).addEventListener('input', calcB); });
+  if ($('bNone')) calcB();
+})();
+</script>
+</body>
+</html>

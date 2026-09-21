@@ -1,0 +1,27 @@
+{
+  "title": "MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别",
+  "slug": "moe-a2a-megamoe",
+  "category": "inference-systems",
+  "date": "2026-09-21",
+  "tags": ["SGLang", "DeepGEMM", "MegaMoE", "MoE", "EP / A2A", "DeepEP", "FlashInfer", "对称内存", "源码走读"],
+  "one_liner": "对着 SGLang 与 DeepGEMM 源码讲三件事：MegaMoE 把一个 MoE 层的 dispatch、两次分组 GEMM、激活、combine 归约压进同一个全网格持久内核（拉取式 dispatch + L1 输出直落 L2 池 + 结果直推源 rank）；设与不设 --moe-a2a-backend 之间，换的是「层尾那次稠密 all-reduce」与「dispatch/combine」的取舍，并顺带改写 ep=tp、共享专家融合、CUDA graph 等七项参数；而 runner 后端与 A2A 后端是两层正交的东西，靠一张按 DispatchOutputFormat 注册的表决定谁能配谁。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "sources": [
+    "SGLang 公开主分支：layers/moe/mega_moe.py、mega_moe_sm90.py、flashinfer_megamoe.py、token_dispatcher/*、moe_runner/*、fused_moe_triton/layer.py、models/deepseek_v2.py、models/kimi_k3.py、arg_groups/*（overrides.py、moe_hook.py、mega_moe_hook.py、deepseek_v4_hook.py、fields/exec_.py）、environ.py、kernels/jit/csrc/deepseek_v4/mega_moe_pre_dispatch.cuh",
+    "DeepGEMM 公开源码：csrc/apis/mega.hpp、csrc/jit_kernels/heuristics/mega_moe.hpp、csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp、include/deep_gemm/{layout/mega_moe.cuh,layout/sym_buffer.cuh,comm/barrier.cuh,impls/sm100_fp8_fp4_mega_moe.cuh}",
+    "内部实验：单机 8 卡 B300 上 MoE 后端切换的 Low-Latency A/B（TP8/PP1/EP8，16K→512 与 1K→128 两组场景，并发 8/32/128）",
+    "缓冲区容量与通信量公式由上述源码函数逐条对应推导"
+  ],
+  "visibility": "internal",
+  "redactions": [
+    "主机名、集群编号与机器地址",
+    "实验结果的绝对路径与内部归档目录",
+    "内部镜像仓库地址与镜像标签",
+    "内部文档链接与文档 ID",
+    "模型版本号（统一写作模型家族）",
+    "内部环境变量前缀与内部补丁脚本名"
+  ],
+  "enriched": "2026-09-21"
+}
