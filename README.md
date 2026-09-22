@@ -50,6 +50,7 @@ show-me/
 | 2026-09-18 | [L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么](inference-systems/hicache-mooncake/index.html) | inference-systems | KV Cache · HiCache · Mooncake · SGLang · 分层缓存 · 前缀复用 · PD 分离 | 用存储层级的容量/带宽阶梯解释 decode 为什么是纯访存瓶颈；SGLang HiCache 把 radix 树从 HBM 延伸到主机与集群，Mooncake 是其中一种 L3 实现（同时还是 PD 分离的默认传输后端），二者是策略层与数据面的正交关系。 | `sess_028051f7` |
 | 2026-09-16 | [PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流](inference-systems/dflash-pp-adaptation/index.html) ([notes.md](inference-systems/dflash-pp-adaptation/notes.md)) | inference-systems | SGLang · 流水并行 · DFlash · 投机解码 · 跨阶段通信 · 正确性 bug | 上游 SGLang 有三道护栏硬性禁止 DFlash 与 PP 共存；适配没有碰算法，而是用一个 world_size=1 的伪造 PP 组让草稿模型整体跑在 PP0，并设计 aux hidden 去程累积、投影 context 回程两条通道穿过 PP ring。 | `sess_0255fd71` |
 | 2026-09-22 | [注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布](comm-parallel/ar-compute-overlap-moe-chunk/index.html) ([notes.md](comm-parallel/ar-compute-overlap-moe-chunk/notes.md)) | comm-parallel | AllReduce · 通信计算重叠 · 张量并行 · MoE · 流水线并行 · 预填充 · PCIe | 把 MoE 前的那次全量 AllReduce 切成两片扔到侧流，主流拿第一片就先算：藏住 1.77 ms、付出 0.64+0.35 ms，净赚 0.78 ms/层（实测整层 −0.79，逐位吻合）；同容器 A/B 端到端 +2.8%/6.8%/7.7%（C=8/16/32），但同一补丁在 TP2×PP4 上净 ≈ 0 —— 收益正比于「被暴露的通信时长」，不是模型规模。 | — |
+| 2026-09-22 | [Prefill CP8 / Decode TP8：为什么 CP 能拿到收益](comm-parallel/prefill-cp8-decode-tp8/index.html) | comm-parallel | Context Parallel · Prefill · TP8 · Sparse MLA · mHC · 超连接 · MoE · AllGather · ReduceScatter · SGLang | CP 的收益不来自注意力 FLOPs（TP8 与 CP8 每卡 query×head 都是 65,536），而来自把每卡行数从 8192 降到 1024：按 token 重复而 TP 切不动的算子（超连接 mHC、LayerNorm、量化、indexer）随之掉 8 倍（mHC 136.77→13.06 ms），注意力靠头数 8→64 的形状改善拿到 79.77→33.55 ms，注意力输出的 AllReduce 消失、换成 MoE 前后的 AllGather/ReduceScatter（通信 349.51→275.71 ms），而按权重算的 MoE GEMM 55.14→54.98 ms 一动不动；GPU 窗口 811.55→533.70 ms，C8 那一步输入吞吐 +27.1%、TTFT −34.5%、TPOT −15.8%（相对本轮起点 +56.85%/-48.14%/-34.04%），代价是 tp=1 的权重复制（静态显存比例 0.68→0.74）与 decode 侧运行时切片加 MXFP8 swizzled scale 重算。 | `sess_30d19c4e` |
 | 2026-09-20 | [CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽](comm-parallel/cuda-ipc-direct-push/index.html) | comm-parallel | AllReduce · CUDA IPC · PCIe · 张量并行 · 通信优化 · 延迟vs带宽 | decode 小消息把 AllReduce 换成 CUDA IPC 直推，砍的是成本式里的固定开销 α（不是带宽）；1-stage ↔ 2-stage 是同一套 IPC 内核里的 Variant 选择（seed 交叉点 32 KiB），按载荷尺寸分流——两条改动的收益不能相乘。 | `sess_f72fea5d` |
 | 2026-09-15 | [1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节](comm-parallel/allreduce-1stage-vs-2stage/index.html) ([allreduce-infographic.png](comm-parallel/allreduce-1stage-vs-2stage/allreduce-infographic.png)) | comm-parallel | AllReduce · 张量并行 · 通信优化 · PCIe · 投机解码 · Amdahl | 把 AllReduce 从广播式改成 reduce-scatter + all-gather，单次归约 907 → 222.6 µs；收益全部来自「少搬 4 倍字节」，端到端 +60% 对 Amdahl 上限 +76% 的兑现率 91%。 | `sess_0255fd71` |
 <!-- ENTRIES:END -->
@@ -73,7 +74,10 @@ bash sync.sh "show-me: <主题>"   # 提交并推送（幂等；无改动时不�
 - 页面骨架：面包屑 → 标题 → 日期与标签 pill → 锚点导航 → 速览卡 → 正文 → 页脚（数据来源 + 许可）
 - 交互计算器：按「载荷 / 换算 / 结论」这类逻辑分组，每组 2–3 格，避免出现单独一张的孤儿卡
 - 移动端：导航 chip 横向滚动，计算器的对照组自动折成一列
+- 数据图表：不手写，由 [`lieflat-charts`](https://github.com/larashero3-dotcom/lieflat-charts) skill（模板驱动）生成，`catalog.md` 选型、`templates/` 取骨架。页壳仍用上面这套设计变量，图内排版与最小字号听 lieflat 的；整页只锁一套色系（默认 Mono 灰阶，有序单序列可用 porcelain；用 palm / wire 时把 `--accent` 一起换掉，不留两种主色）
 
 ## 许可
 
 内容（`*.html` / `*.md` / 图片）以 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 共享，脚本与代码以 MIT 共享。引用时请注明出处并链接回本仓库。
+
+例外：页面里的数据图表由 [lieflat-charts](https://github.com/larashero3-dotcom/lieflat-charts) 的模板与 token 生成，该部分代码遵循 **PolyForm Noncommercial License 1.0.0**，不属于上面的 CC BY 4.0 / MIT——可非商业使用与再分发，但不得用于商业用途；转发带图表的页面时请保留本声明。页面文字的引用仍按 CC BY 4.0。

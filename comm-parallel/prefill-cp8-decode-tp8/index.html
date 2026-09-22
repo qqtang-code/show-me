@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>Prefill CP8 / Decode TP8：CP 的收益从源码看落在哪</title>
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    /* lieflat Mono token（值取自 mono-tokens.js，仅图表区使用） */
+    --lf-paper:#F0EFEB; --lf-ink:#1C1C1A; --lf-muted:#8F8E88; --lf-faint:#C6C5BF; --lf-grid:#DEDDD6;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)} .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7b8aa3} pre .hl{color:#12489c;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:12px 16px;margin:16px 0;font-size:14px;color:#4a3a1f}
+  .note b{color:#7a4a06}
+  .oknote{background:#f1f8f4;border-left:3px solid var(--good);border-radius:0 8px 8px 0;
+        padding:12px 16px;margin:16px 0;font-size:14px;color:#20452f}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .panel h4{margin:0 0 10px;font-size:14.5px;color:var(--ink)}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin:12px 0}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+  th{font:12px var(--mono);color:var(--dim2);font-weight:600}
+  td.num,th.num{text-align:right;font-family:var(--mono);font-size:13px}
+  tr.em td{background:var(--accent-soft)}
+  .good{color:var(--good);font-weight:600} .flat{color:var(--dim2)}
+  footer{margin-top:52px;border-top:1px solid var(--line);padding-top:16px;color:var(--dim2);font-size:13px}
+  footer .lic{font:12px var(--mono);display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  footer .lic a{color:var(--accent);text-decoration:none}
+  @media (max-width:640px){
+    table.cardmode thead{display:none}
+    table.cardmode tr{display:block;border:1px solid var(--line);border-radius:10px;
+                      margin-bottom:10px;padding:6px 10px;background:var(--panel)}
+    table.cardmode td{display:block;text-align:right;overflow-wrap:anywhere;border:0;padding:3px 0}
+    table.cardmode td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;
+                              color:var(--dim2);font:12px var(--mono)}
+    table.cardmode td.k{display:block;text-align:left;font-weight:600;color:var(--ink);
+                        border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:4px}
+    table.cardmode td.k::before{content:none}
+    table.cardmode tr.em td{background:none}
+  }
+
+  /* ============ 图表区：lieflat-charts 语法（卡内排版＝Mono，卡外＝页面） ============ */
+  /* 不整段内联 MONO.CARD_CSS：它的 :root / body 规则会重刷整页。取值取自 mono-tokens.js。 */
+  .chartrow{display:grid;grid-template-columns:470px minmax(0,1fr);gap:26px;align-items:start}
+  .chartcard{background:var(--lf-paper);border-radius:24px;padding:28px 28px 20px;color:var(--lf-ink)}
+  .chartcard h2{font-family:'Inter',sans-serif;font-weight:700;font-size:16.5px;letter-spacing:-.02em;
+                color:var(--lf-ink);margin:0 0 3px;padding:0;border:0;line-height:1.35}
+  .chartcard .sub{font-family:'Inter',sans-serif;font-size:11.5px;color:var(--lf-muted);
+                  margin:0 0 14px;line-height:1.5}
+  .chartcard .src{font-family:'Inter',sans-serif;font-size:9.5px;color:var(--lf-faint);margin-top:10px;
+                  letter-spacing:.08em;font-weight:500}
+  .chartwrap{overflow-x:auto}
+  .chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+  .chartcard svg text{font-family:'Inter',sans-serif}
+  .chartnotes{margin:0;padding:0 0 0 22px;border-left:2px solid var(--accent-line);list-style:none}
+  .chartnotes li{margin:0 0 12px;font-size:14px;color:var(--dim);line-height:1.65}
+  .chartnotes b{color:var(--ink)}
+  @media (max-width:640px){
+    .chartrow{grid-template-columns:minmax(0,1fr);gap:16px}
+    .chartnotes{padding-left:0;border-left:0}
+    .chartcard svg{min-width:400px}
+  }
+
+  /* ============ 并行布局对照（自绘版式，非图表） ============ */
+  .lane{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
+  .lane i{font:11px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;border-radius:6px;
+          padding:5px 7px;color:#3f4c63;min-width:0;flex:1 1 96px;text-align:center;font-style:normal}
+  .lane.tp i{background:#eef2f9}
+  .lane.cp i{background:#eaf6ef;border-color:#c6e3d2;color:#1d4b32}
+  .lanehead{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;margin-top:14px}
+  .lanehead span{font:12px var(--mono);color:var(--dim2)}
+  .lanehead b{font-size:14.5px}
+
+  /* ============ 计算器 ============ */
+  .calc{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:12px 0}
+  .cbox{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+  .cbox h5{margin:0 0 8px;font:600 12px var(--mono);color:var(--dim2);letter-spacing:.03em}
+  .cbox .row{display:flex;justify-content:space-between;gap:10px;font-size:13.5px;margin:5px 0;min-width:0}
+  .cbox .row span:first-child{color:var(--dim)}
+  .cbox .row span:last-child{font-family:var(--mono);color:var(--ink);font-weight:600;text-align:right}
+  .knob{margin:6px 0 12px}
+  .knob label{display:block;font-size:13.5px;color:var(--dim);margin-bottom:4px}
+  .knob input[type=range]{width:100%}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{font:12.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;border-radius:8px;
+              padding:5px 12px;color:#3f4c63;cursor:pointer}
+  .seg button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>comm-parallel<span class="sep">/</span>prefill-cp8-decode-tp8
+  </div>
+  <h1>Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</h1>
+  <p class="sub">从 SGLang 的 CP 策略实现出发，拆开 TP8 prefill 里被重复计算的那部分，以及 CP8 用哪次通信把它换掉</p>
+  <div class="metarow">
+    <span>2026-09-22</span><span>Context Parallel</span><span>Prefill</span><span>Sparse MLA</span>
+    <span>mHC</span><span>MoE</span><span>AllGather</span><span>ReduceScatter</span>
+  </div>
+
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#redundant">谁被重复算</a>
+    <a href="#source">源码怎么切</a>
+    <a href="#where">收益落在哪</a>
+    <a href="#cost">代价与边界</a>
+    <a href="#rule">判据与计算器</a>
+    <a href="#audit">选型审计</a>
+    <a href="#src">源码索引</a>
+  </nav>
+
+  <div class="tldr" id="tldr">
+    <h4>TL;DR</h4>
+    <ul>
+      <li><b>CP 省的不是注意力 FLOPs。</b>TP8 每卡是 8192 行 × 8 头，CP8 每卡是 1024 行 × 64 头 —— 每卡 query×head 完全相同（都是 65,536）。注意力那 46 ms 的收益来自形状（64 个真头 vs 补到 64 的 8 个头），不是来自算得少。</li>
+      <li><b>真正的收益来自「每卡行数」。</b>凡是按 token 重复、TP 切不动的算子 —— 超连接 mHC、LayerNorm、量化、indexer —— 在 CP8 下每卡只做 1/8 的行。<code>hc_combine</code> 的 kernel 网格是 <code>(m, …)</code>，m 就是行数：实测 mHC <b>136.77 → 13.06 ms</b>，与行数 8 倍差同比例。</li>
+      <li><b>通信不是变多，是换了形态。</b>TP8 每层必须有注意力输出的 AllReduce（每卡只有 8 个头，必须跨卡求和）；CP8 每个 token 的输出在卡内就是完整的，那次 AllReduce 消失，只在 MoE 前换成一次 AllGather、MoE 后一次 ReduceScatter。实测通信 <b>349.51 → 275.71 ms</b>。</li>
+      <li><b>按权重算的部分一点没变。</b>MoE GEMM <b>55.14 → 54.98 ms</b>：MoE 前把 token 收齐（<code>deepseek_v4.py</code> 里的 <code>dsa_cp_gather_hidden_states</code>），每卡仍然把全部 8192 行喂进自己那份专家。CP 重排的是 per-token 工作，动不了 per-weight 工作。</li>
+      <li><b>代价是显存和一次运行时切片。</b>CP 模式下 tp=1，注意力权重整份复制到每卡（静态显存比例提到 0.74），decode 侧靠 <code>cp_decode_attn_tp.py</code> 现场切权重 + 重算 MXFP8 swizzled scale 换回 TP8 行为。</li>
+      <li><b>换来的数字：</b>相对切换前一步，C8 输入吞吐 +27.1%、TTFT −34.5%、TPOT −15.8%；C32 输入 +37.9%、TTFT −35.5%、TPOT −24.3%（相对本轮起点分别为 +56.85% / +70.03%）。</li>
+    </ul>
+  </div>
+
+  <h2 id="redundant"><span class="n">01</span>TP8 prefill 里谁在被重复算</h2>
+  <p class="lead">TP 切的是头和隐藏维，切不掉 token 维。于是每一层里「逐 token 但不必分片」的算子，在 8 张卡上各算了一遍同一批 8192 行；只有真正的矩阵乘、以及按头切分的注意力，才享受到了分片。</p>
+
+  <div class="panel">
+    <div class="lanehead"><b>Prefill TP8</b><span>8192-token chunk · 每卡处理同一批全部 token，只算本卡的 8 个头</span></div>
+    <div class="lane tp">
+      <i>8192 行 · 8 头</i><i>8192 行 · 8 头</i><i>8192 行 · 8 头</i><i>8192 行 · 8 头</i>
+      <i>8192 行 · 8 头</i><i>8192 行 · 8 头</i><i>8192 行 · 8 头</i><i>8192 行 · 8 头</i>
+    </div>
+    <div class="lanehead"><b>Prefill CP8</b><span>8192-token chunk · 按位置交错分片，每卡 1024 行、全部 64 个头</span></div>
+    <div class="lane cp">
+      <i>1024 行 · 64 头</i><i>1024 行 · 64 头</i><i>1024 行 · 64 头</i><i>1024 行 · 64 头</i>
+      <i>1024 行 · 64 头</i><i>1024 行 · 64 头</i><i>1024 行 · 64 头</i><i>1024 行 · 64 头</i>
+    </div>
+    <p class="hint" style="margin-top:12px">两种布局的总 query×head 都是 8192 × 64 = 524,288。差别在于：TP8 每卡把 <b>20480 宽的超连接输入</b>（4 路 × 5120）读 8192 遍，CP8 只读 1024 遍。</p>
+  </div>
+
+  <p>这也是本轮优化清单里那条判断的由来：</p>
+  <div class="note">「TP8 Prefill 中，每卡处理同一批 8192 个 token 的残差流，并计算本卡的 8 个注意力头。<b>mHC、输入投影及多次 hidden-state AllReduce 占据较多时间</b>。单遍 mHC 与注意力均可随输入序列分片，MoE 继续使用已有的 TP2×EP4。」</div>
+
+  <h2 id="source"><span class="n">02</span>源码：CP 切在哪、怎么切</h2>
+
+  <h3 class="mini">2.1 入口是「按行交错」，不是按头</h3>
+  <p><code>--cp-strategy interleave</code> 对应 <code>InterleaveCPStrategy</code>。它做的是取模取行：第 r 张卡拿 r, r+8, r+16… 这些行，注意力头一个不切。</p>
+  <pre><code><span class="cm"># srt/layers/cp/interleave.py · _interleave_shard</span>
+if tokens % cp_size != 0:
+    indices = torch.arange(cp_rank, tokens, cp_size, device=input_.device)
+    return input_[indices]
+return input_.view(-1, cp_size, *input_.shape[1:])[:, cp_rank].contiguous()</code></pre>
+  <p>分片发生在模型入口，由 <code>split_before_forward</code> 统一处理 —— <code>input_ids</code>、<code>positions</code>、<code>input_embeds</code> 都按同一套索引切：</p>
+  <pre><code><span class="cm"># srt/layers/cp/base.py · ContextParallelStrategy.split_before_forward</span>
+if input_ids is not None:
+    forward_batch.cp_v2_input_ids = self.shard_hidden_states(input_ids, forward_batch)
+forward_batch.positions = self.shard_position_ids(positions, forward_batch)</code></pre>
+  <p><code>shard_position_ids</code> 切的是「每个 token 的 KV-cache 槽位」：所以每张卡只为自己那 1024 行写 KV，KV 池没有重复写。</p>
+
+  <h3 class="mini">2.2 通信形态变了，不是变多了</h3>
+  <p>TP 版和 CP 版的 communicator 在同一个位置做同一件事，但一个要 AllReduce、一个不要：</p>
+  <pre><code><span class="cm"># TP：srt/layers/communicator.py · _gather_hidden_states_and_residual</span>
+if context.attn_tp_size > 1:
+    hidden_states = <span class="hl">attention_tensor_model_parallel_all_reduce</span>(hidden_states)
+hidden_states, residual = layernorm(hidden_states, residual)
+
+<span class="cm"># CP：srt/layers/communicator_dsa_cp.py · 同名方法</span>
+if hidden_states.shape[0] != 0:
+    hidden_states, residual = layernorm(hidden_states, residual)
+if dsa_use_prefill_cp(forward_batch) or mla_use_prefill_cp(forward_batch):
+    hidden_states = <span class="hl">dsa_cp_gather_hidden_states</span>(hidden_states)   <span class="cm"># 没有 all_reduce</span></code></pre>
+  <p>原因很直白：TP8 里每个 token 只有 1/8 个头在本卡算出来，输出必须跨卡求和才完整；CP8 里每个 token 的 64 个头都在拥有它的那张卡上算完，<b>不需要求和</b>。层内这样收口之后，MoE 前把行收齐、MoE 后把结果散射回去即可：</p>
+  <pre><code><span class="cm"># srt/layers/communicator_dsa_cp.py</span>
+<span class="cm"># After using cp, the communication mode of this part changes.</span>
+<span class="cm"># The three parts of prepare_attn, prepare_mlp, and postprocess_layer</span>
+<span class="cm"># no longer require additional communication for reduce, scatter, etc.</span>
+
+def dsa_cp_reduce_scatter_hidden_states(hidden_states):
+    hidden_states = hidden_states.tensor_split(cp_size)[cp_rank]   <span class="cm"># 先切好目标槽位</span>
+    attn_cp_reduce_scatter_tensor(hidden_states, input_hidden_states)
+    return hidden_states</code></pre>
+  <p>ReduceScatter 的目标切片提前 <code>tensor_split</code> 好了，所以归约的结果直接落在本卡那一行区间里，顺带把残差加也吃掉一次。</p>
+
+  <h3 class="mini">2.3 MoE 前把 token 收齐 —— 这决定了 MoE 不受益</h3>
+  <pre><code><span class="cm"># srt/models/deepseek_v4.py · forward（CP 分支）</span>
+_use_cp = self.dsa_enable_prefill_cp and dsa_use_prefill_cp(forward_batch)
+...
+if _use_cp:
+    moe_a2a_backend = get_moe_a2a_backend()
+    if moe_a2a_backend.is_none():
+        hidden_states = <span class="hl">dsa_cp_gather_hidden_states</span>(hidden_states)</code></pre>
+  <p>专家是「按权重切、不按 token 切」的：本卡负责的那份专家权重，必须见过请求里的所有 token 才有意义。所以 MoE 之前一定要回到全量 8192 行，每卡的专家 GEMM 工作量与 TP8 时一模一样 —— 实测 55.14 → 54.98 ms，差 0.3%，也就是没变。CP 只重排 per-token 工作，动不了 per-weight 工作。</p>
+
+  <h3 class="mini">2.4 为什么这样切是无损的</h3>
+  <p>Sparse MLA 要先用 indexer 在全上下文里选 top-k 候选。如果每张卡只在自己那 1024 行上打分，选出来的候选就和 TP8 不是同一批了。所以 indexer 的 key 必须收齐再用：</p>
+  <pre><code><span class="cm"># srt/layers/attention/dsa/dsa_indexer.py · _maybe_rotate 之后</span>
+<span class="cm"># Gather the full key on alt_stream so the CP all-gather overlaps</span>
+<span class="cm"># with the query rotate above on the current stream.</span>
+if is_cp_v2_active(forward_batch):
+    key = get_cp_strategy().<span class="hl">materialize_full_indexer_k_cache</span>(key, forward_batch)</code></pre>
+  <p>注意这个 gather 是<b>挂在另一条 stream 上、和 query 的 rope 旋转重叠</b>跑的 —— 通信被算力盖住，而不是排在关键路径上。注意力本体需要的 KV 同理，按 MLA 的 latent 收（<code>materialize_full_mla_kv</code>，每 token 只有 <code>kv_lora_rank + qk_rope = 512 + 64 = 576</code> 个元素），不是按头收 64 × head_dim。</p>
+  <div class="oknote">代价换的是<b>同一套算术、不同的分布</b>：候选集一致、注意力对每个 token 仍看全上下文，所以完整模型 25 项质量检查通过。</div>
+
+  <h3 class="mini">2.5 切到 CP8 之后，decode 侧要补一张票</h3>
+  <p>CP 模式下 <code>tp_size=1</code> —— 注意力权重不切了，每卡一份完整副本。decode 不需要行分片，于是要现场把这副本切回 TP8 的样子用：</p>
+  <pre><code><span class="cm"># srt/layers/cp/cp_decode_attn_tp.py</span>
+<span class="cm">"""CP Decode Attention TP context.</span>
+<span class="cm">When CP sets tp_size=1 (repeat weights), decode can partition attention</span>
+<span class="cm">weights across CP ranks matching normal TP behavior."""</span>
+
+self.use_decode_attn_tp = not is_cp_v2_active(forward_batch) and not dsa_use_prefill_cp(forward_batch)
+...
+radix_attn.tp_q_head_num = orig_tp_q_head_num // self.decode_tp_size   <span class="cm"># 64 → 8 头</span></code></pre>
+  <p>切权重的同时还得重算量化 scale：CUTLASS 用的 <code>weight_scale_inv_swizzled</code> 布局依赖矩阵形状，切片后必须重新生成并按 rank 缓存（<code>cp_mxfp8_scale.py</code>：<code>block_fp8_scale_to_mxfp8_e8m0</code> → <code>block_scale_interleave</code>）。这段是 CP 的纯开销，TP8 下不存在。</p>
+
+  <h2 id="where"><span class="n">03</span>收益落在哪</h2>
+  <p class="lead">同一全局 8192-token prefill chunk、TP0 的 trace。GPU 窗口从 811.55 ms 降到 533.70 ms，少掉的 278 ms 分布如下 —— 颜色只编码大小，灰阶即数值（Mono）。</p>
+
+  <div class="chartrow">
+    <div class="chartcard">
+      <h2>砍掉的 278 ms 全在按 token 重复的算子上</h2>
+      <div class="sub">faint = TP8 · ink = CP8 · one rung = 5 ms（取整到格，误差 &lt;2.5 ms）</div>
+      <div class="chartwrap"><svg id="pairrungs" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet"></svg></div>
+      <div class="src">PAIRED RUNGS · MONO · GPU WINDOW BREAKDOWN · TP0</div>
+    </div>
+    <ul class="chartnotes">
+      <li><b>mHC 136.77 → 13.06 ms。</b>逐 token 的超连接合并，每卡行数掉 8 倍，它就掉 8 倍多一点 —— 这是 CP 收益的最大一块（占总收益 45%）。</li>
+      <li><b>Sparse MLA 79.77 → 33.55 ms。</b>FLOPs 没变，变的是每卡头数 8 → 64：一把 GEMM 从 8 头变成 64 头，KV 读一次分摊给更多头；TP8 那条路径还得把 8 个真头补齐到 64。</li>
+      <li><b>通信 349.51 → 275.71 ms。</b>省掉每层注意力输出的 AllReduce，加上 MoE 前后的 AllGather / ReduceScatter。仍然是最大的一块，占 CP8 窗口的 52%。</li>
+      <li><b>MoE GEMM 55.14 → 54.98 ms。</b>两把梯子一样高 —— 这是「CP 动不了权重类算子」的直观证据，也是它必须保持 TP2×EP4 的原因。</li>
+    </ul>
+  </div>
+
+  <h3 class="mini">3.1 落到吞吐：CP8 那一步贡献了多少</h3>
+  <p>下表把每一步的收益摊开，避免把整轮优化的功劳都算到 CP 头上。「相对上一配置」才是 CP8 自己那一步的增量。</p>
+  <table class="cardmode">
+    <thead>
+      <tr><th>配置（C8）</th><th class="num">输入 tok/s</th><th class="num">输出 tok/s</th><th class="num">TTFT ms</th><th class="num">TPOT ms</th><th class="num">相对上一配置</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="k" data-label="配置">切换前一步：Prefill mHC 与 AllReduce 重叠</td>
+        <td class="num" data-label="输入 tok/s">7,321.77</td>
+        <td class="num" data-label="输出 tok/s">228.81</td>
+        <td class="num" data-label="TTFT ms">7,284.18</td>
+        <td class="num" data-label="TPOT ms">20.11</td>
+        <td class="num" data-label="相对上一配置">—</td>
+      </tr>
+      <tr class="em">
+        <td class="k" data-label="配置"><b>切换为 Prefill CP8 / Decode TP8</b></td>
+        <td class="num" data-label="输入 tok/s"><b>9,304.25</b></td>
+        <td class="num" data-label="输出 tok/s"><b>290.76</b></td>
+        <td class="num" data-label="TTFT ms"><b>4,772.54</b></td>
+        <td class="num" data-label="TPOT ms"><b>16.94</b></td>
+        <td class="num" data-label="相对上一配置"><span class="good">+27.1% / −34.5% / −15.8%</span></td>
+      </tr>
+      <tr>
+        <td class="k" data-label="配置">再叠加：Prefill chunk 16384</td>
+        <td class="num" data-label="输入 tok/s">9,418.09</td>
+        <td class="num" data-label="输出 tok/s">294.32</td>
+        <td class="num" data-label="TTFT ms">4,934.79</td>
+        <td class="num" data-label="TPOT ms">16.10</td>
+        <td class="num" data-label="相对上一配置">+1.2%</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="hint">同一张表在 C32（并发 32）下的同一行：<b>8,832.34 → 12,181.19</b> 输入 tok/s（+37.9%）、TTFT 24,954.81 → 16,089.37 ms（−35.5%）、TPOT 63.59 → 48.15 ms（−24.3%）。相对本轮起点，CP8 的贡献是输入吞吐 +56.85%（C8）/ +70.03%（C32）。<b>并发越高，CP 那一步的增量越大</b> —— 因为被重复计算的那部分随 chunk 线性增长，而它正是 CP 消掉的东西。</p>
+
+  <h2 id="cost"><span class="n">04</span>代价与边界</h2>
+  <ul>
+    <li><b>显存。</b>tp=1 意味着注意力权重（含 scale）整份复制，静态显存比例从 0.68 提到 <b>0.74</b>，full pool 2,404,864 token / SWA pool 601,088 token；实测每卡最少仍余 4,664 MiB。CP 的算力收益是要用显存买的。</li>
+    <li><b>decode 侧的运行时切片。</b>每个非 prefill 的 forward 都要切权重、改 <code>tp_q_head_num</code>、必要时重算 swizzled scale（有缓存，但首次要生成），退出时再恢复。</li>
+    <li><b>部分 TP8 优化直接失效。</b>切换 CP8 后，原本针对「每卡 8 个真头」做的优化不再可用（原生 8 头 Sparse MLA 的补头裁剪、以及按 TP8 形状调的 mHC / AllReduce 重叠），所以上面那 +56.85% 是<b>扣掉这些损失之后</b>的净值。</li>
+    <li><b>chunk 不能随便放大。</b>把 chunk 提到 32768 反而更低：C8 −1.90%、C32 −3.07%，346 次显存采样里最低空闲只剩 2 MiB，最终保留 16384。CP 是「在固定 chunk 下换一种切法」，不是「把 chunk 做大」。</li>
+  </ul>
+
+  <h2 id="rule"><span class="n">05</span>判据与计算器</h2>
+  <p class="lead">一句话判据：<b>如果一层的耗时里，按 token 重复的算子占大头，CP 有收益；如果按权重算的 GEMM 占大头，CP 没收益。</b>这个模型里 per-token 那部分（mHC 124 ms + 注意力形状 46 ms）贡献了 278 ms 中的 170 ms，通信重构又贡献 74 ms，MoE 一分未动 —— 余下约 34 ms 落在 trace 未单列的算子上。</p>
+
+  <div class="panel">
+    <h4>按你的 chunk 和 cp_size 算一遍</h4>
+    <div class="knob">
+      <label>全局 prefill chunk：<b id="ckOut">8192</b> token</label>
+      <input id="ck" type="range" min="2048" max="32768" step="2048" value="8192">
+    </div>
+    <div class="knob">
+      <label>cp_size（与 TP8 对比，总卡数 = cp_size）：</label>
+      <div class="seg" id="cpSeg">
+        <button data-cp="2" aria-pressed="false">2</button>
+        <button data-cp="4" aria-pressed="false">4</button>
+        <button data-cp="8" aria-pressed="true">8</button>
+      </div>
+    </div>
+    <div class="calc">
+      <div class="cbox">
+        <h5>每卡工作量</h5>
+        <div class="row"><span>行数/卡</span><span id="oRows">1024</span></div>
+        <div class="row"><span>按 token 重复的算子</span><span id="oRep">×1/8</span></div>
+        <div class="row"><span>Prefill 每卡头数</span><span id="oHeads">64</span></div>
+      </div>
+      <div class="cbox">
+        <h5>每卡注意力总账</h5>
+        <div class="row"><span>CP 每卡 query×head</span><span id="oQh">65,536</span></div>
+        <div class="row"><span>TP8 每卡 query×head</span><span id="oQhTp">65,536</span></div>
+        <div class="row"><span>相对 TP8</span><span id="oQhRel">1.00×</span></div>
+      </div>
+      <div class="cbox">
+        <h5>代价</h5>
+        <div class="row"><span>KV 全收集 / 层（FP8）</span><span id="oKv">3.94 MiB</span></div>
+        <div class="row"><span>注意力权重</span><span>每卡全量</span></div>
+      </div>
+    </div>
+    <p class="hint" id="calcNote">cp_size = 8 时每卡 query×head 与 TP8 完全相同 —— 注意力算力持平，CP 的收益全部来自 per-token 算子和通信形态。cp_size 小于 8 时，每卡注意力反而比 TP8 更重（倍数 = 8 / cp_size）。</p>
+  </div>
+
+  <h2 id="audit"><span class="n">06</span>选型审计（这张图为什么是 F6）</h2>
+  <p>图型按 lieflat 的流程先审计主力模板，≥3 个候选：</p>
+  <table class="cardmode">
+    <thead><tr><th>候选</th><th>结论</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k" data-label="候选">F6 Paired Rungs</td>
+        <td data-label="结论"><span class="good">采用</span></td>
+        <td data-label="理由">契约正是「每类 2 系列、如今昔对照」；4 个类目 × 2 系列，标签装得下。</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="候选">F12 Dumbbell Queue</td>
+        <td data-label="结论"><span class="flat">淘汰</span></td>
+        <td data-label="理由">同为前后对比，但契约是「串珠 = 真单位」，349.51 ms 要画 349 颗珠，密度失真。</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="候选">F1 Rung Bars / F5 Tick Rows</td>
+        <td data-label="结论"><span class="flat">淘汰</span></td>
+        <td data-label="理由">单系列模板；要点是对照，两张单图会把「MoE 没动」这个结论拆散。</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="候选">G3 Chunky Bars（Glance）</td>
+        <td data-label="结论"><span class="flat">淘汰</span></td>
+        <td data-label="理由">Glance 是降级方案，仅在 Lupi 两组都不适配时启用；本例 F6 已能诚实承载，无需降级。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="hint">单位取 5 ms/格并在底注写明取整，是因为原始值是两次运行的平均（136.77 ms 这类小数）；用 10 ms/格会把 MoE 的 55.14 → 54.98 显示成 6 格 → 5 格，凭空造出一个不存在的下降。</p>
+
+  <h2 id="src"><span class="n">07</span>源码索引</h2>
+  <table class="cardmode">
+    <thead><tr><th>路径</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="路径"><code>srt/layers/cp/interleave.py</code></td><td data-label="作用">按行交错分片；<code>_interleave_shard</code>、<code>materialize_full_mla_kv</code>、<code>materialize_full_indexer_k_cache</code></td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/layers/cp/base.py</code></td><td data-label="作用">策略抽象；<code>split_before_forward</code>、<code>shard_hidden_states</code>、<code>shard_position_ids</code>、<code>init_cp_strategy</code></td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/layers/cp/zigzag.py</code></td><td data-label="作用">另一套分片策略（zigzag），本部署未选</td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/layers/communicator_dsa_cp.py</code></td><td data-label="作用">CP 版层间通信：<code>dsa_cp_gather_hidden_states</code> / <code>dsa_cp_reduce_scatter_hidden_states</code>，替代 TP 的 AllReduce + LayerNorm 组合</td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/layers/communicator.py</code></td><td data-label="作用">TP 版对照：<code>_gather_hidden_states_and_residual</code> 里的 <code>attention_tensor_model_parallel_all_reduce</code></td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/models/deepseek_v4.py</code></td><td data-label="作用">MoE 前的 token 收齐（<code>dsa_cp_gather_hidden_states</code>）、mHC 的 <code>hc_pre</code> / <code>hc_post</code></td></tr>
+      <tr><td class="k" data-label="路径"><code>sglang/kernels/ops/layernorm/mhc.py</code></td><td data-label="作用"><code>hc_combine</code>：网格 <code>(m, cdiv(h,1024))</code>，代价随行数 m 线性</td></tr>
+      <tr><td class="k" data-label="路径"><code>sglang/kernels/ops/layernorm/hc_combine_norm_candidate.py</code></td><td data-label="作用">四路超连接合并 + RMSNorm 融合（宽度 5120、4 路共 20480）</td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/layers/attention/dsa/dsa_indexer.py</code></td><td data-label="作用">indexer key 的全量收集，与 query rope 在双 stream 上重叠</td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/layers/cp/cp_decode_attn_tp.py</code></td><td data-label="作用">decode 侧把复制权重现场切成 TP8 形状，覆盖 <code>tp_q_head_num</code></td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/layers/cp/cp_mxfp8_scale.py</code></td><td data-label="作用">为切片后的权重重算 CUTLASS MXFP8 swizzled scale 并缓存</td></tr>
+      <tr><td class="k" data-label="路径"><code>srt/configs/deepseek_v4.py</code></td><td data-label="作用">注意力几何：64 头、<code>kv_lora_rank</code> 512、<code>qk_rope_head_dim</code> 64</td></tr>
+    </tbody>
+  </table>
+
+  <footer>
+    <p>耗时与吞吐为内部部署实测（SM120 单机八卡、PCIe-IPC 通信、FP8 KV；模型属于 DeepSeek-V4 系列），trace 口径为同一全局 8192-token prefill chunk 的 TP0。源码核对自本地 SGLang 分支（CP 策略、communicator、MoE 收齐、indexer 收集与 decode 切片）。机型编号、模型版本号与内部文档链接已脱敏。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 图表代码 PolyForm NC 1.0.0</span></p>
+  </footer>
+</div>
+
+<script>
+/* ── 内联 mono-tokens.js（图表区 token 正本，字段未改动） ── */
+(function (global) {
+  'use strict';
+  const INK   = '#1C1C1A';
+  const PAPER = '#F0EFEB';
+  const MUTED = '#8F8E88';
+  const FAINT = '#C6C5BF';
+  const GRID  = '#DEDDD6';
+  const L   = ['#1C1C1A', '#4A4944', '#6A6963', '#8F8E88', '#B0AFA9', '#C6C5BF', '#D8D7D1'];
+  const LAD = ['#1C1C1A', '#4A4944', '#8F8E88', '#B0AFA9', '#D8D7D1'];
+  const DARK = {
+    bg: '#1C1C1A', ink: '#F0EFEB', muted: '#8F8E88', faint: '#55554F',
+    grid: '#2E2D29', gridSoft: '#2A2925',
+    ladder: ['#F0EFEB', '#DCDAD2', '#C9C7BD', '#B3B0A4', '#8F8E88', '#6A6963', '#4A4944'],
+  };
+  const FONT = {
+    family: 'Inter',
+    link: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap',
+    title:    { size: 16.5, weight: 700, spacing: '-.02em' },
+    titleBig: { size: 19,   weight: 700, spacing: '-.02em' },
+    sub:      { size: 11.5, weight: 400 },
+    src:      { size: 9.5,  weight: 500, spacing: '.08em' },
+    value:    { weight: 800 },
+    axis:     { size: 9.5,  weight: 600 },
+    minHalf: 6.5, minWide: 5.5,
+  };
+  const SHAPE = { cardRadius: 24, cardPad: '28px 28px 20px', barRadius: 99, tooltipRadius: 12 };
+  const MOTION = {
+    enter: 900, enterSlow: 1200, easing: 'quarticOut', staggerDot: 12, staggerBar: 100,
+    css: `
+  .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+  @keyframes pop{from{transform:scale(0)}to{transform:none}}
+  .fade{animation:fade .9s ease both}
+  @keyframes fade{from{opacity:0}}
+  .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (prefers-reduced-motion:reduce){
+    .pop,.fade{animation:none}
+    .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+  }`,
+  };
+  const tipLight = { backgroundColor: INK, borderWidth: 0, padding: [10, 14],
+    textStyle: { color: PAPER, fontFamily: 'Inter', fontSize: 12 } };
+  const tipDark  = { backgroundColor: PAPER, borderWidth: 0, padding: [10, 14],
+    textStyle: { color: INK, fontFamily: 'Inter', fontSize: 12 } };
+  const rnd = (i, k) => Math.abs(((i * 73856093) ^ (k * 19349663)) % 1000) / 1000;
+  const D2R = Math.PI / 180;
+  const pol = (cx, cy, r, deg) => [cx + r * Math.cos(deg * D2R), cy + r * Math.sin(deg * D2R)];
+  const sect = (cx, cy, r0, r1, a0, a1) => {
+    const big = a1 - a0 > 180 ? 1 : 0;
+    const [xa, ya] = pol(cx, cy, r1, a0), [xb, yb] = pol(cx, cy, r1, a1);
+    const [xc, yc] = pol(cx, cy, r0, a1), [xd, yd] = pol(cx, cy, r0, a0);
+    return `M${xa} ${ya} A${r1} ${r1} 0 ${big} 1 ${xb} ${yb} L${xc} ${yc} A${r0} ${r0} 0 ${big} 0 ${xd} ${yd} Z`;
+  };
+  const blob = (x, y, r, seed) => {
+    const n = Math.max(14, Math.round(r * 1.6)), pts = [];
+    for (let t = 0; t < n; t++) {
+      const a = t / n * Math.PI * 2;
+      const w = 1 + .055 * Math.sin(a * 2 + seed * 7) + .04 * Math.sin(a * 3 + seed * 13)
+              + (rnd(seed + t, 3) - .5) * .03;
+      pts.push([x + Math.cos(a) * r * w, y + Math.sin(a) * r * w]);
+    }
+    let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let t = 0; t < n; t++) {
+      const p = pts[t], q = pts[(t + 1) % n];
+      d += ` Q${p[0].toFixed(1)} ${p[1].toFixed(1)} ${((p[0]+q[0])/2).toFixed(1)} ${((p[1]+q[1])/2).toFixed(1)}`;
+    }
+    return d + ' Z';
+  };
+  const NS = 'http://www.w3.org/2000/svg';
+  const el  = (p, t, a) => { const n = document.createElementNS(NS, t);
+    for (const k in a) n.setAttribute(k, a[k]); p.appendChild(n); return n; };
+  const txt = (p, a, s) => { const n = el(p, 'text', a); n.textContent = s; return n; };
+  const tip = (n, s) => { const t = document.createElementNS(NS, 'title');
+    t.textContent = s; n.appendChild(t); };
+  const timers = {};
+  const keep = (id, t) => { (timers[id] = timers[id] || []).push(t); };
+  const obsReveal = (id, fn) => {
+    const n = document.getElementById(id);
+    const go = () => {
+      (timers[id] || []).forEach(clearInterval); timers[id] = [];
+      if (n.tagName === 'svg' || n.tagName === 'SVG') n.innerHTML = '';
+      fn(n);
+    };
+    const io = new IntersectionObserver(es => {
+      if (es[0].isIntersecting) { go(); io.disconnect(); }
+    }, { threshold: .3 });
+    io.observe(n);
+    n.style.cursor = 'pointer';
+    n.addEventListener('click', go);
+  };
+  const eReveal = (id, opt) => obsReveal(id, elDom => {
+    const g = echarts.getInstanceByDom(elDom) || echarts.init(elDom);
+    g.clear(); g.setOption(opt);
+  });
+  const CARD_CSS = `
+  :root{--bg:${PAPER};--dark:${DARK.bg};--ink:${INK};--muted:${MUTED};--faint:${FAINT};--grid:${GRID}}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);font-family:'Inter',sans-serif;color:${INK};padding:40px;-webkit-font-smoothing:antialiased}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px;max-width:1400px;margin:0 auto}
+  .card{background:var(--bg);border-radius:${SHAPE.cardRadius}px;padding:${SHAPE.cardPad}}
+  .card.dark{background:var(--dark);color:${PAPER}}
+  .card.dark .sub{color:${MUTED}}
+  .card.dark .src{color:${DARK.faint}}
+  .card.wide{grid-column:1/-1}
+  h2{font-weight:${FONT.title.weight};font-size:${FONT.title.size}px;letter-spacing:${FONT.title.spacing};margin-bottom:3px}
+  .sub{font-size:${FONT.sub.size}px;color:var(--muted);margin-bottom:14px}
+  .src{font-size:${FONT.src.size}px;color:var(--faint);margin-top:10px;letter-spacing:${FONT.src.spacing};font-weight:${FONT.src.weight}}
+  .ch{height:320px}
+  svg text{font-family:'Inter',sans-serif}` + MOTION.css;
+  global.MONO = { INK, PAPER, MUTED, FAINT, GRID, L, LAD, DARK,
+    FONT, SHAPE, MOTION, tipLight, tipDark,
+    rnd, pol, sect, blob, el, txt, tip, obsReveal, eReveal, keep, CARD_CSS };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/* 图表区动画类（.pop/.fade/.draw + prefers-reduced-motion 降级） */
+(function(){ var s=document.createElement('style'); s.textContent=MONO.MOTION.css; document.head.appendChild(s); })();
+
+// ════ F6 · paired rungs（骨架取自 basics-gallery.html 的 C2 卡，单位改为 5 ms/格） ════
+// 单位 5 ms：4 个类目的两组实测值都取整到格；10 ms/格 会把 MoE 的 55.14→54.98 显示成 6→5 格。
+(()=>{
+const D=[['mHC',27,3],['SPARSE MLA',16,7],['CROSS-CARD',70,55],['MoE GEMM',11,11]];
+const MS=[136.77,13.06],MS2=[79.77,33.55],MS3=[349.51,275.71],MS4=[55.14,54.98];
+const RAW=[MS,MS2,MS3,MS4];
+MONO.obsReveal('pairrungs',s=>{
+  const x0=i=>62+i*84,base=252,step=2.8,HW=10;
+  D.forEach(([name,was,now],i)=>{
+    const xa=x0(i)-13,xb=x0(i)+13;
+    for(let k=0;k<was;k++){
+      const y=base-k*step,w=HW-1.2+MONO.rnd(k+1,i+2)*2.4;
+      MONO.el(s,'line',{x1:xa-w,y1:y,x2:xa+w,y2:y,stroke:'#B0AFA9','stroke-width':1,
+        opacity:.5+MONO.rnd(k+2,i+3)*.4,class:'fade',style:`animation-delay:${i*.08+k*.008}s`});
+      if(k%5===4)MONO.el(s,'circle',{cx:xa-HW-4.5,cy:y,r:.8,fill:'#C6C5BF',
+        class:'fade',style:`animation-delay:${i*.08+k*.008}s`});
+    }
+    for(let k=0;k<now;k++){
+      const y=base-k*step,w=HW-1.2+MONO.rnd(k+1,i+7)*2.4;
+      MONO.el(s,'line',{x1:xb-w,y1:y,x2:xb+w,y2:y,stroke:MONO.INK,'stroke-width':1,
+        opacity:.6+MONO.rnd(k+2,i+8)*.4,class:'fade',style:`animation-delay:${.15+i*.08+k*.008}s`});
+      if(k%5===4)MONO.el(s,'circle',{cx:xb+HW+4.5,cy:y,r:.8,fill:'#B0AFA9',
+        class:'fade',style:`animation-delay:${.15+i*.08+k*.008}s`});
+    }
+    const topB=base-(now-1)*step;
+    // 两组取整后同高时（本例 MoE GEMM 11 格 vs 11 格），两个数值标签会落在同一基线而相互叠字，
+    // 按 barcode 的教训强制拉开间距：淡档标签上移一行。
+    const collide=(was-now)<2;
+    const num=MONO.txt(s,{x:xb,y:topB-9,'font-size':10.5,'font-weight':800,fill:MONO.INK,'text-anchor':'middle',
+      class:'fade',style:`animation-delay:${.5+i*.08}s`},RAW[i][1].toFixed(2));
+    MONO.tip(num,`${name} CP8 — ${RAW[i][1]} ms（${(RAW[i][0]/RAW[i][1]).toFixed(2)}×）`);
+    const was0=MONO.txt(s,{x:xa,y:base-(was-1)*step-9-(collide?11:0),'font-size':8.5,'font-weight':700,fill:'#B0AFA9','text-anchor':'middle',
+      class:'fade',style:`animation-delay:${.5+i*.08}s`},RAW[i][0].toFixed(2));
+    MONO.tip(was0,`${name} TP8 — ${RAW[i][0]} ms`);
+    MONO.txt(s,{x:x0(i),y:base+18,'font-size':7.5,'font-weight':700,fill:MONO.MUTED,'text-anchor':'middle',
+      'letter-spacing':'.08em',class:'fade',style:`animation-delay:${i*.08}s`},name);
+  });
+  MONO.el(s,'line',{x1:34,y1:base+4,x2:366,y2:base+4,stroke:MONO.GRID,'stroke-width':.8,class:'fade'});
+  MONO.txt(s,{x:200,y:300,'font-size':7,'font-weight':600,fill:'#B0AFA9','text-anchor':'middle',
+    'letter-spacing':'.12em',class:'fade',style:'animation-delay:1s'},
+    'ONE RUNG = 5 MS · DOT EVERY 5TH');
+});
+})();
+
+/* ── 计算器 ── */
+(function(){
+  var chunk=8192, cp=8;
+  var ck=document.getElementById('ck'), ckOut=document.getElementById('ckOut');
+  var seg=document.getElementById('cpSeg');
+  var o={rows:document.getElementById('oRows'),rep:document.getElementById('oRep'),heads:document.getElementById('oHeads'),
+         qh:document.getElementById('oQh'),qhTp:document.getElementById('oQhTp'),qhRel:document.getElementById('oQhRel'),
+         kv:document.getElementById('oKv'),note:document.getElementById('calcNote')};
+  function fmt(n){return n.toLocaleString('en-US');}
+  function calc(){
+    var rows=chunk/cp, tp8Qh=chunk*8, cpQh=rows*64;
+    o.rows.textContent=fmt(rows);
+    o.rep.textContent='×1/'+cp+'（'+(100/cp).toFixed(1)+'%）';
+    o.heads.textContent='64';
+    o.qh.textContent=fmt(cpQh); o.qhTp.textContent=fmt(tp8Qh);
+    var rel=cpQh/tp8Qh;
+    o.qhRel.textContent=rel.toFixed(2)+'×';
+    o.qhRel.style.color = rel<1?'#0b6b3f':(rel>1?'#b23a10':'');
+    // KV 全收集：每 token 576 元素（kv_lora_rank 512 + qk_rope 64）× FP8 1B × (cp-1)/cp
+    var mb=chunk*576*1*(cp-1)/cp/1048576;
+    o.kv.textContent=mb.toFixed(2)+' MiB';
+    o.note.textContent = (rel===1)
+      ? 'cp_size = '+cp+' 时每卡 query×head 与 TP8 完全相同（'+fmt(cpQh)+'）—— 注意力算力持平，CP 的收益全部来自 per-token 算子和通信形态。'
+      : 'cp_size = '+cp+' 时每卡注意力比 TP8 重 '+rel.toFixed(2)+' 倍（64 / '+cp+' 头 vs TP8 的 8 头）；per-token 算子只省下 1/'+cp+'。cp_size 越小越吃亏，只有 cp_size 等于 TP 卡数时两者才持平。';
+  }
+  ck.addEventListener('input',function(){chunk=+ck.value; ckOut.textContent=fmt(chunk); calc();});
+  seg.addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b) return;
+    cp=+b.dataset.cp;
+    [].forEach.call(seg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed', x===b);});
+    calc();
+  });
+  calc();
+})();
+</script>
+</body>
+</html>

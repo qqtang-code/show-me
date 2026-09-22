@@ -1,0 +1,25 @@
+{
+  "title": "Prefill CP8 / Decode TP8：为什么 CP 能拿到收益",
+  "slug": "prefill-cp8-decode-tp8",
+  "category": "comm-parallel",
+  "date": "2026-09-22",
+  "tags": ["Context Parallel", "Prefill", "TP8", "Sparse MLA", "mHC", "超连接", "MoE", "AllGather", "ReduceScatter", "SGLang"],
+  "one_liner": "CP 的收益不来自注意力 FLOPs（TP8 与 CP8 每卡 query×head 都是 65,536），而来自把每卡行数从 8192 降到 1024：按 token 重复而 TP 切不动的算子（超连接 mHC、LayerNorm、量化、indexer）随之掉 8 倍（mHC 136.77→13.06 ms），注意力靠头数 8→64 的形状改善拿到 79.77→33.55 ms，注意力输出的 AllReduce 消失、换成 MoE 前后的 AllGather/ReduceScatter（通信 349.51→275.71 ms），而按权重算的 MoE GEMM 55.14→54.98 ms 一动不动；GPU 窗口 811.55→533.70 ms，C8 那一步输入吞吐 +27.1%、TTFT −34.5%、TPOT −15.8%（相对本轮起点 +56.85%/-48.14%/-34.04%），代价是 tp=1 的权重复制（静态显存比例 0.68→0.74）与 decode 侧运行时切片加 MXFP8 swizzled scale 重算。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "sess_30d19c4e",
+  "cwd": "/Users/qqtang/.zcode/workspace/default",
+  "sources": [
+    "本部署 SGLang 分支源码核对：srt/layers/cp/interleave.py（_interleave_shard 按行交错、materialize_full_mla_kv）、srt/layers/cp/base.py（split_before_forward / shard_position_ids / init_cp_strategy）、srt/layers/communicator_dsa_cp.py（dsa_cp_gather_hidden_states、dsa_cp_reduce_scatter_hidden_states 与「不再需要 reduce/scatter」注释）、srt/layers/communicator.py（TP 侧 attention_tensor_model_parallel_all_reduce 对照）、srt/models/deepseek_v4.py（MoE 前的 dsa_cp_gather_hidden_states、hc_pre/hc_post）、srt/layers/attention/dsa/dsa_indexer.py（indexer key 全量收集并与 query rope 双流重叠）、srt/layers/cp/cp_decode_attn_tp.py 与 cp_mxfp8_scale.py（decode 权重切片与 swizzled scale 缓存）、sglang/kernels/ops/layernorm/mhc.py（hc_combine 网格 (m, cdiv(h,1024))）与 hc_combine_norm_candidate.py（四路 × 5120）、srt/configs/deepseek_v4.py（64 头 / kv_lora_rank 512 / qk_rope_head_dim 64）",
+    "内部优化记录（未公开）：同一全局 8192-token prefill chunk 的 TP0 trace 分类耗时与 GPU 窗口 811.55 / 759.64 / 533.70 ms、C8 与 C32 的逐步吞吐表、CP8 配置口径（interleave 策略、MoE 保持 TP2×EP4、草稿长度 3、静态显存 0.74）、以及 32768-token chunk 被否的结论",
+    "图型取自 lieflat-charts 的 F6 Paired Rungs（templates/basics-gallery.html 卡片「This year against last, plan by plan」与 // ════ C2 · paired rungs ════ 渲染块），单位改为 5 ms/格并沿用其一格一档的阶梯语法",
+    "SGLang CP 策略命名与 CLI 开关：--enable-prefill-cp / --cp-strategy interleave / --enable-cp-decode-attn-tp"
+  ],
+  "visibility": "internal",
+  "redactions": [
+    "机型编号（6000D / RTX 6000D 等具体型号）与主机名，只保留架构级别描述（SM120 单机八卡）",
+    "模型版本号（V4.1-Flash → DeepSeek-V4 系列）",
+    "内部飞书文档链接与文档 ID、文档标题中的日期",
+    "本地仓库绝对路径与分支名"
+  ]
+}

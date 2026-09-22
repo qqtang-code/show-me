@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>8 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-22</span></p>
+  <p class="statline"><span>9 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-22</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -211,6 +211,28 @@ const ENTRIES = [
     "extra_files": [
       "notes.md"
     ]
+  },
+  {
+    "title": "Prefill CP8 / Decode TP8：为什么 CP 能拿到收益",
+    "slug": "prefill-cp8-decode-tp8",
+    "category": "comm-parallel",
+    "date": "2026-09-22",
+    "tags": [
+      "Context Parallel",
+      "Prefill",
+      "TP8",
+      "Sparse MLA",
+      "mHC",
+      "超连接",
+      "MoE",
+      "AllGather",
+      "ReduceScatter",
+      "SGLang"
+    ],
+    "one_liner": "CP 的收益不来自注意力 FLOPs（TP8 与 CP8 每卡 query×head 都是 65,536），而来自把每卡行数从 8192 降到 1024：按 token 重复而 TP 切不动的算子（超连接 mHC、LayerNorm、量化、indexer）随之掉 8 倍（mHC 136.77→13.06 ms），注意力靠头数 8→64 的形状改善拿到 79.77→33.55 ms，注意力输出的 AllReduce 消失、换成 MoE 前后的 AllGather/ReduceScatter（通信 349.51→275.71 ms），而按权重算的 MoE GEMM 55.14→54.98 ms 一动不动；GPU 窗口 811.55→533.70 ms，C8 那一步输入吞吐 +27.1%、TTFT −34.5%、TPOT −15.8%（相对本轮起点 +56.85%/-48.14%/-34.04%），代价是 tp=1 的权重复制（静态显存比例 0.68→0.74）与 decode 侧运行时切片加 MXFP8 swizzled scale 重算。",
+    "artifact": "index.html",
+    "_dir": "comm-parallel/prefill-cp8-decode-tp8",
+    "extra_files": []
   },
   {
     "title": "CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽",
