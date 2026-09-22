@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</title>
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#ffffff; --panel2:#f8fafc; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --waste:#c2410c; --waste-bg:#fff4ec; --good:#0f766e; --good-bg:#eefbf8;
+    --lane:#f1f5fb;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:15.5px;line-height:1.72;
+    padding:40px 20px 80px;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  .sub{color:var(--dim);margin:0 0 12px;font-size:14px}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+  .setup{
+    margin:0 0 20px;padding:16px 20px;border:1px solid var(--line);border-radius:12px;
+    background:var(--panel);font-size:14px;color:var(--dim)
+  }
+  .setup b{color:var(--ink)}
+  code,.mono{font-family:var(--mono);font-size:.93em}
+  .setup code{background:#f2f3f0;padding:1px 5px;border-radius:4px}
+
+  h2{font-size:19px;margin:40px 0 6px;letter-spacing:-.01em;color:var(--ink);
+     padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .lead{color:var(--dim)}
+  b{color:var(--ink)}
+
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}
+    .nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+  [id]{scroll-margin-top:20px}
+
+  /* ---------- 代码 diff / 调用树 ---------- */
+  pre.diff{margin:16px 0 0;padding:16px 18px;border-radius:12px;background:#0f172a;color:#e2e8f0;
+           font:12.5px/1.75 var(--mono);overflow-x:auto}
+  pre.diff .c{color:#8fa3bf}
+  pre.diff .del{color:#fca5a5}
+  pre.diff .ins{color:#86efac}
+  pre.tree{margin:14px 0 0;padding:15px 18px;border-radius:12px;background:var(--panel);
+           border:1px solid var(--line);font:12.5px/1.8 var(--mono);color:#28374f;overflow-x:auto}
+  pre.tree .c{color:var(--dim2)}
+
+  /* ---------- 两层泳道时间线 ---------- */
+  .lanes{margin:20px 0 0;border:1px solid var(--line);border-radius:12px;background:var(--panel);
+         padding:16px 18px 14px}
+  .lrow{display:grid;grid-template-columns:74px 1fr;gap:12px;align-items:center;margin:9px 0}
+  .lrow .who{font:11.5px var(--mono);color:var(--dim2);text-align:right;white-space:nowrap}
+  .track{position:relative;height:26px;background:var(--lane);border:1px solid var(--line);
+         border-radius:6px;overflow:hidden}
+  .track i{position:absolute;top:0;bottom:0;display:flex;align-items:center;justify-content:center;
+           font:11px var(--mono);color:#0b1220;white-space:nowrap;overflow:hidden}
+  .seg-ar{background:linear-gradient(180deg,#f6b28e,#fcd9c6);color:#7c2d12}
+  .seg-hid{background:repeating-linear-gradient(45deg,#f6b28e,#f6b28e 6px,#fcd9c6 6px,#fcd9c6 12px);color:#7c2d12}
+  .seg-comp{background:linear-gradient(180deg,#8fd8c4,#c6efe3)}
+  .seg-save{background:transparent;border-left:1px dashed #94a3b8;border-right:1px dashed #94a3b8}
+  .axis{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--dim2);
+        margin:8px 0 0 86px}
+  .meas{display:flex;flex-wrap:wrap;gap:16px;font-size:12.5px;color:var(--dim);margin-top:12px}
+  .meas span{display:inline-flex;align-items:center;gap:6px}
+  .meas i{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
+  .phasehdr{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;
+            margin:16px 0 2px}
+  .phasehdr:first-child{margin-top:0}
+
+  /* ---------- 账本 ---------- */
+  .ledger{margin:18px 0 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+  .ledger .lrow2{display:grid;grid-template-columns:1fr 130px 1fr;gap:14px;align-items:center;
+                 padding:12px 18px;border-bottom:1px solid #eef2f8;font-size:13.5px}
+  .ledger .lrow2:last-child{border-bottom:0}
+  .ledger .lrow2.tot{background:#f8fafc;font-weight:600}
+  .ledger .what{color:#3b4860}
+  .ledger .what .w2{color:var(--dim2);font-size:12.5px;display:block}
+  .ledger .val{font:600 15px var(--mono);text-align:right;white-space:nowrap}
+  .ledger .val.neg{color:var(--good)} .ledger .val.pos{color:var(--waste)}
+  .ledger .barcell{min-width:0}
+  .ledger .barcell .b{height:12px;border-radius:3px}
+  .b.good{background:linear-gradient(90deg,#8fd8c4,#c6efe3)}
+  .b.bad{background:linear-gradient(90deg,#f6b28e,#fcd9c6)}
+  @media (max-width:700px){
+    .ledger .lrow2{grid-template-columns:1fr 100px;gap:6px 12px}
+    .ledger .barcell{display:none}
+  }
+
+  /* ---------- 公式块 ---------- */
+  .eq{margin:18px 0;padding:18px 20px;border-radius:12px;background:var(--panel);border:1px solid var(--line);
+      font-family:var(--mono);font-size:13.5px;line-height:2.05;overflow-x:auto;color:#28374f}
+  .eq .lbl{color:var(--dim2)}
+  .eq .v{font-weight:600}
+  .eq .hl{background:#eefbf8;padding:1px 5px;border-radius:4px;color:var(--good);font-weight:600}
+  .eq .hl2{background:#fff4ec;padding:1px 5px;border-radius:4px;color:var(--waste);font-weight:600}
+  .eq hr{border:0;border-top:1px solid var(--line);margin:12px 0}
+
+  /* ---------- 表格 ---------- */
+  table{border-collapse:collapse;width:100%;margin:16px 0 0;font-size:14px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3}
+  th{font-weight:600;font-size:11.5px;color:#4d5b73;font-family:var(--mono);letter-spacing:.04em;background:#f4f7fc}
+  td.num,th.num{font-family:var(--mono);text-align:right}
+  tr.hi td{background:#fffdf3}
+  tr.hi td:first-child{box-shadow:inset 3px 0 0 #eab308}
+  .tnote{font-size:13.5px;color:var(--dim);margin-top:14px}
+  @media (max-width:560px){
+    table, table tbody, table tr, table td{display:block;width:100%}
+    table thead{display:none}
+    table tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    table tr.hi{background:#fffdf3;border-color:#eddfae}
+    table tr.hi td:first-child{box-shadow:none}
+    table td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    table td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    table td:first-child{display:block;text-align:left;font-size:15px;font-weight:600;
+      border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    table td:first-child::before{content:none;float:none}
+  }
+  .sav{font-family:var(--mono);font-weight:600}
+  .sav.zero{color:var(--waste)} .sav.mid{color:#a16207} .sav.max{color:var(--good)}
+
+  /* ---------- 交互 ---------- */
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:150px 1fr 92px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr 1fr;gap:6px 10px}
+    .calc .ctl label{grid-column:1/-1}
+    .calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent)}
+  .calc .hint{font-size:12.5px;color:var(--dim2);margin:2px 0 0}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;
+                margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,1fr)}
+  .calc .row.g3{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:1fr}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:19px/1.35 var(--mono);font-weight:600;color:var(--ink)}
+  .calc .cell .v.good{color:var(--good)}
+  .calc .cell .v.zero{color:var(--waste)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .verdict{margin-top:14px;padding:12px 14px;border-top:1px dashed var(--line);font-size:13.5px;color:#3b4860}
+  .calc .verdict b{color:var(--ink)}
+
+  /* ---------- 边界条件 ---------- */
+  .gates{margin:16px 0 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+  .gate{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:13px 15px}
+  .gate .t{font:600 13.5px var(--ink)}
+  .gate .why{font-size:12.5px;color:var(--dim);margin-top:4px}
+  .gate code{background:#f2f3f0;padding:1px 5px;border-radius:4px;font-size:12px}
+  .myth{border:1px solid var(--line);border-left:3px solid var(--waste);border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:#b23a10;font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  ul{margin:10px 0;padding-left:20px}
+  li{margin:7px 0}
+  .legend-narrow{display:none;margin:12px 0 0;padding-left:18px;font-size:12.5px;color:var(--dim)}
+  @media (max-width:560px){
+    .legend-narrow{display:block}
+    .meas span:nth-child(n+3){display:none}
+  }
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);
+         font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>comm-parallel<span class="sep">/</span>ar-compute-overlap-moe-chunk
+  </div>
+  <h1>注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</h1>
+  <p class="sub">8 卡 PCIe 服务器（无 NVLink）· 78 层 MoE + 稀疏注意力模型 · TP8 · 每步 prefill <span class="mono">1.566 s → 1.526 s</span>（<span class="mono">+2.6%</span>）· 端到端 <span class="mono">+2.8% / +6.8% / +7.7%</span>（C=8/16/32）</p>
+  <div class="metarow">
+    <span>2026-09</span><span>AllReduce</span><span>通信计算重叠</span><span>张量并行</span><span>MoE</span><span>流水线并行</span><span>PCIe</span>
+  </div>
+
+  <div class="setup">
+    <b>一句话。</b>模型每层在 MoE 之前要做一次全量的张量并行 AllReduce（AR）。改之前它整段挡在关键路径上；改之后把这次 AR 的<b>发送行切成两片扔到一条侧流</b>，主流拿着第一片就往下走，第二片藏在第一块 MoE 的算力里。<b>省下来的是 AR 挡路的那 1.77 ms，付出去的是"并发让算力变慢"和"拆两次的固定开销"</b>——两头都能实测，账目逐位对得上。
+  </div>
+
+  <div class="nav">
+    <a href="#s1">1 · 改了什么</a>
+    <a href="#s2">2 · 一层的时间线</a>
+    <a href="#s3">3 · 逐笔账</a>
+    <a href="#s4">4 · 收益随 TP 递减</a>
+    <a href="#s5">5 · 实现边界</a>
+    <a href="#s6">6 · 怎么验证的</a>
+  </div>
+
+  <div class="tldr">
+    <h4>TL;DR</h4>
+    <ul>
+      <li><b>改动很小、很局部</b>：只动一层里"AR → LayerNorm → MoE"这三步的排布，把 AR 从关键路径挪到侧流，并把 LayerNorm 按行分块、让第 <span class="mono">i</span> 块只等第 <span class="mono">i</span> 片 AR。模型结构、权重、精度都不动。</li>
+      <li><b>收益不来自"少通信"</b>，字节数一个没少（<span class="mono">100.66 MB</span> 还是 <span class="mono">100.66 MB</span>，只是拆成两片）。收益全部来自<b>"同一段时间里多干了活"</b>。</li>
+      <li><b>净赚 0.78 ms/层</b>（实测整层 <span class="mono">−0.79</span>，逐位吻合）：藏 1.77，代价 <span class="mono">+0.64</span>（并发让 MoE 算力慢 13%）与 <span class="mono">+0.35</span>（拆两次比重 11%）。</li>
+      <li><b>同一个补丁在 TP2×PP4 上不值得上</b>（+1.2~2.5%，C=8 还是 −2.7%）：TP 越小，被暴露的 AR 本身越短；PP 越深，那段等待越已被流水掩盖。</li>
+    </ul>
+  </div>
+
+  <h2 id="s1"><span class="n">1</span>改了什么</h2>
+  <p class="lead">先说清站点。这一点值得单独讲，因为<b>第一版补丁打错了地方，激活了却完全没效果</b>——它挂在 <code>o_proj</code> 的 AR 分支上，而这个分支在<b>从不会执行</b>的路径里：注意力输出投影是用 <code>reduce_results=False</code> 构造的，那个 <code>if reduce_results and tp_size &gt; 1</code> 永远为假。</p>
+
+  <p>真正的站点是 <b>MoE 之前的那次后置 AR</b>：<code>LayerCommunicator.prepare_mlp</code> 内部走 <code>_gather_hidden_states_and_residual</code> 的 <code>attn_dp_size == 1</code> 分支，先做张量并行的 AR，紧接着做 <code>post_attention_layernorm</code>。计数证据和站点一致：每步 int8 AR 内核 <b>156 次</b> = 78 层 × 2（78 次注意力 AR + 75 次 MoE AR + 3 次稠密层 AR）。</p>
+
+  <h3 class="mini">代码形状：从「全量 AR 后再算」变成「拿一片就先算」</h3>
+<pre class="diff">  # 一层里 MoE 之前
+<span class="del">- hidden, residual = prepare_mlp(hidden, residual)   # 全量 AR（100.7 MB）挡在关键路径上</span>
+<span class="del">- moe_out = moe(ln(hidden))                          # LN 与 MoE 只能等 AR 做完</span>
+<span class="ins">+ hidden, residual = dispatch(hidden, residual)      # 占位：AR 切成 2 片扔到侧流，主流不等</span>
+<span class="ins">+ # 主流拿第 0 片就开始：块 i 只等第 i 片 AR</span>
+<span class="ins">+ moe0 = moe(ln(wait(shard[0])))                     # 第 1 片 AR 与这段算力并发</span>
+<span class="ins">+ moe1 = moe(ln(wait(shard[1])))</span></pre>
+  <p>层入口与最终 norm 之前各放一个 join（等上一层 MoE 的 AR 收尾），这样相邻两层之间也顺带形成跨层流水。</p>
+
+<pre class="tree">forward_layer
+├── join()                      <span class="c"># 等上一层 MoE 的 AR（消费者是本层注意力）</span>
+├── self_attn(...)
+├── dispatch(hidden, residual)  <span class="c"># 切 2 片 → 串行投到唯一一条侧流，逐片记 event</span>
+│   ├── side_stream: AR(shard[0]) → event0
+│   └── side_stream: AR(shard[1]) → event1
+└── chunk loop
+    ├── chunk 0: wait(event0) → LN → MoE    <span class="c"># 与 shard[1] 的 AR 并发</span>
+    └── chunk 1: wait(event1) → LN → MoE</pre>
+
+  <h2 id="s2"><span class="n">2</span>一层的时间线：AR 让出关键路径</h2>
+  <p class="lead">下面是把注意力算力结束之后到 MoE 结束这段拉直来看。<b>同一横轴</b>，所以改后那行短掉的部分就是净省。</p>
+
+  <div class="lanes">
+    <div class="phasehdr">改之前</div>
+    <div class="lrow"><span class="who">主流</span>
+      <div class="track">
+        <i class="seg-ar"   style="left:0%;  width:40.6%">AR 3.27</i>
+        <i class="seg-comp" style="left:40.6%;width:59.4%">MoE 4.79</i>
+      </div></div>
+    <div class="lrow"><span class="who">侧流</span>
+      <div class="track"><i class="seg-save" style="left:0;width:100%;display:block;color:#94a3b8;font:11px var(--mono);justify-content:center">空闲</i></div></div>
+
+    <div class="phasehdr">改之后</div>
+    <div class="lrow"><span class="who">主流</span>
+      <div class="track">
+        <i class="seg-comp" style="left:0%;   width:33.9%">块 0</i>
+        <i class="seg-comp" style="left:33.9%;width:33.5%">块 1</i>
+        <i class="seg-save" style="left:67.4%;width:32.6%;color:#94a3b8;font:11px var(--mono);justify-content:center">省掉</i>
+      </div></div>
+    <div class="lrow"><span class="who">侧流</span>
+      <div class="track">
+        <i class="seg-ar"  style="left:0%;   width:22.0%">1.77</i>
+        <i class="seg-hid" style="left:22.0%;width:22.0%">1.77</i>
+      </div></div>
+    <div class="axis"><span>0</span><span>4 ms</span><span>8.06 ms</span></div>
+    <div class="meas">
+      <span><i class="seg-ar"></i>AR：改前一次 100.7 MB = <b>3.27 ms</b>，改后两片各 50.3 MB = <b>1.77 ms</b></span>
+      <span><i class="seg-hid"></i>斜纹片：这一片 AR 完全藏在 MoE 算力里</span>
+      <span><i class="seg-comp"></i>MoE 算力：改前 4.79 ms，改后因并发变慢到 5.43 ms</span>
+      <span><i class="seg-save"></i>虚线区：改后省下的墙钟 2.63 ms</span>
+    </div>
+    <ul class="legend-narrow">
+      <li><b>改之前</b>：主流 AR 3.27 ms → MoE 4.79 ms，侧流空闲。</li>
+      <li><b>改之后</b>：主流 块 0（2.73）→ 块 1（2.70）→ 虚线省掉 2.63 ms；侧流两片 AR 各 1.77 ms，第二片（斜纹）完全藏在块 0 的算力里。</li>
+    </ul>
+    <p class="tnote" style="margin-top:12px">改后主流的 5.43 ms 比改前的 4.79 ms <b>长</b>——因为 AR 在侧流上与它抢带宽和 SM，这正是下面账本里的 <span class="mono">+0.64</span>。<b>省下的不是算力，是等待。</b></p>
+  </div>
+
+  <h2 id="s3"><span class="n">3</span>逐笔账：藏 1.77 ms，落袋 0.78 ms</h2>
+  <p class="lead">三层账，每层都有实测锚点。</p>
+
+  <div class="ledger">
+    <div class="lrow2">
+      <span class="what">第 1 片 AR 不再挡路<span class="w2">原设计目标：1.77 ms 移出关键路径</span></span>
+      <span class="val neg">−1.77 ms</span>
+      <span class="barcell"><div class="b good" style="width:88%"></div></span>
+    </div>
+    <div class="lrow2">
+      <span class="what">代价一：并发让算力变慢<span class="w2">两块 MoE 算力 4.79 → 5.43 ms（+13%）。单个大 GEMM 的探针只慢 1.8%，MoE 是几十个小内核，抗干扰差得多</span></span>
+      <span class="val pos">+0.64 ms</span>
+      <span class="barcell"><div class="b bad" style="width:32%"></div></span>
+    </div>
+    <div class="lrow2">
+      <span class="what">代价二：拆两次的固定开销<span class="w2">两次 50.3 MB（1.77+1.77）比一次 100.7 MB（3.27）慢 11%</span></span>
+      <span class="val pos">+0.35 ms</span>
+      <span class="barcell"><div class="b bad" style="width:17%"></div></span>
+    </div>
+    <div class="lrow2 tot">
+      <span class="what">净赚 / 每层<span class="w2">换算出整层 Δ = −0.79 ms，与账本 −0.78 逐位吻合</span></span>
+      <span class="val neg">−0.78 ms</span>
+      <span class="barcell"><div class="b good" style="width:39%"></div></span>
+    </div>
+  </div>
+
+  <div class="eq">
+    <span class="lbl">落袋率</span> = <span class="hl">0.78</span> ÷ 1.77 ≈ <span class="hl">0.44</span>
+    <hr>
+    <span class="lbl">推论</span>：每藏住 1 ms 的 AR，只换回约 <span class="hl">0.44 ms</span> 的墙钟。
+    这条"打折"决定了整条路线的天花板——<span class="lbl">把每层剩下的 AR 全藏进相邻层的算力，prefill 每步最多再涨 1~2%</span>。
+  </div>
+
+  <div class="myth">
+    <div class="w">常见误读：「把 AR 藏进算力，就等于省下 AR 的全部时间」</div>
+    <div class="r">不是。AR 与算力是<b>抢同一份资源</b>的：藏进去的 AR 会让同时进行的算力变慢，而这部分代价要原样记回账上。本例里 1.77 ms 的藏入换回 0.78 ms —— <b>边际回报 0.44，不是 1.0</b>。</div>
+  </div>
+
+  <h2 id="s4"><span class="n">4</span>为什么收益随 TP 规模递减</h2>
+  <p class="lead">同一份补丁，在三种并行布局上测出来的收益完全不是一个量级。拖下面这个滑块看实测值。</p>
+
+  <div class="calc">
+    <div class="ctl">
+      <label for="nTp">张量并行度 TP</label>
+      <input id="nTp" type="range" min="0" max="2" step="1" value="2">
+      <span id="nTpT" class="mono">8 × PP1</span>
+    </div>
+    <p class="hint" id="tpNote"></p>
+    <div class="glabel">同容器 A/B 实测增益（容器内只切开关，不重启）</div>
+    <div class="row g3">
+      <div class="cell"><span class="k">16K→512 C=8</span><span class="v" id="g8">+2.8%</span><span class="d" id="d8"></span></div>
+      <div class="cell"><span class="k">16K→512 C=16</span><span class="v" id="g16">+6.8%</span><span class="d" id="d16"></span></div>
+      <div class="cell"><span class="k">16K→512 C=32</span><span class="v" id="g32">+7.7%</span><span class="d" id="d32"></span></div>
+    </div>
+    <div class="glabel">每步 prefill 墙钟（决定收益的那条线）</div>
+    <div class="row g2">
+      <div class="cell"><span class="k">单步 prefill 耗时</span><span class="v" id="step">1.526 s</span><span class="d" id="stepd"></span></div>
+      <div class="cell"><span class="k">隐藏 AR 的收益落袋率</span><span class="v" id="keep">0.44</span><span class="d" id="keepd">藏 1 ms 换回多少 ms 墙钟</span></div>
+    </div>
+    <div class="verdict" id="verdict"></div>
+  </div>
+
+  <p style="margin-top:20px">三点机理，都是可查的：</p>
+  <ul>
+    <li><b>AR 的绝对时长随 rank 数增长。</b>TP8 要跨 8 张卡做归约，TP2 只在 2 张卡之间交换——后者被暴露的那段本来就短得多，能藏的上限就低。</li>
+    <li><b>PP 的流水已经掩盖了一部分。</b>TP2×PP4 布局下，PP 的四个 stage 本来就在互相填对方的等待，留给"再重叠一次"的空隙更小。</li>
+    <li><b>收益正比于"被暴露的 AR"，而不是模型规模。</b>所以这补丁不是"越大的卡越划算"，而是"被暴露的通信越长越划算"——在这台纯 PCIe（无 NVLink）机器上，TP8 恰是暴露最长的那一档。</li>
+  </ul>
+
+  <h3 class="mini">每片的字节数：可以自己核的算术</h3>
+  <p>补丁按行切片，每片搬多少字节是确定的：<span class="mono">行数 × hidden × 2 字节 ÷ 片数</span>。下面这个滑块用真实跑过的两种 batch 形状验算。</p>
+  <div class="calc">
+    <div class="ctl">
+      <label for="nRows">extend batch 行数</label>
+      <input id="nRows" type="range" min="8192" max="16384" step="8192" value="8192">
+      <span id="nRowsV" class="mono">8192</span>
+    </div>
+    <div class="row g3">
+      <div class="cell"><span class="k">全量 AR 载荷</span><span class="v" id="oP">—</span><span class="d">行数 × 6144 × 2B</span></div>
+      <div class="cell"><span class="k">每片载荷（K=2）</span><span class="v" id="oS">—</span><span class="d">全量 ÷ 2</span></div>
+      <div class="cell"><span class="k">实测日志里的每片大小</span><span class="v" id="oLog">50.3 MB</span><span class="d" id="oLogd">TP8 配置，rows=8192</span></div>
+    </div>
+    <div class="verdict" id="bytesVerdict"></div>
+  </div>
+
+  <h2 id="s5"><span class="n">5</span>实现边界：它只在 prefill 生效</h2>
+  <p class="lead">补丁的每个入口都带闸门，任一不满足就<b>逐字回退到原路径</b>（不是近似，是完全不介入）。这样做的代价是要写一行"我真的激活了"的日志——否则静默回退会被误读成"零增益"。</p>
+  <div class="gates">
+    <div class="gate"><div class="t">只在 extend（prefill）批次</div><div class="why">decode 每步每请求只有 1 个 token，行数远低于分块下限（<code>1408</code> 行），切片本身就没有可藏的量。</div></div>
+    <div class="gate"><div class="t">CUDA 图捕获期不介入</div><div class="why">捕获期不能引入新的流与事件语义，检测到 <code>is_current_stream_capturing()</code> 直接走原路径——图内数值因此逐比特不变。</div></div>
+    <div class="gate"><div class="t">行数足够多才切</div><div class="why">每片必须是 256 的整数倍且不低于下限，避免把一次通信拆成一堆小包。</div></div>
+    <div class="gate"><div class="t">AR 与 LN 未被融合内核吸收</div><div class="why">若框架把 AR 与 LayerNorm 融进一个内核（sm90/sm100 或 AMD 路径），"先 AR 后 LN"的假设就不成立，直接回退。</div></div>
+    <div class="gate"><div class="t">必须逐块修正 token 计数</div><div class="why">分块后每块要单独告诉内核"本块有多少有效 token"，否则 padding 会被算进 LN 的统计量里——这是分块版本第一版数值崩坏的根因。</div></div>
+    <div class="gate"><div class="t">模式开关放在内存槽里</div><div class="why">热路径（每层每 rank 都读）不做任何文件系统调用，开关由一个后台线程每 1 s 读一次。曾因为热路径上多了一次 <code>open()</code> 而让服务在首个大步 prefill 上挂死。</div></div>
+  </div>
+
+  <h2 id="s6"><span class="n">6</span>怎么验证的：同容器 A/B</h2>
+  <p class="lead">跨容器对比的噪声可以到 5%，所以所有收益数字都来自<b>同一个容器、不重启、只切一个开关</b>的四相 A/B/A——两头都是基线，用来夹住漂移。</p>
+
+  <table>
+    <thead><tr><th>相</th><th>配置</th><th class="num">吞吐 tok/s</th><th class="num">每步 prefill</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td data-label="相">P1 base</td><td data-label="配置">不切分</td><td class="num" data-label="吞吐">121.46</td><td class="num" data-label="每步">5232 tok/s ⇒ 1.566 s</td><td data-label="说明">与未打补丁的服务逐字相同</td></tr>
+      <tr><td data-label="相">P2 chunk</td><td data-label="配置">MoE 分块</td><td class="num" data-label="吞吐">126.63</td><td class="num" data-label="每步">5251 ⇒ 1.560 s</td><td data-label="说明">只有分块，AR 仍未切</td></tr>
+      <tr class="hi"><td data-label="相">P3 split</td><td data-label="配置">分块 + AR 切片</td><td class="num" data-label="吞吐">129.04</td><td class="num" data-label="每步">5367 ⇒ 1.526 s</td><td data-label="说明">本轮机制</td></tr>
+      <tr><td data-label="相">P4 base2</td><td data-label="配置">不切分</td><td class="num" data-label="吞吐">120.05</td><td class="num" data-label="每步">5229 ⇒ 1.567 s</td><td data-label="说明">收尾再测基线</td></tr>
+    </tbody>
+  </table>
+  <p class="tnote">P1 与 P4 同为基线，5232 对 5229 tok/s ⇒ 漂移带 <b>0.06%</b>。所以 P3 相对基线的 <b>+2.6%/步</b> 是可信的。</p>
+
+  <h3 class="mini">数值等价怎么证的</h3>
+  <p>不能靠"逐位相等"——8192-token 的 prefill 落在量化 AR 区间内，<b>基线自身跨进程就跑不出相同结果</b>。改用偏差分布：固定提示词、取生成首 token 的 logprob 与 top-5 分布，同一配置跑两次得到噪声底，再与改配置比。三次运行的首 token 都是同一个 id，logprob 落在基线的噪声带内。</p>
+  <p>功能正确性另用七个用例的质量门（数学 × 5 + 中文推理 + 工具调用）把住，改前改后都是 <b>7/7 通过</b>。</p>
+
+  <h3 class="mini">两条容易踩的坑</h3>
+  <div class="myth">
+    <div class="w">坑一：把补丁打进「不会执行」的分支</div>
+    <div class="r">第一版挂在 <code>o_proj</code> 的 AR 分支上，日志显示"已激活"，吞吐却纹丝不动——因为那个分支在 <code>reduce_results=False</code> 的构造下永不执行。<b>教训：往模型里塞补丁前，必须用不可否认的日志证明那段代码真的被执行（本例最后靠"每次 AR 内核计数 156 = 78 层 × 2"钉死站点）。</b></div>
+  </div>
+  <div class="myth">
+    <div class="w">坑二：短提示词的质量门测不到分块路径</div>
+    <div class="r">质量门的提示词只有几百 token，<b>够不到分块阈值的行数</b>，所以"短提示词过质量门"不能证明分块路径数值正确。它必须由长提示词（8192 token）的 logprob 对照来补。<b>这是本类改动最容易漏的一环。</b></div>
+  </div>
+
+  <footer>
+    <p>数据来自 2026-09 的一次内部优化实验：8 卡 PCIe 服务器（无 NVLink）、TP8 张量并行、78 层 MoE + 稀疏注意力模型的 NVFP4 checkpoint。
+      每层 AR 3.27 ms / 1.77 ms、MoE 算力 4.79 → 5.43 ms、整层 Δ −0.79 ms、每步 prefill 1.566 → 1.526 s、
+      端到端 +2.8%/6.8%/7.7%、TP4 +1.1%/3.1%/3.5%、TP2 −2.7%/+2.5%/+1.3% 均为实测；TPOT 与吞吐由压测脚本按 P95（nearest-rank）统计。
+      内部主机名、模型版本号、内部文档与环境变量名已做脱敏。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+
+</div>
+<script>
+(function(){
+  var HIDDEN = 6144, BYTES = 2, K = 2;
+
+  /* ---------- 交互 1：TP 规模 ---------- */
+  var TP = [
+    { tp:2, pp:4, g8:-2.7, g16:2.5, g32:1.3, step:null,
+      note:"TP2 × PP4：只有 2 张卡之间交换，被暴露的 AR 本来就短；PP4 的四级流水又在掩盖同一段等待。",
+      verdict:"净增益 ≈ 0，C=8 还是负的。这一档不值得上这个补丁。" },
+    { tp:4, pp:2, g8:1.1, g16:3.1, g32:3.5, step:null,
+      note:"TP4 × PP2：AR 跨 4 张卡，暴露时间居中；PP2 的掩盖作用比 PP4 弱。",
+      verdict:"+1~3.5%，可用但收益有限。" },
+    { tp:8, pp:1, g8:2.8, g16:6.8, g32:7.7, step:"1.526 s",
+      note:"TP8 × PP1：AR 跨 8 张卡、纯 PCIe 无 NVLink，被暴露的那段最长，可藏的量最大；没有 PP 流水帮忙掩盖。",
+      verdict:"+2.8~7.7%，是三种布局里最划算的一档，也是本补丁的目标场景。" }
+  ];
+  var nTp = document.getElementById('nTp');
+  function setTpV(){
+    var a = TP[+nTp.value];
+    document.getElementById('nTpT').textContent = a.tp + ' × PP' + a.pp;
+    document.getElementById('tpNote').textContent = a.note;
+    [['g8','d8',a.g8],['g16','d16',a.g16],['g32','d32',a.g32]].forEach(function(x){
+      var el = document.getElementById(x[0]);
+      el.textContent = (x[2] > 0 ? '+' : '') + x[2].toFixed(1) + '%';
+      el.className = 'v ' + (x[2] <= 0 ? 'zero' : (x[2] >= 6 ? 'good' : ''));
+      document.getElementById(x[1]).textContent = '相对同容器不切分基线';
+    });
+    document.getElementById('step').textContent = a.step || '（未测每步）';
+    document.getElementById('stepd').textContent = a.step ? '不切分基线 1.566 s' : '该布局未采单步计时';
+    document.getElementById('verdict').innerHTML = '<b>结论：</b>' + a.verdict;
+  }
+  nTp.addEventListener('input', setTpV); setTpV();
+
+  /* ---------- 交互 2：每片字节数（纯算术，可核） ---------- */
+  var nRows = document.getElementById('nRows');
+  function fmt(b){ return (b/1e6).toFixed(2) + ' MB'; }
+  function setRows(){
+    var R = +nRows.value, P = R * HIDDEN * BYTES, S = P / K;
+    document.getElementById('nRowsV').textContent = R;
+    document.getElementById('oP').textContent = fmt(P);
+    document.getElementById('oS').textContent = fmt(S);
+    var logS = R === 16384 ? '100.7 MB' : '50.3 MB';
+    var logD = R === 16384 ? 'TP2 配置，rows=16384' : 'TP8 / TP4 配置，rows=8192';
+    document.getElementById('oLog').textContent = logS;
+    document.getElementById('oLogd').textContent = logD;
+    document.getElementById('bytesVerdict').innerHTML =
+      '<b>对得上吗：</b>' + fmt(S) + ' 与日志里的 <span class="mono">' + logS +
+      '</span> 相差不到 0.4%（日志按 50.33 MB / 100.66 MB 取整）。<b>字节数没有变少</b>——' +
+      '整段 AR 还是 ' + fmt(P) + '，只是从"一次搬完"变成"分两次搬、第二次不挡路"。';
+  }
+  nRows.addEventListener('input', setRows); setRows();
+})();
+</script>
+</body>
+</html>

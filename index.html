@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>7 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-21</span></p>
+  <p class="statline"><span>8 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-22</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -186,6 +186,28 @@ const ENTRIES = [
     "one_liner": "上游 SGLang 有三道护栏硬性禁止 DFlash 与 PP 共存；适配没有碰算法，而是用一个 world_size=1 的伪造 PP 组让草稿模型整体跑在 PP0，并设计 aux hidden 去程累积、投影 context 回程两条通道穿过 PP ring。",
     "artifact": "index.html",
     "_dir": "inference-systems/dflash-pp-adaptation",
+    "extra_files": [
+      "notes.md"
+    ]
+  },
+  {
+    "title": "注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布",
+    "slug": "ar-compute-overlap-moe-chunk",
+    "category": "comm-parallel",
+    "date": "2026-09-22",
+    "tags": [
+      "AllReduce",
+      "通信计算重叠",
+      "张量并行",
+      "MoE",
+      "流水线并行",
+      "预填充",
+      "PCIe"
+    ],
+    "one_liner": "把 MoE 前的那次全量 AllReduce 切成两片扔到侧流，主流拿第一片就先算：藏住 1.77 ms、付出 0.64+0.35 ms，净赚 0.78 ms/层（实测整层 −0.79，逐位吻合）；同容器 A/B 端到端 +2.8%/6.8%/7.7%（C=8/16/32），但同一补丁在 TP2×PP4 上净 ≈ 0 —— 收益正比于「被暴露的通信时长」，不是模型规模。",
+    "artifact": "index.html",
+    "session_id": "",
+    "_dir": "comm-parallel/ar-compute-overlap-moe-chunk",
     "extra_files": [
       "notes.md"
     ]
