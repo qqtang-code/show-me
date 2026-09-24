@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>9 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-22</span></p>
+  <p class="statline"><span>10 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-24</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -90,6 +90,24 @@
 </div>
 <script>
 const ENTRIES = [
+  {
+    "title": "--stream-interval 为什么在长输出场景有提升",
+    "slug": "sglang-stream-interval",
+    "category": "inference-systems",
+    "date": "2026-09-24",
+    "tags": [
+      "SGLang",
+      "流式输出",
+      "SSE",
+      "调度",
+      "O(T²)",
+      "推理服务"
+    ],
+    "one_liner": "--stream-interval 在源码里只有一个判定点（output_streamer.accept 的 len(output_ids) % N == 1），但真正被它砍掉的是默认非增量流式路径里的 O(T²)：每个 SSE 事件都要重建累计文本、并携带完整 text + output_ids 向下游搬运；实测每翻倍输出长度开销涨 3.9 倍，间隔 2 恒定砍半 —— 所以只有长输出才看得见。",
+    "artifact": "index.html",
+    "_dir": "inference-systems/sglang-stream-interval",
+    "extra_files": []
+  },
   {
     "title": "MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别",
     "slug": "moe-a2a-megamoe",

@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>--stream-interval 为什么在长输出场景有提升</title>
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px;
+       overflow-wrap:anywhere}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7d8aa3}
+  pre .hl{color:#b23a10;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  tr.hot td{background:#fff7f2}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none}
+    tr.hot td{background:none}
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+
+  /* ---------- 管线示意 ---------- */
+  .pipe{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:18px 0 6px}
+  .stage{flex:1 1 160px;min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;
+         padding:12px 13px 11px;position:relative}
+  .stage .sn{font:600 10.5px var(--mono);color:#94a3b8;letter-spacing:.08em}
+  .stage .st{font-weight:700;font-size:13.5px;color:var(--ink);margin:2px 0 6px;line-height:1.35}
+  .stage .sw{font-size:12.5px;color:var(--dim);line-height:1.6;margin:0;padding-left:0;list-style:none}
+  .stage .sw li{margin:0 0 3px;padding-left:9px;position:relative}
+  .stage .sw li::before{content:'·';position:absolute;left:0;color:#b6c0d0}
+  .stage .tag{display:inline-block;font:10.5px var(--mono);color:#4d5b73;background:#f1f4fa;
+              border:1px solid #e2e8f2;border-radius:999px;padding:1px 7px;margin-top:7px}
+  .stage.hot{border-color:#f0cdb8;background:#fffaf6}
+  .stage.hot .sw li.big{color:#b23a10;font-weight:600}
+  .stage .badge{position:absolute;top:9px;right:10px;font:600 9.5px var(--mono);letter-spacing:.06em;
+                color:#fff;background:#b23a10;border-radius:999px;padding:2px 7px}
+  .pipelinewrap{overflow-x:auto}
+  .arrowline{display:flex;gap:10px;flex-wrap:wrap;margin:2px 0 0;font:11px var(--mono);color:#a8b2c2}
+  @media (max-width:640px){
+    .stage{flex:1 1 100%}
+  }
+
+  /* ---------- 图表卡（lieflat Mono · 作用域化） ---------- */
+  .chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;min-width:0}
+  .chartcard h2{border:0;padding:0;margin:0 0 3px;font-size:16.5px;font-weight:700;letter-spacing:-.02em;color:#1C1C1A}
+  .chartcard .csub{font-size:11.5px;color:#8F8E88;margin:0 0 14px;line-height:1.55}
+  .chartcard .csrc{font-size:9.5px;color:#C6C5BF;margin-top:10px;letter-spacing:.08em;font-weight:500;line-height:1.6}
+  .chartwrap{overflow-x:auto}
+  .chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+  .chartcard svg text{font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+  @media (max-width:640px){
+    .chartcard{padding:22px 20px 16px}
+    .chartcard svg{min-width:400px}
+  }
+  /* MONO.MOTION.css（原样，无 :root/body 规则） */
+  .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+  @keyframes pop{from{transform:scale(0)}to{transform:none}}
+  .fade{animation:fade .9s ease both}
+  @keyframes fade{from{opacity:0}}
+  .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (prefers-reduced-motion:reduce){
+    .pop,.fade{animation:none}
+    .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+  }
+
+  /* 图 + 读法 双栏 */
+  .figrow{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;margin:18px 0 6px}
+  .figrow > .read{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .read h4{margin:0 0 8px;font:600 12.5px var(--mono);color:var(--dim);letter-spacing:.04em}
+  .read ul{margin:0;padding-left:17px}
+  .read li{font-size:13.5px;color:#3b4860;margin:7px 0;line-height:1.62}
+  .read li b{color:var(--ink)}
+  .read .num{font-family:var(--mono);color:#12489c;font-size:12.8px}
+  @media (max-width:860px){ .figrow{grid-template-columns:1fr} }
+
+  .callout{border-left:3px solid var(--accent);background:#fff;border-radius:0 10px 10px 0;
+           padding:12px 16px;margin:16px 0;font-size:14px;color:#3b4860}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout b{color:var(--ink)}
+  .srcline{font:12px var(--mono);color:var(--dim2);background:#fff;border:1px solid var(--line);
+           border-radius:8px;padding:10px 12px;margin:12px 0;overflow-x:auto;white-space:nowrap}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me</a><span class="sep">/</span>
+    <a href="../../index.html#inference-systems">inference-systems</a><span class="sep">/</span>
+    <span>sglang-stream-interval</span>
+  </div>
+
+  <h1><code>--stream-interval</code> 为什么在长输出场景有提升</h1>
+  <div class="metarow">
+    <span>2026-09-24</span><span>SGLang</span><span>streaming</span><span>SSE</span><span>净室微基准</span>
+  </div>
+  <p class="lead">这个 flag 的表面作用是「少发几次」，但真正被它砍掉的是默认非增量流式路径里的一个 <b>O(T²)</b>：每一个流式事件都要搬运「截至当前的全部输出」，事件数又正比于输出长度。间隔 N 把事件数除以 N，于是二次项也除以 N —— 输出越长，被除掉的绝对值越大，这就是长输出有感、短输出无感的全部原因。</p>
+
+  <div class="nav">
+    <a href="#tldr">结论</a>
+    <a href="#knob">代码里只有一个判定点</a>
+    <a href="#pipe">一个事件走五段路</a>
+    <a href="#chunk">每块都在搬运整个前缀</a>
+    <a href="#quad">总代价是二次的</a>
+    <a href="#when">什么时候无效</a>
+    <a href="#advice">建议</a>
+  </div>
+
+  <h2 id="tldr"><span class="n">01</span>结论</h2>
+  <div class="tldr">
+    <h4>TL;DR</h4>
+    <ul>
+      <li><b>唯一的作用点</b>：调度器在 <code>accept()</code> 里决定「这一 step 要不要把这条请求的输出推给下游」。<code>stream_interval = N &gt; 1</code> 时条件变成 <code>len(output_ids) % N == 1</code> —— 首个 token 仍然立刻发出（TTFT 不变），之后每 N 个 token 发一次。</li>
+      <li><b>真正的杠杆不是「少发几次」</b>，而是默认（非增量）流式路径下每个事件都要重建并搬运完整前缀：tokenizer manager 里 <code>state.get_text()</code> 是 O(t) 的字符串重建，<code>/generate</code> 的 SSE 块里带着完整 <code>text</code> + 完整 <code>output_ids</code>。事件数 × 每事件 O(t) ⇒ 总量 <b>O(T²)</b>。</li>
+      <li><b>所以收益与 T 成正比</b>：间隔 2 恒定砍掉约 50%（实测 1.93–2.10×），而 512 token 时单请求只有 7 ms 的可砍量、8192 token 时有 1451 ms。长输出的绝对值才够大，才能在 tok/s 上看见。</li>
+      <li><b>你 9 月那轮 <code>stream-interval 4</code> 无效是同一个机制的结果</b>：batch 仅 2–3 条、单步 3.7 ms 的 kernel-bound decode 里，流式管线本来就不是瓶颈，砍掉一半的「不是瓶颈的那部分」等于没砍。</li>
+    </ul>
+  </div>
+
+  <h2 id="knob"><span class="n">02</span>代码里只有一个判定点</h2>
+  <p>整个 flag 在源码里只被真正消费一次，而且不在 scheduler.py 里（<code>scheduler.py:352</code> 存了个 <code>self.stream_interval</code> 但没人用，是个残留字段）。生效点是 <code>managers/scheduler_components/output_streamer.py</code> 里组装流式负载的那个累加器：</p>
+<pre><code><span class="cm"># output_streamer.py:345-363 · _GenerationStreamAccumulator.accept()</span>
+if req.finished():
+    should_output = True          <span class="cm"># 最后一块一定发</span>
+elif req.stream:
+    stream_interval = req.sampling_params.stream_interval or self.default_stream_interval
+    <span class="hl">should_output = (len(req.output_ids) % stream_interval == 1
+                     if stream_interval &gt; 1 else
+                     len(req.output_ids) % stream_interval == 0)</span>
+    if should_output:
+        should_output &amp;= not req.check_match_stop_str_prefix()
+else:
+    <span class="cm"># 非流式请求完全不受 --stream-interval 影响</span>
+    should_output = (len(req.output_ids) % self.default_force_stream_interval == 0)</code></pre>
+
+  <p>三个容易踩的点，都在这一段里：</p>
+  <table>
+    <thead><tr><th>细节</th><th>行为</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k" data-label="细节">取余 == 1<br>不是 == 0</td>
+        <td data-label="行为">N=2 时输出发生在 len = 1, 3, 5, 7…：<b>第 1 个 token 立即发出</b>，之后每 2 个发一次。<b>TTFT 不受影响</b>，被粗糙化的只有 chunk 粒度（ITL 的平滑度）。</td>
+        <td class="v" data-label="出处">output_streamer.py:351</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="细节">只作用于<br>流式请求</td>
+        <td data-label="行为">非流式请求走 <code>else</code> 分支，由环境变量 <code>SGLANG_FORCE_STREAM_INTERVAL</code> 控制，<b>默认值是 50</b>。也就是说非流式本来就每 50 个 token 才推一次，已经「优化」过了，这个 flag 对它无效。</td>
+        <td class="v" data-label="出处">environ.py:407</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="细节">可以按请求<br>覆盖</td>
+        <td data-label="行为"><code>sampling_params.stream_interval</code> 是每个请求可带的字段，优先级高于服务端 flag。想只给长输出请求设 2、短请求保持 1，可以在请求体里带。</td>
+        <td class="v" data-label="出处">sampling_params.py:110</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="pipe"><span class="n">03</span>一个流式事件要走五段路</h2>
+  <p>间隔决定的是「有几个事件」，而要理解间隔为什么值钱，得先看清「一个事件」有多贵 —— 它要跨 4 个进程边界，其中三段在同一时刻被同一条单线程事件循环串起来：</p>
+
+  <div class="pipelinewrap">
+  <div class="pipe">
+    <div class="stage">
+      <div class="sn">01 / GPU 进程</div>
+      <div class="st">Scheduler<br>accept() 判定</div>
+      <ul class="sw">
+        <li>取余判定，决定这条请求进不进这批负载</li>
+        <li>约 25 个字段 append 进累加器列表</li>
+        <li>pickle 一个 <code>BatchTokenIDOutput</code> 走 ZMQ</li>
+      </ul>
+      <span class="tag">每事件 O(1) × 命中请求数</span>
+    </div>
+    <div class="stage">
+      <div class="sn">02 / 独立进程</div>
+      <div class="st">Detokenizer<br>增量解码</div>
+      <ul class="sw">
+        <li>每条请求 <b>2 次</b> <code>batch_decode</code>（surround + read）</li>
+        <li>取前缀差得到本次新文本</li>
+        <li>再 pickle 一个 <code>BatchStrOut</code> 发出去</li>
+      </ul>
+      <span class="tag">每事件 O(chunk)</span>
+    </div>
+    <div class="stage hot">
+      <div class="badge">O(t)</div>
+      <div class="sn">03 / 与 HTTP 同进程</div>
+      <div class="st">TokenizerManager<br>+ uvicorn</div>
+      <ul class="sw">
+        <li>建 <code>meta_info</code>、查 <code>rid_to_state</code>、<code>append_text</code></li>
+        <li class="big">state.get_text()：把累计文本重新拼成一整个 str</li>
+        <li>每 16 条 <code>set event</code> 唤醒一次（batch_notify_size）</li>
+      </ul>
+      <span class="tag">事件循环 · 单线程</span>
+    </div>
+    <div class="stage hot">
+      <div class="badge">O(t)</div>
+      <div class="sn">04 / 同上</div>
+      <div class="st">HTTP SSE<br>序列化</div>
+      <ul class="sw">
+        <li>把整个 <code>out</code> 字典 orjson.dumps 成一块</li>
+        <li class="big">块里含累计 text + 累计 output_ids</li>
+        <li>写 socket；chunk 随 t 线性变大</li>
+      </ul>
+      <span class="tag">每事件 O(t) 字节</span>
+    </div>
+    <div class="stage hot">
+      <div class="badge">O(t)</div>
+      <div class="sn">05 / 客户端</div>
+      <div class="st">解析这块<br>SSE</div>
+      <ul class="sw">
+        <li><code>json.loads(chunk)</code> 解析整块</li>
+        <li class="big">解析量随 t 线性增长</li>
+        <li>客户端只有一个 Python 事件循环</li>
+      </ul>
+      <span class="tag">每事件 O(t)</span>
+    </div>
+  </div>
+  </div>
+
+  <p class="hint">01/02 是每事件固定成本（与已生成长度无关），03/04/05 是 <b>O(t)</b> —— t 是「此刻已经生成了多少 token」。这三段串在同一条单线程事件循环上（HTTP worker 默认 1 个，<code>tokenizer_worker_num = 1</code>），所以它们不是并行分摊，而是直接叠加。</p>
+
+  <h3 class="mini">关键源码位置</h3>
+  <div class="srcline">tokenizer_manager.py:197 · <span style="color:#b23a10">self.text += "".join(self.text_chunks)</span>   ← 每事件 O(t)</div>
+  <div class="srcline">tokenizer_manager.py:1583 · <span style="color:#b23a10">out["text"] = state.get_text()</span>   ← 每个中间块都会走这里</div>
+  <div class="srcline">http_server.py:833 · <span style="color:#b23a10">yield b"data: " + dumps_json(out) + b"\n\n"</span>   ← out 里是累计 text + 全部 output_ids</div>
+  <div class="srcline">detokenizer_manager.py:301 · surr_texts / read_texts = self._grouped_batch_decode(…) ×2   ← 每事件 2 次</div>
+
+  <p>为什么会有「每个块都带完整前缀」这种设计？看 <code>output_streamer.py:379</code> 和 <code>tokenizer_manager.py:2055</code> 的注释就清楚了：中间块把自己的 <code>text</code> 写成 <code>None</code>，由 <code>_wait_one_response</code> 在交付前统一补上 —— 原意是躲开「在 <code>_handle_batch_output</code> 里每 step 重建字符串」的 O(n²)。<b>但补的地点仍然在每个事件上</b>（<code>_wait_one_response</code> 是逐事件 yield 的），所以 O(n²) 只是换了个函数，并没有消失。SGLang 后来加的 <code>--incremental-streaming-output</code> 才是真正去掉它的那个开关（见文末）。</p>
+
+  <h2 id="chunk"><span class="n">04</span>每块都在搬运整个前缀</h2>
+  <p>把 /generate 的流式块真实序列化一遍（T=4096、interval=1），就能看到「面积」是怎么堆出来的：横轴是这块发出时已经生成了多少 token，纵轴是这一块的字节数。曲线是直线，所以累加量是三角形面积 —— 二次。</p>
+
+  <div class="figrow">
+    <div class="chartcard">
+      <h2>每块 SSE 都背着整个前缀</h2>
+      <div class="csub">一块 hairline = 每 128 token 抽样一次的真实序列化字节数 · 面积 = 一次请求的 SSE 总量 · 输出长度 4096 token</div>
+      <div class="chartwrap"><svg id="chartB" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet"></svg></div>
+      <div class="csrc">HAIRLINE AREA · F3 · 净室微基准 · ORJSON 3.11</div>
+    </div>
+    <div class="read">
+      <h4>读法</h4>
+      <ul>
+        <li>块的大小 ≈ <span class="num">13.1 B × t</span>：t 是「已经生成了多少 token」。第 128 个 token 那块 1.9 KB，第 4096 个那块 <b>53.5 KB</b>。</li>
+        <li>53.5 KB 里 <span class="num">28.7 KB（53.6%）</span>是 <code>output_ids</code> 数组 —— 客户端做吞吐统计根本用不到，但它跟着每一块重发一次。</li>
+        <li>把 4096 块加起来 = <b>105 MiB</b>，一条请求。这就是「面积」的含义。</li>
+        <li>间隔 2 <b>不会让每块变小</b>：每块依旧背着完整前缀，只是块数减半 → 面积减半。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="quad"><span class="n">05</span>总代价是二次的</h2>
+  <p>把服务端（<code>get_text</code> + <code>orjson.dumps</code>）和客户端（<code>json.loads</code>）的 CPU 时间实测出来，横轴是输出长度、纵轴是单请求的流式管线开销。每把输出长度翻一倍，开销涨 <b>3.9 倍</b> —— 二次项主导的标志。</p>
+
+  <div class="figrow">
+    <div class="chartcard">
+      <h2>翻倍输出长度，开销涨 3.9 倍</h2>
+      <div class="csub">单请求流式管线 CPU 时间（服务端重建+序列化 / 客户端解析）· 实心点 = 1 / 2 / 4 三个间隔 · 横轴每格 ×2</div>
+      <div class="chartwrap"><svg id="chartA" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet"></svg></div>
+      <div class="csrc">HAIRLINE LINE · F2 · 净室微基准 · ORJSON 3.11</div>
+    </div>
+    <div class="read">
+      <h4>读法</h4>
+      <ul>
+        <li>512 token 时三条线几乎重合（<span class="num">7.4 / 3.6 / 1.9 ms</span>），间隔在这里几乎无可砍。</li>
+        <li>8192 token 时拉到 <span class="num">1451 / 732 / 363 ms</span> —— 同一份数据的四倍差距。</li>
+        <li>间隔 2 的收益是<b>恒定的 50%</b>（全区间 1.93–2.10×），与 T 无关；变的是它的绝对值。</li>
+        <li>换成字节看更直白：单请求 <span class="num">1.7 → 417.9 MiB</span>，翻 16 倍输出换来 246 倍流量。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mini">间隔 1 的实测标尺（每请求）</h3>
+  <table>
+    <thead><tr><th>输出长度</th><th>事件数</th><th>服务端 CPU</th><th>客户端 CPU</th><th>合计</th><th>SSE 字节</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="输出长度">512</td><td class="v" data-label="事件数">512</td><td class="v" data-label="服务端 CPU">0.8 ms</td><td class="v" data-label="客户端 CPU">6.6 ms</td><td class="v" data-label="合计">7.4 ms</td><td class="v" data-label="SSE 字节">1.7 MiB</td></tr>
+      <tr><td class="k" data-label="输出长度">1024</td><td class="v" data-label="事件数">1024</td><td class="v" data-label="服务端 CPU">2.5 ms</td><td class="v" data-label="客户端 CPU">23.3 ms</td><td class="v" data-label="合计">25.8 ms</td><td class="v" data-label="SSE 字节">6.7 MiB</td></tr>
+      <tr><td class="k" data-label="输出长度">2048</td><td class="v" data-label="事件数">2048</td><td class="v" data-label="服务端 CPU">8.5 ms</td><td class="v" data-label="客户端 CPU">88.1 ms</td><td class="v" data-label="合计">96.5 ms</td><td class="v" data-label="SSE 字节">26.5 MiB</td></tr>
+      <tr><td class="k" data-label="输出长度">4096</td><td class="v" data-label="事件数">4096</td><td class="v" data-label="服务端 CPU">31.0 ms</td><td class="v" data-label="客户端 CPU">341.6 ms</td><td class="v" data-label="合计">372.6 ms</td><td class="v" data-label="SSE 字节">105.0 MiB</td></tr>
+      <tr><td class="k" data-label="输出长度">8192</td><td class="v" data-label="事件数">8192</td><td class="v" data-label="服务端 CPU">118.9 ms</td><td class="v" data-label="客户端 CPU">1332.4 ms</td><td class="v" data-label="合计">1451.3 ms</td><td class="v" data-label="SSE 字节">417.9 MiB</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">放大到并发：128 并发 × 4096 token，单跑就是 <b>13.4 GiB</b> 的 SSE 字节和约 <b>44 s</b> 的客户端 CPU（341.6 ms × 128）。这些时间不与 GPU 重叠——它们趴在同一个单线程事件循环和同一条网络路径上。这就是「长输出 + 高并发」被流式管线吃掉的那一块。</p>
+
+  <h2 id="when"><span class="n">06</span>什么时候无效：把它和你的实测对上</h2>
+  <p>同一个 flag 在两种场景下结论相反，机制上完全自洽：</p>
+  <table>
+    <thead><tr><th>条件</th><th>有提升</th><th>无提升</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k" data-label="条件">客户端模式</td>
+        <td data-label="有提升">流式（SSE）—— 事件真实存在</td>
+        <td data-label="无提升">非流式：走 <code>FORCE_STREAM_INTERVAL</code>，默认已经是 50，该 flag 完全不参与</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="条件">输出长度</td>
+        <td data-label="有提升">数千 token：二次项长起来了，可砍的绝对量大</td>
+        <td data-label="无提升">几十~几百 token：每请求只有几 ms，砍半也看不见</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="条件">并发</td>
+        <td data-label="有提升">高并发：128 条请求的字节量与解析量压满 CPU / 网络</td>
+        <td data-label="无提升">低并发（如 batch 2–3）：总量本来就小</td>
+      </tr>
+      <tr class="hot">
+        <td class="k" data-label="条件">瓶颈位置</td>
+        <td data-label="有提升">瓶颈在流式管线（TM / HTTP / 客户端 CPU 或网络）</td>
+        <td data-label="无提升">瓶颈在 GPU：单步 3.7 ms 的 kernel-bound decode 主导，流式开销本来就不在关键路径上</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="callout warn">
+    <p style="margin:0"><b>你自己的两轮数据正好落在这张表的两端。</b>9.11–9.14 那一轮 <code>num-continuous-decode-steps 8 + stream-interval 4 + scheduler-recv-interval 2</code> 拿到 7,166.7 / 7,167.1 tok/s（&lt;0.1%），当时记录的原因是「decode 是 kernel-bound：单步约 3.7 ms、batch 仅 2–3 条，成本由 40 层固定 per-step 工作决定，与 batch 大小几乎无关」—— 落在右下格：batch 只有 2–3 条，每个事件的负载极小，而 3.7 ms/step 的 GPU 时间不受影响，所以砍掉一半的流式开销等于没砍。而长输出 + 高并发的场景落在左上格，同一个 flag 就会给你两位数百分比。<b>判据不是「这个 flag 有没有用」，而是「流式管线的 CPU 与字节量占墙钟时间的比例」。</b></p>
+  </div>
+
+  <h2 id="advice"><span class="n">07</span>建议</h2>
+  <table>
+    <thead><tr><th>手段</th><th>做什么</th><th>代价 / 注意</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k" data-label="手段">--stream-interval N</td>
+        <td data-label="做什么">事件数 ÷N，二次项 ÷N。TTFT 不变（首 token 仍立即发）。长输出流式基准建议从 2 起步，试到 4。</td>
+        <td data-label="代价 / 注意">chunk 粒度变粗，逐 token 的 ITL 曲线被平滑掉。测 tok/s 不受影响（bench 客户端按 <code>completion_tokens</code> 差分摊 ITL），但看首字后抖动会失真。</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="手段">--incremental-streaming-output</td>
+        <td data-label="做什么"><b>真正去掉二次项</b>：块里只带 delta，不再重建完整文本。同样条件下微基准 37×（105 MiB → 1 MiB）。</td>
+        <td data-label="代价 / 注意">语义变了：<code>text</code> 是增量而非累计值。SGLang 自带的 bench 客户端在 /generate 上直接 <code>generated_text = data["text"]</code>，用这个 flag 跑会只留最后一段（吞吐数字仍对，文本内容不对）。接自家客户端才建议开。</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="手段">--batch-notify-size</td>
+        <td data-label="做什么">默认 16：攒够 16 条才 <code>set event</code> 唤醒一次事件循环，压掉 asyncio 唤醒开销。已经默认开着，高并发下可以再调大。</td>
+        <td data-label="代价 / 注意">唤醒延迟增加，与间隔是同一类取舍，叠加时注意总延迟。</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="手段">客户端侧</td>
+        <td data-label="做什么">基准压测想量纯 GPU 能力时用 <code>--disable-stream</code>：服务端回到 <code>FORCE_STREAM_INTERVAL=50</code>，流式管线开销基本消失。</td>
+        <td data-label="代价 / 注意">拿不到 TTFT / ITL。要测首字延迟就必须用流式，那时再配 <code>--stream-interval</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">怎么自己复现这个判据</h3>
+  <pre><code><span class="cm"># 1) 量字节：单条长输出请求的 SSE 总量，间隔 1 和间隔 2 各跑一次</span>
+curl -sN -X POST http://127.0.0.1:30000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"...","sampling_params":{"max_new_tokens":4096,"ignore_eos":true,"temperature":0},"stream":true}' \
+  | wc -c
+<span class="cm"># 间隔 1 ≈ 110 MB；采样参数里加 "stream_interval":2 应该 ≈ 55 MB</span>
+
+<span class="cm"># 2) 量形状：看单块体积随生成进度增长（第 k 块的字节数 ∝ k）</span>
+curl -sN ... | awk '/^data: /{print length($0)}' | head -20
+
+<span class="cm"># 3) 判据：把流式管线的 CPU 占比和 GPU 时间比一比。GPU 占绝对主导时，</span>
+<span class="cm">#    这个 flag 不该有任何可见变化 —— 那就是你 9 月那轮的样子。</span></code></pre>
+
+  <footer>
+    <p>代码路径对齐 SGLang 上游 commit <code>b3570a4531</code>（2026-07-19，与在役镜像 tag <code>…-20260720-b3570a45</code> 一致）：<code>managers/scheduler_components/output_streamer.py</code>、<code>managers/tokenizer_manager.py</code>、<code>managers/detokenizer_manager.py</code>、<code>entrypoints/http_server.py</code>、<code>entrypoints/openai/serving_chat.py</code>、<code>server_args.py</code>、<code>environ.py</code>。</p>
+    <p>图中的毫秒与字节为净室微基准实测（CPython 3.9 + orjson 3.11，逐事件复刻 <code>get_text()</code> / <code>orjson.dumps</code> / <code>json.loads</code> 的真实负载形状），<b>不含网络与 GPU 时间</b>；用于比较量级与比例，绝对值随机器与 token 文本长度变化。9 月那轮线上数字取自内部优化记录（batch 2–3、7,166.7 tok/s、&lt;0.1%），已去除主机名与内部文档标识。</p>
+    <p>图表像素使用 lieflat-charts 的 Mono 灰阶（明度即数据：interval 1 → 墨黑，2 → 深灰，4 → 中灰）；页面 chrome 使用本站蓝色强调色。图表需要联网加载 Inter 字体，SVG 本身离线可读。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span><span>·</span><span>图表代码 PolyForm NC 1.0.0（lieflat-charts）</span></p>
+  </footer>
+</div>
+
+<script>
+/* ════════ Mono tokens（内联，仅数据字段；不含 CARD_CSS 的 :root/body 规则） ════════ */
+var MONO = {
+  INK: '#1C1C1A', PAPER: '#F0EFEB', MUTED: '#8F8E88', FAINT: '#C6C5BF', GRID: '#DEDDD6',
+  L: ['#1C1C1A', '#4A4944', '#6A6963', '#8F8E88', '#B0AFA9', '#C6C5BF', '#D8D7D1']
+};
+var NS = 'http://www.w3.org/2000/svg';
+function mEl(p, t, a) { var n = document.createElementNS(NS, t); for (var k in a) n.setAttribute(k, a[k]); p.appendChild(n); return n; }
+function mTxt(p, a, s) { var n = mEl(p, 'text', a); n.textContent = s; return n; }
+function mTip(n, s) { var t = document.createElementNS(NS, 'title'); t.textContent = s; n.appendChild(t); }
+function mRnd(i, k) { return Math.abs(((i * 73856093) ^ (k * 19349663)) % 1000) / 1000; }
+function obsReveal(id, fn) {
+  var n = document.getElementById(id), io, done = false;
+  if (!n) return;
+  var draw = function () { n.innerHTML = ''; fn(n); };
+  var drawOnce = function () { if (done) return; done = true; draw(); };
+  var r = n.getBoundingClientRect(), vh = window.innerHeight || document.documentElement.clientHeight;
+  if (r.top < vh && r.bottom > 0) {
+    // 已在视野内：直接画（不依赖 IntersectionObserver 的首次回调）
+    drawOnce();
+  } else {
+    io = new IntersectionObserver(function (es) {
+      if (es[0].isIntersecting) { drawOnce(); io.disconnect(); }
+    }, { threshold: .3 });
+    io.observe(n);
+  }
+  n.style.cursor = 'pointer';
+  n.addEventListener('click', function () { done = true; draw(); });
+}
+
+/* ════════ F3 · hairline area：每块 SSE 的字节数 vs 已生成 token 数 ════════
+   骨架来自 lieflat-charts templates/basics-gallery.html 的 B3 卡片（一柱发丝 + 轮廓 + 峰值点）。 */
+(function () {
+  // 每 128 token 抽样一次的真实 orjson 序列化字节数（T=4096）
+  var B = [1901, 3565, 5229, 6893, 8557, 10221, 11885, 13549, 15213, 16877, 18541, 20205,
+           21869, 23533, 25197, 26861, 28525, 30189, 31853, 33517, 35181, 36845, 38509, 40173,
+           41837, 43501, 45165, 46829, 48493, 50157, 51821, 53485];
+
+  obsReveal('chartB', function (s) {
+    var x = function (d) { return 30 + d * 10.5; },
+        base = 262,
+        map = function (v) { return base - v * (230 / 56000); };
+
+    // 虚线导轨（KB 参考线）
+    [20000, 40000].forEach(function (v) {
+      mEl(s, 'line', { x1: 30, y1: map(v), x2: 386, y2: map(v), stroke: MONO.GRID,
+        'stroke-width': .7, 'stroke-dasharray': '2 4', class: 'fade' });
+      mTxt(s, { x: 26, y: map(v) + 2.4, 'font-size': 7, 'font-weight': 600, fill: MONO.MUTED,
+        'text-anchor': 'end', class: 'fade' }, (v / 1000) + ' KB');
+    });
+    mEl(s, 'line', { x1: 24, y1: base, x2: 386, y2: base, stroke: MONO.GRID, 'stroke-width': .8, class: 'fade' });
+
+    var peak = B.length - 1;
+    // 面积由「块」组成：一根发丝立到自己的峰值
+    B.forEach(function (v, d) {
+      mEl(s, 'line', { x1: x(d), y1: base, x2: x(d), y2: map(v),
+        stroke: d === peak ? MONO.INK : MONO.MUTED,
+        'stroke-width': d === peak ? 1.1 : .55,
+        opacity: d === peak ? 1 : .5 + mRnd(d + 1, 7) * .45,
+        class: 'fade', style: 'animation-delay:' + (d * .014) + 's' });
+    });
+    // 轮廓
+    var pts = B.map(function (v, d) { return x(d) + ' ' + map(v); }).join(' L ');
+    mEl(s, 'path', { d: 'M' + pts, fill: 'none', stroke: MONO.INK, 'stroke-width': 1.2, pathLength: 1,
+      class: 'draw', style: 'animation-delay:.4s;animation-duration:1.2s' });
+
+    var pd = mEl(s, 'circle', { cx: x(peak), cy: map(B[peak]), r: 4.2, fill: MONO.INK,
+      class: 'pop', style: 'animation-delay:1.2s' });
+    mTip(pd, '第 ' + (peak + 1) * 128 + ' 个 token 那块 — ' + B[peak].toLocaleString() + ' 字节');
+    mTxt(s, { x: x(peak), y: map(B[peak]) - 11, 'font-size': 9.5, 'font-weight': 800, fill: MONO.INK,
+      'text-anchor': 'middle',
+      style: 'paint-order:stroke;stroke:' + MONO.PAPER + ';stroke-width:3px;animation-delay:1.3s',
+      class: 'fade' }, '53.5 KB');
+
+    [[0, '128'], [15, '2K'], [31, '4K']].forEach(function (m) {
+      mTxt(s, { x: x(m[0]), y: base + 18, 'font-size': 7.5, 'font-weight': 600, fill: MONO.MUTED,
+        'text-anchor': 'middle', 'letter-spacing': '.1em', class: 'fade' }, m[1]);
+    });
+    mTxt(s, { x: 205, y: 306, 'font-size': 7, 'font-weight': 600, fill: '#B0AFA9', 'text-anchor': 'middle',
+      'letter-spacing': '.06em', class: 'fade', style: 'animation-delay:1.3s' },
+      '一根发丝 = 一块 SSE · 横轴 = 已生成 TOKEN 数');
+  });
+})();
+
+/* ════════ F2 · hairline line：单请求流式开销 vs 输出长度，三个间隔 ════════
+   骨架来自 templates/basics-gallery.html 的 B2 卡片（日历地板 + 发丝折线 + 逐点圆点 + 端点标数）。 */
+(function () {
+  var T = [512, 1024, 2048, 4096, 8192];
+  var D = [
+    { k: 'interval = 1', c: MONO.INK,    v: [7.4, 25.8, 96.5, 372.6, 1451.3] },
+    { k: 'interval = 2', c: MONO.L[1],   v: [3.6, 13.1, 48.5, 192.8, 732.4] },
+    { k: 'interval = 4', c: MONO.L[2],   v: [1.9, 6.8, 24.3, 93.9, 363.1] }
+  ];
+
+  obsReveal('chartA', function (s) {
+    var x = function (i) { return 52 + i * 76; },
+        base = 262,
+        map = function (v) { return base - v * (238 / 1600); };
+
+    // 虚线导轨（时间参考线）
+    [500, 1000, 1500].forEach(function (ms) {
+      mEl(s, 'line', { x1: 30, y1: map(ms), x2: 388, y2: map(ms), stroke: MONO.GRID,
+        'stroke-width': .7, 'stroke-dasharray': '2 4', class: 'fade' });
+      mTxt(s, { x: 26, y: map(ms) + 2.4, 'font-size': 7, 'font-weight': 600, fill: MONO.MUTED,
+        'text-anchor': 'end', class: 'fade' }, ms / 1000 + ' s');
+    });
+    // 地板刻度：每个被抽样的输出长度一根
+    T.forEach(function (t, i) {
+      mEl(s, 'line', { x1: x(i), y1: base, x2: x(i), y2: base - 7, stroke: '#CFCEC7',
+        'stroke-width': .6, class: 'fade', style: 'animation-delay:' + (i * .02) + 's' });
+    });
+    mEl(s, 'line', { x1: 30, y1: base, x2: 388, y2: base, stroke: MONO.GRID, 'stroke-width': .8, class: 'fade' });
+
+    // 发丝折线 + 逐点圆点
+    D.forEach(function (ser, si) {
+      var pts = ser.v.map(function (v, i) { return x(i) + ' ' + map(v); }).join(' L ');
+      mEl(s, 'path', { d: 'M' + pts, fill: 'none', stroke: ser.c, 'stroke-width': 1, pathLength: 1,
+        class: 'draw', style: 'animation-duration:1.2s;animation-delay:' + (si * .14) + 's' });
+      ser.v.forEach(function (v, i) {
+        var d = mEl(s, 'circle', { cx: x(i), cy: map(v), r: 2.3, fill: ser.c, class: 'pop',
+          style: 'animation-delay:' + (.2 + i * .04 + si * .14) + 's' });
+        mTip(d, '输出 ' + T[i] + ' token · ' + ser.k + ' — ' + v + ' ms');
+      });
+    });
+    // 端点标数（三条线端点纵向相距 100px 以上，不撞）
+    D.forEach(function (ser, si) {
+      var v = ser.v[4];
+      mTxt(s, { x: x(4) + 8, y: map(v) + 3.2, 'font-size': 9.5, 'font-weight': 800, fill: ser.c,
+        class: 'fade', style: 'animation-delay:' + (1 + si * .1) + 's' },
+        v >= 1000 ? (v / 1000).toFixed(2) + ' s' : Math.round(v) + ' ms');
+      mEl(s, 'circle', { cx: x(4), cy: map(v), r: 4.2, fill: ser.c, class: 'pop',
+        style: 'animation-delay:' + (.9 + si * .1) + 's' });
+    });
+    // 短输出端三条线重合，标注一下免得被读成缺数据
+    mTxt(s, { x: 34, y: 249, 'font-size': 7, 'font-weight': 600, fill: MONO.MUTED,
+      class: 'fade', style: 'animation-delay:1.15s' },
+      '512–1K：三条线重合（7.4 / 3.6 / 1.9 ms）');
+    // 横轴标签
+    T.forEach(function (t, i) {
+      mTxt(s, { x: x(i), y: base + 18, 'font-size': 7.5, 'font-weight': 600, fill: MONO.MUTED,
+        'text-anchor': 'middle', 'letter-spacing': '.06em', class: 'fade' },
+        t >= 1024 ? (t / 1024) + 'K' : t);
+    });
+    mTxt(s, { x: 205, y: 306, 'font-size': 7, 'font-weight': 600, fill: '#B0AFA9', 'text-anchor': 'middle',
+      'letter-spacing': '.06em', class: 'fade', style: 'animation-delay:1.2s' },
+      '横轴 = 输出长度（TOKEN）· 每格 ×2 · 纵轴 = 单请求流式开销');
+  });
+})();
+</script>
+</body>
+</html>

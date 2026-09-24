@@ -1,0 +1,25 @@
+{
+  "title": "--stream-interval 为什么在长输出场景有提升",
+  "slug": "sglang-stream-interval",
+  "category": "inference-systems",
+  "date": "2026-09-24",
+  "tags": ["SGLang", "流式输出", "SSE", "调度", "O(T²)", "推理服务"],
+  "one_liner": "--stream-interval 在源码里只有一个判定点（output_streamer.accept 的 len(output_ids) % N == 1），但真正被它砍掉的是默认非增量流式路径里的 O(T²)：每个 SSE 事件都要重建累计文本、并携带完整 text + output_ids 向下游搬运；实测每翻倍输出长度开销涨 3.9 倍，间隔 2 恒定砍半 —— 所以只有长输出才看得见。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "SGLang 上游源码 commit b3570a4531（2026-07-19，与在役镜像 tag 20260720-b3570a45 一致）：managers/scheduler_components/output_streamer.py、managers/tokenizer_manager.py、managers/detokenizer_manager.py、managers/schedule_batch.py、entrypoints/http_server.py、entrypoints/openai/serving_chat.py、server_args.py、environ.py",
+    "净室微基准（CPython 3.9 + orjson 3.11，本机）：逐事件复刻 state.get_text() 字符串重建、orjson.dumps 整块负载、json.loads 客户端解析的真实负载形状；不含网络与 GPU",
+    "内部优化记录中一次小 batch kernel-bound decode 的实测结论（batch 2–3、单步约 3.7 ms、7,166.7 tok/s、<0.1%），用于对照「什么时候无效」",
+    "图表模板：lieflat-charts templates/basics-gallery.html 的 B2 Hairline Line（F2）与 B3 Hairline Area（F3）卡片骨架；候选审计淘汰了 L1 Launch Fan、L2 Dot Cascade、L3 Barcode Lollipop、L9 Bubble Almanac、L11 Trend Lineage、L13 Hourglass Stream、F8 Plumb Scatter、F12 Dumbbell Queue、F16 Stream Ribbon"
+  ],
+  "visibility": "public",
+  "redactions": [
+    "主机名与内网 IP",
+    "容器名与部署脚本名",
+    "模型版本号（改为「在役部署」表述）",
+    "内部文档名、实验目录名与轮次编号"
+  ]
+}
