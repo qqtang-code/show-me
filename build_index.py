@@ -162,27 +162,35 @@ PORTAL = r"""<!DOCTYPE html>
   .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:stretch}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;
         padding:17px 18px 14px;box-shadow:var(--shadow-1);
-        display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden;
+        display:flex;flex-direction:column;gap:0;position:relative;overflow:hidden;
         transition:box-shadow .16s ease,border-color .16s ease,transform .16s ease}
   .card::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent);
                 transform:scaleX(0);transform-origin:left;transition:transform .22s ease}
   .card:hover{box-shadow:var(--shadow-2);border-color:#c9d6ea;transform:translateY(-2px)}
   .card:hover::before,.card:focus-within::before{transform:scaleX(1)}
-  .card h3{margin:0;font-size:16px;line-height:1.45;letter-spacing:-.005em}
+  .card h3{margin:0;font-size:16px;line-height:1.45;letter-spacing:-.005em;
+           display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+           min-height:calc(2 * 1.45em)}
   .card h3 a{color:var(--ink);text-decoration:none}
   .card h3 a::after{content:"→";display:inline-block;margin-left:6px;color:var(--accent);
                     opacity:0;transform:translateX(-4px);
                     transition:opacity .18s ease,transform .18s ease}
   .card:hover h3 a::after,.card:focus-within h3 a::after{opacity:1;transform:translateX(0)}
   .card .one{color:var(--dim);font-size:13.5px;line-height:1.68;margin:0;
-             display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+             display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;
+             min-height:calc(4 * 1.68em)}
+  .card .one{margin-bottom:12px}
   .card .tags{display:flex;flex-wrap:wrap;gap:6px}
-  .card .tags span{font:11.5px var(--mono);background:var(--chip);border:1px solid var(--chipb);
-                   border-radius:999px;padding:3px 8px;color:#3f4c63}
+  .card .tags{align-items:center;min-height:24px}
+  .card .tags span{font:11.5px/1.2 var(--mono);background:var(--chip);border:1px solid var(--chipb);
+                   border-radius:999px;padding:4px 9px;color:#3f4c63;box-sizing:border-box;
+                   display:inline-flex;align-items:center;height:24px}
   .card .tags span.more{background:#fff;border-style:dashed;color:var(--dim2)}
   .card .foot{margin-top:auto;display:flex;flex-wrap:wrap;gap:12px;align-items:center;
-              font:11.5px var(--mono);color:var(--dim2);border-top:1px solid var(--line2);
-              padding-top:10px}
+              font:11.5px/1.4 var(--mono);color:var(--dim2);border-top:1px solid var(--line2);
+              padding-top:11px;margin-top:12px}
+  .card .foot{flex:none}
+  .card .spacer{flex:1 1 auto}
   .card .foot .date{color:#3f4c63}
   .card .foot a{color:var(--accent);text-decoration:none}
   .card .foot a:hover{text-decoration:underline}
@@ -203,7 +211,8 @@ PORTAL = r"""<!DOCTYPE html>
     .stat b{font-size:17px}
     .grid{grid-template-columns:minmax(0,1fr)}
     .grid > .card:last-child:nth-child(odd){grid-column:auto}
-    .card .one{-webkit-line-clamp:5}
+    .card h3{min-height:0}
+    .card .one{-webkit-line-clamp:5;min-height:0}
     .tools{padding:10px 0}
     .cathead{margin:30px 0 12px}
     .cathead .cl{display:none}
