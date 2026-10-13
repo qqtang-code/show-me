@@ -1,5 +1,5 @@
 {
-  "title": "torchrun 是怎么把一次命令变成 N 个训练进程的",
+  "title": "torchrun 启动流程与进程管理：从一条命令到 N 个训练进程",
   "slug": "torchrun-launch-internals",
   "category": "tooling",
   "date": "2026-10-13",
@@ -13,7 +13,7 @@
     "源码走读",
     "容错重启"
   ],
-  "one_liner": "沿着 torch.distributed.run → elastic_launch → LocalElasticAgent 这条链把 torchrun 拆开：第 2 步就把单节点命令悄悄改成 c10d+localhost:0，rank 不是参数算出来的而是 rendezvous 排出来的（RANK = GROUP_RANK×LOCAL_WORLD_SIZE+LOCAL_RANK），注入给 worker 的是一个 13 项的环境变量字典而不是命令行参数，而 --master-addr/--master-port/--node-rank 只在 static 模式下有效 —— c10d 模式下训练 store 的地址由 rendezvous 现场商定并广播；--max-restarts 重启的是整个 worker group，且成员变更不消耗额度。",
+  "one_liner": "沿着 torch.distributed.run → elastic_launch → LocalElasticAgent 这条链把 torchrun 拆开：第 2 步就把单节点命令改为 c10d + localhost:0；RANK 不是参数算出来的，而是 rendezvous 分配的结果（RANK = GROUP_RANK × LOCAL_WORLD_SIZE + LOCAL_RANK）；注入给 worker 的是一份环境变量字典而非命令行参数；--master-addr/--master-port/--node-rank 只在 static 模式下有效 —— c10d 模式下训练 store 的地址由 rendezvous 决定并广播；--max-restarts 重启的是整个 worker group，且成员变更不消耗该额度。术语约定：翻译后易产生歧义的词保留英文原词。",
   "artifact": "index.html",
   "extra_files": [
     "notes.md"
@@ -23,7 +23,8 @@
   "sources": [
     "PyTorch 上游 main 分支源码（逐文件走读）：torch/distributed/run.py、launcher/api.py、elastic/agent/server/api.py、elastic/agent/server/local_elastic_agent.py、elastic/rendezvous/{registry,static_tcp_rendezvous,c10d_rendezvous_backend,dynamic_rendezvous,api,utils}.py、elastic/multiprocessing/{__init__,api}.py 与 subprocess_handler/subprocess_handler.py、argparse_util.py、rendezvous.py、distributed_c10d.py、csrc/distributed/c10d/TCPStore.cpp",
     "官方文档 torchrun (Elastic Launch)：https://docs.pytorch.org/docs/stable/elastic/run.html（参数语义、失败模式、成员变更、部署方式）",
-    "本机未安装 PyTorch，未做运行时实测；所有默认值与判定条件取自源码字面内容"
+    "本机未安装 PyTorch，未做运行时实测；所有默认值与判定条件取自源码字面内容",
+    "术语约定：rank / group / store / rendezvous / agent / worker group / elastic / quorum / complete / heartbeat / communicator / watchdog / checkpoint 等保留英文原词，变量名与函数名保持源码原样"
   ],
   "visibility": "public",
   "redactions": [],
