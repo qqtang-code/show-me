@@ -207,7 +207,7 @@
   <div class="tldr" id="tldr">
     <h4>速览 · 30 秒</h4>
     <ul>
-      <li><b>问题</b>：decode 每一步的归约只有 10 KB 量级。这个尺度上<b>带宽不是瓶颈，固定开销才是</b>——NCCL 每次 collective 都要把数据拷进通道缓冲、由 proxy 侧完成会合与握手，这套开销与消息大小基本无关。</li>
+      <li><b>问题</b>：decode 每一步的 AllReduce 只有 10 KB 量级。这个尺度上<b>带宽不是瓶颈，固定开销才是</b>——NCCL 每次 collective 都要把数据拷进通道缓冲、由 proxy 侧完成会合与握手，这套开销与消息大小基本无关。</li>
       <li><b>改动</b>：把归约换成 <b>CUDA IPC 直推</b>。每个 rank 的 workspace 用 IPC 句柄导出、被所有 peer 映射进各自地址空间，kernel 一条 <code>st.global</code> 就写进对端显存；同步也改成 workspace 内的 device 侧 flag 自旋，不再有 host 参与的会合。</li>
       <li><b>和「1-stage → 2-stage」的关系</b>：<b>不是叠加</b>。1-stage / 2-stage 是同一套 IPC 内核里的 <code>Variant</code> 选择（源码里的 seed 交叉点是 32 KiB），按载荷尺寸二选一；<b>decode 小消息上它选的正是 1-stage</b>——恰好是 2.1 的反方向。两条改动作用在成本式的不同项上，各自负责不同的尺寸区间。</li>
     </ul>
@@ -268,7 +268,7 @@
           <td data-label="算法">结构性等价于 2-stage</td>
           <td class="num" data-label="每rank字节">2(N−1)/N · P</td>
           <td data-label="固定开销">大（通道 + proxy 会合）</td>
-          <td data-label="谁在用">兜底；IPC 未覆盖形状的回落</td>
+          <td data-label="谁在用">fallback；IPC 未覆盖形状时的回落路径</td>
         </tr>
         <tr>
           <td class="k">CUDA IPC 直推</td>
@@ -314,7 +314,7 @@
     <span class="cm">对比 NCCL 同载荷 4.64–4.90 ms（30–31.5 GB/s）：IPC 路径快 24–30%</span>
   </div>
 
-  <p>而 1-stage 的内核是 <code>push_oneshot_param_kernel&lt;T,4&gt;</code>（world 4）和 <code>ipc_topo_rsag8_push_param_kernel&lt;T&gt;</code>（world 8）——同一个 <code>FI_PCIE_IPC_SELECT</code> 宏按 <code>(world_size, variant)</code> 分发。选哪个 variant 由 seed 策略给出兜底、由实测调优表逐形状决定：</p>
+  <p>而 1-stage 的内核是 <code>push_oneshot_param_kernel&lt;T,4&gt;</code>（world 4）和 <code>ipc_topo_rsag8_push_param_kernel&lt;T&gt;</code>（world 8）——同一个 <code>FI_PCIE_IPC_SELECT</code> 宏按 <code>(world_size, variant)</code> 分发。选哪个 variant 由 seed 策略给出初值、再由实测调优表逐形状决定：</p>
 
   <div class="eq">
     <span class="cm"># pcie_ipc_policy.py</span><br>
@@ -329,7 +329,7 @@
   </div>
 
   <div class="warn">
-    <b>关键点：seed 只是兜底。</b>真正生效的是 autotune 跑出来的实测表（每个形状一行 tactic），seed 只负责没测过的形状。所以「decode 到底走了 1-stage 还是 2-stage」不能只按 32 KiB 猜，要读服务启动日志里的逐形状 tactic 打印（instrumentation 会对 rows = 1/4/8/16/32/64/128/512/8192 各打一行）。
+    <b>关键点：seed 只是初值。</b>真正生效的是 autotune 跑出来的实测表（每个形状一行 tactic），seed 只负责没测过的形状。所以「decode 到底走了 1-stage 还是 2-stage」不能只按 32 KiB 猜，要读服务启动日志里的逐形状 tactic 打印（instrumentation 会对 rows = 1/4/8/16/32/64/128/512/8192 各打一行）。
   </div>
 
   <h3 class="mini">3.2 分派是互斥的：一个张量只走一条路</h3>
@@ -355,7 +355,7 @@
     <span class="cm"># custom_all_reduce.py → should_custom_ar()</span><br>
     if self.world_size == 2 or self.full_nvlink:<br>
     &nbsp;&nbsp;&nbsp;&nbsp;return inp_size &lt;= self.max_size<br>
-    return <span class="bad">False</span> &nbsp;&nbsp;<span class="cm"># ← TP8 无 NVLink：对**所有**形状返回 False</span>
+    return <span class="bad">False</span> &nbsp;&nbsp;<span class="cm"># ← TP8 无 NVLink：对所有形状都返回 False</span>
   </div>
 
   <p>所以在 8 卡无 NVLink 的 TP8 上，classic CustomAllreduce 对每一个形状都拒收（启动时会打一条 warning），另一个 <code>CustomAllReduceV2</code> 也没有接进 <code>parallel_state</code>。这也解释了一个容易被忽略的事实：<b>当 IPC 不可用时，回落目标是 NCCL，而不是 CustomAllreduce</b>——因为后者在这台机器上根本不工作。</p>
@@ -547,7 +547,7 @@
     <details>
       <summary>decode 小消息上，2-stage 明明省 4 倍字节，为什么反而更慢？</summary>
       <div class="ans">
-        因为小消息上<b>字节项不是主导项</b>。以 N=8、P=10 KB 为例：1-stage 收 7P = 70 KB，2-stage 收 1.75P = 17.5 KB，按 36 GB/s 折算差 <b>1.5 μs</b>；而 2-stage 要多付数轮相位屏障。我们 84 MB 那次实测把 0.579 ms 残差归因到 7 个相位（≈ 83 μs/相位，含 <code>__threadfence_system</code>），相位成本是<b>固定量级、不随载荷缩小</b>，所以小消息上它直接吃掉全部字节收益还倒亏。源码里那句「the island-partitioned push has no barriers, which is what the staged path's six island barriers must beat」讲的就是这个取舍。
+        因为小消息上<b>字节项不是主导项</b>。以 N=8、P=10 KB 为例：1-stage 收 7P = 70 KB，2-stage 收 1.75P = 17.5 KB，按 36 GB/s 折算差 <b>1.5 μs</b>；而 2-stage 要多付数轮相位屏障。我们 84 MB 那次实测把 0.579 ms 残差归因到 7 个相位（≈ 83 μs/相位，含 <code>__threadfence_system</code>），相位成本是<b>固定量级、不随载荷缩小</b>，所以小消息下它完全抵消了字节收益，反而净亏。源码里那句「the island-partitioned push has no barriers, which is what the staged path's six island barriers must beat」讲的就是这个取舍。
       </div>
     </details>
     <details>
@@ -584,7 +584,7 @@
     </li>
     <li>
       <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html">NCCL · Collectives 文档</a>
-      <span class="d">想搞清楚生产库怎么按消息大小分流、以及 ring/tree 各自的适用区间，从这里入手。</span>
+      <span class="d">介绍生产库按消息大小分流的逻辑，以及 ring/tree 各自的适用区间。</span>
     </li>
     <li>
       <a href="https://github.com/sgl-project/sglang">sgl-project/sglang</a>

@@ -233,7 +233,7 @@
     <span>2026-10-13</span><span>torchrun</span><span>torchelastic</span><span>rendezvous</span><span>DDP</span><span>源码走读</span>
   </div>
 
-  <p class="lead">你敲下 <code>torchrun --nproc-per-node=8 train.py</code>，最后跑起来的是 8 个各自持有一张卡的 Python 进程，它们能互相发现、组成 process group、失败后还能被重新拉起。中间发生的事全部在 <code>torch.distributed.run</code> 和它下面的 torchelastic 里：<b>解析参数 → 每台机器起一个 agent → agent 通过 rendezvous 为每个节点协商 GROUP_RANK → agent 按分配结果给每个 worker 生成一份环境变量 → 用 <code>subprocess.Popen</code> 拉起进程 → 循环监控，失败则重启整个 worker group</b>。这一页把这条链路拆开，每个结论都指到源码里的那一行。</p>
+  <p class="lead">你敲下 <code>torchrun --nproc-per-node=8 train.py</code>，最后跑起来的是 8 个各自持有一张卡的 Python 进程，它们能互相发现、组成 process group、失败后还能被重新拉起。中间发生的事全部在 <code>torch.distributed.run</code> 和它下面的 torchelastic 里：<b>解析参数 → 每台机器起一个 agent → agent 通过 rendezvous 为每个节点分配 GROUP_RANK → agent 按分配结果给每个 worker 生成一份环境变量 → 用 <code>subprocess.Popen</code> 拉起进程 → 循环监控，失败则重启整个 worker group</b>。这一页把这条链路拆开，每个结论都指到源码里的那一行。</p>
 
   <div class="nav">
     <a href="#tldr">结论</a>
@@ -277,7 +277,7 @@
     <tbody>
       <tr><td class="k">torchrun</td><td class="v">每节点 1</td><td>解析参数、把 <code>PET_*</code> 环境变量并进参数、构造 <code>LaunchConfig</code>、调 <code>elastic_launch</code></td><td class="v">run.py: config_from_args / run</td></tr>
       <tr><td class="k">LocalElasticAgent</td><td class="v">每节点 1</td><td>代表本节点参与 rendezvous、分配 RANK、为每个 worker 生成环境变量、<code>Popen</code>、监控、重启</td><td class="v">local_elastic_agent.py</td></tr>
-      <tr><td class="k">RendezvousHandler</td><td class="v">对象，非进程</td><td>决定本轮哪些节点参与、共几个节点、本节点是几号，返回 <code>RendezvousInfo</code></td><td class="v">static_tcp_rendezvous.py / dynamic_rendezvous.py</td></tr>
+      <tr><td class="k">RendezvousHandler</td><td class="v">对象，非进程</td><td>决定本轮哪些节点参与、共几个节点，以及本节点分配到的 rank，返回 <code>RendezvousInfo</code></td><td class="v">static_tcp_rendezvous.py / dynamic_rendezvous.py</td></tr>
       <tr><td class="k">TCPStore</td><td class="v">1 个 server</td><td>rendezvous 使用的 strongly-consistent KV store；在 rank 0 所在节点由 agent 承载，多租户复用</td><td class="v">c10d_rendezvous_backend.py / TCPStore.cpp</td></tr>
       <tr><td class="k">Worker（训练进程）</td><td class="v">每节点 nproc</td><td>import 你的 <code>train.py</code>、调 <code>init_process_group</code>、创建 NCCL communicator</td><td class="v">你写的脚本</td></tr>
       <tr><td class="k">ProcessGroup(NCCL)</td><td class="v">每进程 1</td><td>worker 之间真正的集合通信（NCCL communicator）；它连接的 store 与 rendezvous 使用的 store 不是同一个</td><td class="v">distributed_c10d.py</td></tr>
@@ -286,7 +286,7 @@
 
   <div class="tree"><pre><code>torchrun  (python)                                  ← 你敲的命令
   └─ main() → run(args)                              run.py
-       ├─ 参数兜底：--standalone / nnodes==1 且无 endpoint
+       ├─ 默认值处理：--standalone / nnodes==1 且无 endpoint
        │    → rdzv_backend=c10d, rdzv_endpoint=localhost:0, rdzv_id=uuid4()
        ├─ config_from_args(args)                     run.py
        │    ├─ parse_min_max_nnodes("1:4") → (1, 4)
@@ -313,10 +313,10 @@
   <p>下面九步对应源码里从 <code>run(args)</code> 到 <code>Popen</code> 的真实顺序。第 5 步的 <code>monitor_interval</code> 和 <code>start_method</code> 用的是默认值 <code>0.1s / spawn</code>。</p>
 
   <div class="flow">
-    <div class="step"><div class="i">1</div><div class="t"><b>解析参数，并用 <code>PET_*</code> 环境变量兜底</b>
+    <div class="step"><div class="i">1</div><div class="t"><b>解析参数，并用 <code>PET_*</code> 环境变量提供默认值</b>
       <span class="sub2">每个 <code>--flag</code> 都注册了 <code>action=env</code>：命令行未提供时读取 <code>PET_FLAG</code>（大写、下划线）。因此 <code>PET_NNODES=2 torchrun train.py</code> 等价于 <code>--nnodes=2</code>。</span>
       <span class="where">run.py: get_args_parser() · torch/distributed/argparse_util.py: class env</span></div></div>
-    <div class="step"><div class="i">2</div><div class="t"><b>给默认值兜底，决定 rendezvous 怎么走</b>
+    <div class="step"><div class="i">2</div><div class="t"><b>为未提供的参数填默认值，决定 rendezvous 怎么走</b>
       <span class="sub2">① <code>--standalone</code> → 强制 <code>c10d / localhost:0 / uuid4</code>；② 未提供 endpoint 且 <code>--nnodes</code> 最大值为 1 → 同样改为 <code>c10d / localhost:0</code>；③ <code>master_port</code> 为 <code>None</code> 时填 <code>29500</code>。</span>
       <span class="where">run.py: run()  —  因此单机单节点即使不写任何 rdzv 参数也不会占用 29500</span></div></div>
     <div class="step"><div class="i">3</div><div class="t"><b>解析节点数与每节点进程数</b>
@@ -353,7 +353,7 @@
     <thead><tr><th>模式</th><th>触发方式</th><th>谁承载 rendezvous</th><th>合适场景</th></tr></thead>
     <tbody>
       <tr><td class="k">static</td><td class="v">默认值</td><td>由你指定：<code>--node-rank</code> 与 <code>--master-addr/--master-port</code> 直接作为参数传入，<code>rank = node_rank</code>、<code>world_size = max_nodes</code>；rank 0 创建 <code>TCPStore(is_master=True)</code>，其余节点作为 client 连接</td><td class="v">节点数固定、脚本化调度（k8s Job / Slurm）</td></tr>
-      <tr><td class="k">c10d</td><td class="v"><code>--rdzv-backend=c10d --rdzv-endpoint=host:port</code></td><td>rendezvous 存储自身（TCPStore / FileStore）。支持 <code>min:max</code> 弹性、动态成员变更，<code>--standalone</code> 也用它</td><td class="v">多机、需要容错与弹性扩容</td></tr>
+      <tr><td class="k">c10d</td><td class="v"><code>--rdzv-backend=c10d --rdzv-endpoint=host:port</code></td><td>rendezvous store 自身（TCPStore / FileStore）。支持 <code>min:max</code> 弹性、动态成员变更，<code>--standalone</code> 也用它</td><td class="v">多机、需要容错与弹性扩容</td></tr>
       <tr><td class="k">etcd / etcd-v2</td><td class="v"><code>--rdzv-backend=etcd-v2 --rdzv-endpoint=...</code></td><td>外部 etcd（必须启用 v2 API）。功能与 c10d 等价，<code>etcd</code> 已进入维护模式</td><td class="v">已有 etcd 集群的存量环境</td></tr>
     </tbody>
   </table>
@@ -362,7 +362,7 @@
   <div class="lane">
     <div class="row"><span class="lb">static</span><span class="n a">--master-addr</span><span class="w">+</span><span class="n a">--master-port</span><span class="w">→</span><span class="n b">handler 直接使用该值</span><span class="w">→</span><span class="n">env: MASTER_ADDR/PORT</span></div>
     <div class="row"><span class="lb">c10d / etcd</span><span class="n a">rendezvous complete</span><span class="w">→</span><span class="n">rank0 在 store 里写 <code>MASTER_ADDR/MASTER_PORT</code></span><span class="w">→</span><span class="n b">所有 rank 读到同一份</span><span class="w">→</span><span class="n">env</span></div>
-    <div class="row"><span class="lb">端口的坑</span><span class="n">rank 0 会另找一个空闲端口给训练用的 store，并通过 store 广播</span><span class="w">≠</span><span class="n">rdzv-endpoint 的 29400</span></div>
+    <div class="row"><span class="lb">端口易错点</span><span class="n">rank 0 会另找一个空闲端口给训练用的 store，并通过 store 广播</span><span class="w">≠</span><span class="n">rdzv-endpoint 的 29400</span></div>
   </div>
   <p class="hint">这就是「c10d 模式下你改 <code>--master-port</code> 没用」的根源：那两个值在 c10d 路径里由 rendezvous 现场商定并写进 store（<code>RendezvousStoreInfo.build()</code>，rank0 用 <code>get_free_port()</code> 或共享 TCPStore 的真实端口），<code>--master-addr/--master-port</code> 只被 <code>spec.master_addr or rdzv_info.bootstrap_store_info.master_addr</code> 这一行当作可选的覆盖项读取。</p>
 
@@ -469,7 +469,7 @@ while True:
   </div>
 
   <h2 id="initpg"><span class="n">07</span>worker 侧：<code>init_process_group</code> 怎么接上这份环境变量</h2>
-  <p><code>dist.init_process_group(backend="nccl")</code> 不传 <code>init_method</code> 时默认就是 <code>env://</code>，于是走 <code>_env_rendezvous_handler</code>：读 <code>RANK</code>、<code>WORLD_SIZE</code>、<code>MASTER_ADDR</code>、<code>MASTER_PORT</code> 四个变量（<b>缺任何一个</b>都直接抛「environment variable X expected, but not set」），建/连 TCPStore，然后由 backend 建通信域。</p>
+  <p><code>dist.init_process_group(backend="nccl")</code> 不传 <code>init_method</code> 时默认就是 <code>env://</code>，于是走 <code>_env_rendezvous_handler</code>：读 <code>RANK</code>、<code>WORLD_SIZE</code>、<code>MASTER_ADDR</code>、<code>MASTER_PORT</code> 四个变量（<b>缺任何一个</b>都直接抛「environment variable X expected, but not set」），创建或连接 TCPStore，然后由 backend 创建 communicator。</p>
 
   <div class="tree"><pre><code>dist.init_process_group(backend="nccl")
   └─ init_method 为空 → 默认 "env://"                distributed_c10d.py
@@ -621,7 +621,7 @@ if __name__ == "__main__":
   <div class="two">
     <div class="card">
       <h4>为什么不要在脚本里手写 MASTER_ADDR</h4>
-      <p>常见做法是在脚本里写 <code>os.environ["MASTER_ADDR"]="127.0.0.1"</code> 作为「方便单机调试」的兜底 —— 在多节点上这会让每个节点的 rank 0 都去连自己的 localhost，形成若干个互不可见的独立分组，最典型的表现是 <b>torchrun 阻塞在 init_process_group 直到超时</b>。</p>
+      <p>常见做法是在脚本里写 <code>os.environ["MASTER_ADDR"]="127.0.0.1"</code> 作为「方便单机调试」的默认值 —— 在多节点上这会让每个节点的 rank 0 都去连自己的 localhost，形成若干个互不可见的独立分组，最典型的表现是 <b>torchrun 阻塞在 init_process_group 直到超时</b>。</p>
       <p>正确的单卡调试方式是：<code>python train.py</code> 时用 <code>getenv</code> 返回默认值，而不是覆盖环境变量。</p>
     </div>
     <div class="card">
@@ -653,7 +653,7 @@ if __name__ == "__main__":
     </div>
 
     <div class="err">
-      <h4>② rendezvous 超时 / 节点无法凑齐 quorum</h4>
+      <h4>② rendezvous 超时 / 节点无法满足 quorum</h4>
       <p class="msg">RendezvousTimeoutError · The node 'xxx' has failed to join the rendezvous 'none' in 900 seconds · RendezvousConnectionError: The connection to the C10d store has failed.</p>
       <ul>
         <li><b>先确认各节点是否都在运行、参数是否一致</b>：<code>--rdzv-id</code> 不同 → 各自创建新作业；<code>--nnodes</code> 不同 → 永远无法满足 quorum。</li>
@@ -669,7 +669,7 @@ if __name__ == "__main__":
       <ul>
         <li><b>这是「脚本不是由 torchrun 启动」的典型信号</b>：直接 <code>python train.py</code> 时不存在这些变量。</li>
         <li>脚本中不要用 <code>os.environ[...] = ...</code> 覆盖；确实需要调试时用 <code>os.environ.setdefault</code> 并配 <code>WORLD_SIZE=1</code>。</li>
-        <li>缺少 <code>LOCAL_RANK</code> 时，脚本里直接写 <code>os.environ["LOCAL_RANK"]</code> 会抛 KeyError，建议用 <code>getenv</code> 兜底为 0。</li>
+        <li>缺少 <code>LOCAL_RANK</code> 时，脚本里直接写 <code>os.environ["LOCAL_RANK"]</code> 会抛 KeyError，建议用 <code>getenv</code> 取默认值 0。</li>
         <li>自定义 launcher 或二次 fork 时最常见：父进程环境未透传。检查 <code>env_vars = os.environ.copy(); env_vars.update(worker_env)</code> 这条链路是否被中断。</li>
       </ul>
     </div>

@@ -8,9 +8,9 @@
 
 ## 1. 启动流程
 
-1. **参数解析 + `PET_*` 兜底**：每个 `--flag` 都注册了 `action=env`，命令行未提供时读取 `PET_<DEST>`（大写、下划线）。
+1. **参数解析 + `PET_*` 默认值**：每个 `--flag` 都注册了 `action=env`，命令行未提供时读取 `PET_<DEST>`（大写、下划线）。
    例如 `PET_NNODES=2 torchrun train.py` 等价于 `--nnodes=2`。
-2. **默认值兜底**（`run()`）：
+2. **为未提供的参数填默认值**（`run()`）：
    - `--standalone` → 强制 `rdzv_backend=c10d`、`rdzv_endpoint=localhost:0`、`rdzv_id=uuid4()`；
    - 否则若 `rdzv_backend=static` 且未提供 endpoint 且 `--nnodes` 最大值为 1 → 同样改为 `c10d / localhost:0`；
    - `master_port is None` → 填 `29500`。
@@ -39,9 +39,9 @@
 
 ## 3. rendezvous
 
-| backend | 裁判 | MASTER_ADDR/PORT 来源 |
+| backend | 谁承载 rendezvous | MASTER_ADDR/PORT 来源 |
 |---|---|---|
-| `static`（默认） | 由你指定：`--node-rank` 作为 rank，`--master-addr/--master-port` 作为 endpoint，rank 0 创建 TCPStore | 直接使用这两个参数 |
+| `static`（默认） | 由使用者指定：`--node-rank` 作为 rank，`--master-addr/--master-port` 作为 endpoint，rank 0 创建 TCPStore | 直接使用这两个参数 |
 | `c10d` | rendezvous store 自身（TCPStore/FileStore），支持 `min:max` elastic | rank 0 把 `MASTER_ADDR/MASTER_PORT` 写入 store，所有 rank 读到同一份（`RendezvousStoreInfo.build`） |
 | `etcd` / `etcd-v2` | 外部 etcd（需开 v2 API） | 同上 |
 

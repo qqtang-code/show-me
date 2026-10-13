@@ -209,7 +209,7 @@
       <li><b>为什么关心缓存层级</b>：decode 每生成一个 token，必须把「全部权重 + 该请求全部 KV」完整读一遍，算术强度只有 1–2 FLOP/Byte，远低于 GPU 的 roofline 拐点 —— 推理是<b>被访存带宽钉死的</b>。</li>
       <li><b>于是只有三条路</b>：少搬字节（量化/GQA/MLA）、少算一次（前缀复用）、把字节放到更近的层（KV 分层）。HiCache 和 Mooncake 做的是后两条。</li>
       <li><b>HiCache</b> 是 SGLang 进程内的缓存层级管理器：决定哪份 KV 待在哪一层（GPU / 主机 / 远端），负责提升、降级、预取、回写。</li>
-      <li><b>Mooncake</b> 是集群级的 KV 存储与传输基础设施：把全网 DRAM/SSD 聚合成共享池，是 HiCache 可选的 L3 后端之一，同时还是 PD 分离的默认传输后端。</li>
+      <li><b>Mooncake</b> 是集群级的 KV 存储与传输基础设施：把全网 DRAM/SSD 聚合成共享池，是 HiCache 可选的 L3 backend 之一，同时还是 PD 分离的默认传输 backend。</li>
       <li><b>记住这一条</b>：跨层搬运之所以成立，是因为它<b>永远比重算便宜</b>——10K token 从主机搬回约 20 ms，重算约 500 ms。</li>
     </ul>
   </div>
@@ -274,7 +274,7 @@
   <p class="hint" style="margin-top:14px">注意两个「L2」不是一回事：<b>GPU 硬件 L2</b> 是片上 40–50 MB SRAM（FlashAttention 关心的那层）；<b>推理语境里的 L2</b> 指主机 DRAM 缓存层。本文其余部分都用后者。</p>
 
   <h2 id="math">推导：一个 token 的 KV 到底占多少字节</h2>
-  <p class="hint">这个公式值得背下来，它决定了 L1 能装多少上下文、以及 L2/L3 值不值得开。</p>
+  <p class="hint">这个公式值得记住：它决定了 L1 能容纳多少上下文，以及 L2/L3 是否值得开启。</p>
 
   <div class="eq">
     <span class="kicker">MHA / GQA</span><br>
@@ -449,7 +449,7 @@
     <div class="w">✗「KV 放到主机内存就能提升吞吐」</div>
     <div class="r">要看命中率和访问模式。<b>用 L2 的 KV 服务 decode 是亏的</b>——PCIe 64 GB/s 对比 HBM 3.35 TB/s，
       每步都要读全部 KV 会把 TPOT 拖垮。L2/L3 的真正价值在 <b>prefill 复用</b>：
-      用一次 20 ms 的搬运换掉 500 ms 的重算。搞错这一点，就会得出「开了 HiCache 反而更慢」的结论。</div>
+      用一次 20 ms 的搬运换掉 500 ms 的重算。忽略这一点，就会得出「开了 HiCache 反而更慢」的结论。</div>
   </div>
 
   <div class="myth">
@@ -464,7 +464,7 @@
   <details>
     <summary>1. 用公式估算：40 层、8 个 KV 头、head_dim 128、bf16 的模型，64K 上下文的 KV 占多少显存？</summary>
     <div class="ans">2 × 8 × 128 × 40 × 2 B = <b>163840 B ≈ 160 KiB/token</b>。
-      64K 上下文 = 65536 × 160 KiB ≈ <b>10.5 GB</b>。一张 80 GB 卡上，权重之外能留给 KV 的空间就是这么被吃掉的。</div>
+      64K 上下文 = 65536 × 160 KiB ≈ <b>10.5 GB</b>。在 80 GB 的卡上，权重之外能留给 KV 的空间仅此规模。</div>
   </details>
 
   <details>

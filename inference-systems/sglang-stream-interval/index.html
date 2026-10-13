@@ -347,7 +347,7 @@ else:
       <tr><td class="k" data-label="输出长度">8192</td><td class="v" data-label="事件数">8192</td><td class="v" data-label="服务端 CPU">118.9 ms</td><td class="v" data-label="客户端 CPU">1332.4 ms</td><td class="v" data-label="合计">1451.3 ms</td><td class="v" data-label="SSE 字节">417.9 MiB</td></tr>
     </tbody>
   </table>
-  <p class="hint">放大到并发：128 并发 × 4096 token，单跑就是 <b>13.4 GiB</b> 的 SSE 字节和约 <b>44 s</b> 的客户端 CPU（341.6 ms × 128）。这些时间不与 GPU 重叠——它们趴在同一个单线程事件循环和同一条网络路径上。这就是「长输出 + 高并发」被流式管线吃掉的那一块。</p>
+  <p class="hint">放大到并发：128 并发 × 4096 token，单跑就是 <b>13.4 GiB</b> 的 SSE 字节和约 <b>44 s</b> 的客户端 CPU（341.6 ms × 128）。这些时间不与 GPU 重叠——它们趴在同一个单线程事件循环和同一条网络路径上。这就是「长输出 + 高并发」场景下被流式管线占用的那一部分时间。</p>
 
   <h2 id="when"><span class="n">06</span>什么时候无效：把它和你的实测对上</h2>
   <p>同一个 flag 在两种场景下结论相反，机制上完全自洽：</p>

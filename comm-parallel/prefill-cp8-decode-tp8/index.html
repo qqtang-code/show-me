@@ -164,7 +164,7 @@
       <li><b>CP 省的不是注意力 FLOPs。</b>TP8 每卡是 8192 行 × 8 头，CP8 每卡是 1024 行 × 64 头 —— 每卡 query×head 完全相同（都是 65,536）。注意力那 46 ms 的收益来自形状（64 个真头 vs 补到 64 的 8 个头），不是来自算得少。</li>
       <li><b>真正的收益来自「每卡行数」。</b>凡是按 token 重复、TP 切不动的算子 —— 超连接 mHC、LayerNorm、量化、indexer —— 在 CP8 下每卡只做 1/8 的行。<code>hc_combine</code> 的 kernel 网格是 <code>(m, …)</code>，m 就是行数：实测 mHC <b>136.77 → 13.06 ms</b>，与行数 8 倍差同比例。</li>
       <li><b>通信不是变多，是换了形态。</b>TP8 每层必须有注意力输出的 AllReduce（每卡只有 8 个头，必须跨卡求和）；CP8 每个 token 的输出在卡内就是完整的，那次 AllReduce 消失，只在 MoE 前换成一次 AllGather、MoE 后一次 ReduceScatter。实测通信 <b>349.51 → 275.71 ms</b>。</li>
-      <li><b>按权重算的部分一点没变。</b>MoE GEMM <b>55.14 → 54.98 ms</b>：MoE 前把 token 收齐（<code>deepseek_v4.py</code> 里的 <code>dsa_cp_gather_hidden_states</code>），每卡仍然把全部 8192 行喂进自己那份专家。CP 重排的是 per-token 工作，动不了 per-weight 工作。</li>
+      <li><b>按权重算的部分一点没变。</b>MoE GEMM <b>55.14 → 54.98 ms</b>：MoE 前用 AllGather 把 token 聚齐（<code>deepseek_v4.py</code> 里的 <code>dsa_cp_gather_hidden_states</code>），每卡仍然把全部 8192 行喂进自己那份专家。CP 重排的是 per-token 工作，动不了 per-weight 工作。</li>
       <li><b>代价是显存和一次运行时切片。</b>CP 模式下 tp=1，注意力权重整份复制到每卡（静态显存比例提到 0.74），decode 侧靠 <code>cp_decode_attn_tp.py</code> 现场切权重 + 重算 MXFP8 swizzled scale 换回 TP8 行为。</li>
       <li><b>换来的数字：</b>相对切换前一步，C8 输入吞吐 +27.1%、TTFT −34.5%、TPOT −15.8%；C32 输入 +37.9%、TTFT −35.5%、TPOT −24.3%（相对本轮起点分别为 +56.85% / +70.03%）。</li>
     </ul>
@@ -218,7 +218,7 @@ if hidden_states.shape[0] != 0:
     hidden_states, residual = layernorm(hidden_states, residual)
 if dsa_use_prefill_cp(forward_batch) or mla_use_prefill_cp(forward_batch):
     hidden_states = <span class="hl">dsa_cp_gather_hidden_states</span>(hidden_states)   <span class="cm"># 没有 all_reduce</span></code></pre>
-  <p>原因很直白：TP8 里每个 token 只有 1/8 个头在本卡算出来，输出必须跨卡求和才完整；CP8 里每个 token 的 64 个头都在拥有它的那张卡上算完，<b>不需要求和</b>。层内这样收口之后，MoE 前把行收齐、MoE 后把结果散射回去即可：</p>
+  <p>原因很直白：TP8 里每个 token 只有 1/8 个头在本卡算出来，输出必须跨卡求和才完整；CP8 里每个 token 的 64 个头都在持有该 token 的卡上算完，<b>不需要求和</b>。层内这样收口之后，MoE 前把行收齐、MoE 后把结果散射回去即可：</p>
   <pre><code><span class="cm"># srt/layers/communicator_dsa_cp.py</span>
 <span class="cm"># After using cp, the communication mode of this part changes.</span>
 <span class="cm"># The three parts of prepare_attn, prepare_mlp, and postprocess_layer</span>
@@ -228,7 +228,7 @@ def dsa_cp_reduce_scatter_hidden_states(hidden_states):
     hidden_states = hidden_states.tensor_split(cp_size)[cp_rank]   <span class="cm"># 先切好目标槽位</span>
     attn_cp_reduce_scatter_tensor(hidden_states, input_hidden_states)
     return hidden_states</code></pre>
-  <p>ReduceScatter 的目标切片提前 <code>tensor_split</code> 好了，所以归约的结果直接落在本卡那一行区间里，顺带把残差加也吃掉一次。</p>
+  <p>ReduceScatter 的目标切片提前 <code>tensor_split</code> 好了，所以 ReduceScatter 的结果直接落在本卡那一行区间里，同时把残差加也一并省掉。</p>
 
   <h3 class="mini">2.3 MoE 前把 token 收齐 —— 这决定了 MoE 不受益</h3>
   <pre><code><span class="cm"># srt/models/deepseek_v4.py · forward（CP 分支）</span>

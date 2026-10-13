@@ -1,6 +1,6 @@
 # PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流
 
-> 归档说明：2026-09-16 用 show-me 问「PP 适配 DFlash 做了什么改动」时只给了聊天回答，没有落盘；此文件由会话记录重建，代码片段与结论未改动，仅对内部标识做了脱敏。
+> 归档说明：2026-09-16 用 show-me 问「PP 适配 DFlash 做了什么改动」时只给了聊天回答，没有归档成文件；此文件由会话记录重建，代码片段与结论未改动，仅对内部标识做了脱敏。
 >
 > 学习增强版（前置知识、方案取舍、常见误解、自测题）见 [index.html](index.html)。
 
@@ -111,7 +111,7 @@ if pp_proxy_tensors is not None:
     # Refresh its activations now, even when attention metadata is ready.
 ```
 
-——**这和同项目里 PP+MTP 的 r37 补丁是同一类 bug**（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一个坑在 MTP 和 DFlash 上各踩了一次。
+——**这和同项目里 PP+MTP 的 r37 补丁是同一类 bug**（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一类错误在 MTP 和 DFlash 上各出现过一次。
 
 ## 四、配套的调度改动
 

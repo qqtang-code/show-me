@@ -136,7 +136,7 @@
       <li><b>核心手法</b>：不切分草稿模型，而是给它<b>伪造一个 world_size=1 的 PP 组</b>，让 6 层 draft 以为自己在 PP=1 下运行，整体待在第 0 段。</li>
       <li><b>真正的工作量</b>：设计两条跨阶段数据通道——aux hidden 沿 PP ring <b>去程累积</b>、投影结果沿 output ring <b>回程绕回</b>，并把 draft 状态装进信封穿环传递。</li>
       <li><b>代价</b>：草稿计算全部压在 PP0，PP0 明显更忙（busy 25.98s vs 其他段 21.8–23.3s），且 prefill 放弃图捕获。</li>
-      <li><b>顺便收获一个教训</b>：投机解码下按「请求数」切片张量是错的，必须按「token 行数」切——同一个坑在 PP+MTP 上已经踩过一次。</li>
+      <li><b>由此得到一条经验</b>：投机解码下按「请求数」切片张量是错误的，必须按「token 行数」切——同一类错误在 PP+MTP 上已经出现过一次。</li>
     </ul>
   </div>
 
@@ -276,14 +276,14 @@ sequenceDiagram
     代价也很清楚：负载会集中到一个阶段上（PP0 busy 25.98s vs 其他段 21.8–23.3s）。
   </p>
 
-  <h2>四、一个容易漏掉的正确性 bug</h2>
+  <h2 id="bug">四、一个容易漏掉的正确性 bug</h2>
 <pre class="diff"><span class="del">- return PPProxyTensors({k: v[: self.bs] for k, v in output.tensors.items()})</span>
 <span class="add">+ return PPProxyTensors({k: v[: self.raw_num_token] for k, v in output.tensors.items()})</span></pre>
   <p><strong>投机解码下一条请求产生 <code>block_size</code> 个 token 行，按请求数 <code>bs</code> 切片会丢行。</strong>以及 verify 的图预规划：</p>
 <pre><code>if pp_proxy_tensors is not None:
     # Verify planning precedes receipt of the preceding PP stage.
     # Refresh its activations now, even when attention metadata is ready.</code></pre>
-  <p>——<strong>这和同项目里 PP+MTP 的 r37 补丁是同一类 bug</strong>（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一个坑在 MTP 和 DFlash 上各踩了一次。</p>
+  <p>——<strong>这和同项目里 PP+MTP 的 r37 补丁是同一类 bug</strong>（pre-planned verify 路径遗漏 pp_proxy 填充，末段 CUDA graph 读到旧缓冲）。同一类错误在 MTP 和 DFlash 上各出现过一次。</p>
   <div class="pick">
     <h4>这类 bug 的共同形状</h4>
     「按请求数分配/切片」的假设在<b>非投机</b>场景下永远成立，所以它能活很久；一旦每个请求携带多个 token 行
@@ -340,7 +340,7 @@ if forward_batch.can_run_tbo or is_cp_v2_active(...):
     <div class="w">✗「按请求数切片和按 token 行数切片是一样的」</div>
     <div class="r">在非投机解码下确实一样（一个请求一行）。一旦进入 verify，一条请求就产生
       <code>block_size</code> 行——此时按 <code>bs</code> 切会<b>静默丢掉大部分激活值</b>。
-      这类 bug 不会崩溃，只会让结果悄悄变错，所以最值得警惕。</div>
+      这类 bug 不会崩溃，只会让结果静默变错，因此最值得警惕。</div>
   </div>
 
   <h2 id="quiz">自测</h2>

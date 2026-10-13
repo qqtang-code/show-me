@@ -331,7 +331,7 @@
     NVFP4 是 4 bit 浮点（E2M1）配 fp8 的块级 scale：权重的显存占用约为 bf16 的 <b>1/3.6</b>（每 16 个权重一个 scale 的额外开销）。
     这套 checkpoint 只把 <b>routed experts</b> 量化成 NVFP4，attention / shared expert / router / 3 个 dense 层保持 bf16
     （checkpoint 的 <code>ignore</code> 列表里有 231 条）。
-    <b>混精度不是偷懒，而是权衡</b>：专家占权重的大头（量化它省显存最多），而 attention 与 router 对数值精度更敏感（量化它掉点最多）。
+    <b>混精度不是省事的做法，而是权衡</b>：专家占权重的大头（量化它省显存最多），而 attention 与 router 对数值精度更敏感（量化它掉点最多）。
   </p>
 
   <h3 class="mini">⑤ CUDA Graph</h3>
@@ -550,7 +550,7 @@
 
   <p>
     这台机器<b>没有 NVLink</b>：8 张卡分处两组四卡 PCIe 组，跨组通信要过主机桥。前面算过，
-    每层两次 all-reduce、75 个 MoE 层 → <b>每轮 decode 上百次归约</b>，每次的载荷是
+    每层两次 all-reduce、75 个 MoE 层 → <b>每轮 decode 上百次 AllReduce</b>，每次的载荷是
     <code>行数 × hidden(6144) × 2B</code>。而「行数」在两种阶段差了一个数量级，这决定了它们走完全不同的路径：
   </p>
 
@@ -615,13 +615,13 @@
     <tbody>
       <tr><td class="k">尺寸下界</td><td class="v">P ≥ 16 MB</td><td>小消息上 2-stage 要多两个 barrier，延迟主导，量化省下的带宽抵不过同步开销。</td></tr>
       <tr><td class="k">尺寸上界</td><td class="v">P ≤ 100 MB</td><td>超大消息上手工内核打不过 NCCL 的成熟多 NIC / 多通道实现（实测 96 MiB 时反而更慢）。</td></tr>
-      <tr><td class="k">向量对齐</td><td class="v">n % 256 == 0</td><td>int8 内核按 256 元素向量化读取，不满足就回退 —— 否则会读到越界或触发慢路径。</td></tr>
+      <tr><td class="k">向量对齐</td><td class="v">n % 256 == 0</td><td>int8 内核按 256 元素向量化读取，不满足就回退 —— 否则会越界读取或触发 slow path。</td></tr>
       <tr><td class="k">捕获期拒绝</td><td class="v">CUDA graph capture 中直接回退</td><td><b>最关键的一条</b>：图捕获时内核不会真正执行，barrier 计数器被 replay 会读到陈旧值 → 死锁或算错。所以捕获期一律走 NCCL。</td></tr>
     </tbody>
   </table>
   <p class="hint">
     内核本身是「本地量化 → barrier → reduce-scatter → barrier → all-gather」的两阶段结构，
-    36 个 block × 512 线程，另有一个 tail-safe 变体处理不满向量的尾巴；异常一律兜底回退 NCCL 而不是抛错。
+    36 个 block × 512 线程，另有一个 tail-safe 变体处理不满向量的尾巴；任何异常都回退到 NCCL，而不是直接抛错。
     <b>这类改动的价值一半在快，一半在「任何异常都退回到已知正确路径」。</b>
   </p>
 
@@ -693,7 +693,7 @@
     </tbody>
   </table>
 
-  <h2 id="cap">容量账：这套配置能同时扛多少上下文</h2>
+  <h2 id="cap">容量账：这套配置能同时承载多少上下文</h2>
 
   <p>
     每卡显存被切成三块：<b>权重</b>（NVFP4 专家 + bf16 其余）、<b>KV 池</b>（fp8 MLA latent + indexer）、
@@ -825,7 +825,7 @@
   <details>
     <summary>6. 如果要把这套部署的吞吐再提高一档，你会先动哪个参数？为什么？</summary>
     <div class="ans">按「改动的收益 ÷ 风险」排序：① <b>提高前缀命中率</b>（把公共系统提示做成长前缀、复用同一段 RAG 文档）——
-      直接减少 prefill，几乎零风险；② <b>调大 chunk 与批上限</b>，但要盯 TPOT 与 KV 水位；
+      直接减少 prefill，几乎零风险；② <b>调大 chunk 与批上限</b>，但要同时关注 TPOT 与 KV 水位；
       ③ <b>继续压通信字节</b>（比如把量化 AR 的上下界按实际分布重新标定）；
       ④ <b>提高接受长度</b>（换更好的 draft、或按任务调 draft 步数），它直接乘在吞吐上。
       ——共同点是：<b>都在减少每轮要搬的字节或要算的 token，没人去动算力。</b></div>

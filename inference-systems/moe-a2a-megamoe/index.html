@@ -190,7 +190,7 @@
   </div>
 
   <h1>MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</h1>
-  <p class="sub">对着 SGLang 与 DeepGEMM 的源码，讲清三件事：MegaMoE 到底把哪些步骤塞进了一个 kernel；
+  <p class="sub">对着 SGLang 与 DeepGEMM 的源码，讲清三件事：MegaMoE 究竟把哪些步骤合并进了一个 kernel；
   <code>--moe-a2a-backend</code> 设与不设之间，跑的不是同一条路；以及「MoE 后端」和「MoE A2A 后端」为什么是两层正交的东西。</p>
 
   <div class="metarow">
@@ -214,7 +214,7 @@
   </div>
 
   <div class="tldr" id="tldr">
-    <p><span class="qt">一、MegaMoE 是一类「把 EP 通信塞进 GEMM 里」的内核设计，不是某一个内核</span>
+    <p><span class="qt">一、MegaMoE 是一类「把 EP 通信融合进 GEMM」的内核设计，而不是某一个内核</span>
     SGLang 里有两个同名的实现：<b>DeepGEMM 版</b>（<code>--moe-a2a-backend megamoe</code>，挂在 DeepSeek 系模型自己的 forward 里）和
     <b>FlashInfer 版</b>（<code>--moe-a2a-backend flashinfer_megamoe</code>，走标准 FusedMoE 注册表）。
     共同点是：<b>没有独立的 dispatch / combine kernel，没有 permute 索引张量，也没有 L2 输出再进 reduce 的那一步</b>。
@@ -259,7 +259,7 @@
           <td class="v" data-label="FlashInfer 版">模型无关，但架构要在白名单里（DeepseekV2/V3/V32/V4、GLM4-MoE、Nemotron、Qwen2/3-MoE）</td></tr>
       <tr><td class="k" data-label="项目">量化</td>
           <td class="v" data-label="DeepGEMM 版">FP8（SM90 与 SM100）<br>MXFP4 权重 W4A8<br>W4A4 <code>mxf4xmxf4</code>（--enable-w4a4-mxfp4-megamoe）</td>
-          <td class="v" data-label="FlashInfer 版">MXFP8 / ModelOpt NVFP4 / FP4-expert 检查点<br>（标准 FP8 MoE 检查点不支持）</td></tr>
+          <td class="v" data-label="FlashInfer 版">MXFP8 / ModelOpt NVFP4 / FP4-expert checkpoint<br>（标准 FP8 MoE checkpoint 不支持）</td></tr>
       <tr><td class="k" data-label="项目">硬条件</td>
           <td class="v" data-label="DeepGEMM 版">ep = tp；<code>SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK</code> ≥ 每 rank token 峰值；<br>DSV4 路径强制开启 chunked prefill</td>
           <td class="v" data-label="FlashInfer 版">SM100；<code>dp_size == tp_size</code> 且开 DP attention；<br>combine dtype 与 in-kernel fc2 reduce 互斥</td></tr>
@@ -282,7 +282,7 @@
       <span class="sub2">分配 / 命中对称缓冲区（缓存在 <code>_MEGA_MOE_SYMM_BUFFER</code>，键含 group id、形状、mma_type、num_sms）。</span>
       <span class="where">mega_moe.py:89-124</span></div></div>
     <div class="step"><div class="i">4</div><div class="t"><b>每层 forward</b>
-      <span class="sub2">路由 → pre-dispatch（量化 + 摊平到缓冲区）→ 一个 mega kernel（拉取 + L1 + 激活 + L2 + 推回 + 归约）→ 加共享专家。</span>
+      <span class="sub2">路由 → pre-dispatch（量化 + 摊平到缓冲区）→ 一个 mega kernel（拉取 + L1 + 激活 + L2 + 推回 + reduce）→ 加共享专家。</span>
       <span class="where">mega_moe.py:147-311</span></div></div>
   </div>
 
@@ -452,7 +452,7 @@ PDLTriggerSecondary()
   </div>
   <span class="src">mega_moe.py:259-286 · mega_moe_pre_dispatch.cuh:47-142, 186-234</span>
 
-  <div class="note"><b>这条路径踩过的坑（可作为版本体检项）：</b>FP4 的激活被按 E2M1 打包成宽度 1792（两值一字节），
+  <div class="note"><b>这条路径上出现过的问题（可作为版本体检项）：</b>FP4 的激活被按 E2M1 打包成宽度 1792（两值一字节），
   但校验仍按未打包的 3584 走，于是 W4A4 启动即报 <code>expected 3584 but got 1792</code>。
   修好之前这条 W4A4 路径是拿不到数据的 —— 只能退回 W4A8 评估。这说明两套 pre-dispatch 实现的接口约定必须对齐版本。</div>
 
@@ -527,7 +527,7 @@ PDLTriggerSecondary()
       <p>同一模型、同一 Low-Latency 配置，仅把 MoE 换成 MegaMoE（W4A8；W4A4 因上面那条打包 bug 起不来），
       六个测量点的总吞吐都低于原有 FlashInfer MXFP4 基线，16K→512 场景约低 31%–33%。</p>
       <p>但同一批数据里有一个方向性信号：<b>16K 高并发下 TPOT 反而更低</b>（并发 128 时 P50 低 22%）。这和「通信被融合进 GEMM」的预期一致 ——
-      Decode 阶段每 token 的通信占比高，融合的收益体现出来了；而 Prefill 段被 W4A8 的计算开销和排队吃掉了。</p>
+      Decode 阶段每 token 的通信占比高，融合的收益体现出来了；而 Prefill 段被 W4A8 的计算开销与排队掩盖了。</p>
       <p><b>怎么读这个结论：</b>这不是一次干净的 backend A/B（量化路径不同、部分点的总请求数也不同），所以只能当方向判断，
       不能当「MegaMoE 比 FlashInfer 慢 31%」的定论。要下定论得先把 W4A4 修好，再用相同请求数重跑。</p>
     </div>
@@ -599,7 +599,7 @@ final_hidden_states = self.dispatcher.combine(combine_input)     <span class="c"
           <td data-label="规则"><b>强制 = tp_size</b>，并打印一行 info。所有 A2A 后端都在这个集合里（含 megamoe、flashinfer_megamoe、pplx、deepep_v2…）。</td>
           <td class="v" data-label="出处">overrides.py:1634-1656<br>_A2A_EP_SPANNING_BACKENDS</td></tr>
       <tr><td class="k" data-label="被改写的东西">deepep_mode</td>
-          <td data-label="规则">auto 会被解析成具体值：mori → <code>normal</code>；pplx → <code>low_latency</code>；deepep + flashinfer_cutedsl → <code>low_latency</code>（否则 prefill 会崩）。</td>
+          <td data-label="规则">auto 会被解析成具体值：mori → <code>normal</code>；pplx → <code>low_latency</code>；deepep + flashinfer_cutedsl → <code>low_latency</code>（否则 prefill 会失败）。</td>
           <td class="v" data-label="出处">moe_hook.py:288-308, 455-461, 477-483</td></tr>
       <tr><td class="k" data-label="被改写的东西">CUDA graph</td>
           <td data-label="规则"><code>deepep_mode=normal</code> → prefill 和 decode 的图都关；<code>deepep_v2</code> → 只关 prefill（要读 host 计数）。</td>
@@ -760,7 +760,7 @@ final_hidden_states = self.dispatcher.combine(combine_input)     <span class="c"
           <td data-label="要点">dispatcher 退化空转；<br>权重与 token 缓冲都要先备好；<br>超限逐层回退（Kimi 系不回退）。</td></tr>
       <tr><td class="k" data-label="A2A 后端">flashinfer_<br>megamoe</td><td class="v" data-label="引擎 / 包">FlashInfer<br>moe_ep.MoEEpMegaLayer</td>
           <td data-label="布局与精度">MXFP8 / NVFP4 / FP4-expert；<br>combine dtype 可选 bf16/mxfp8/nvfp4</td>
-          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_FLASHINFER_<br>MEGAMOE_MAX_TOKENS_PER_RANK<br>(0 → 自动推导，兜底 1024)</td>
+          <td class="v" data-label="缓冲容量旋钮（默认）">SGLANG_FLASHINFER_<br>MEGAMOE_MAX_TOKENS_PER_RANK<br>(0 → 自动推导，fallback 为 1024)</td>
           <td data-label="要点">模型无关，但启动期校验架构+量化+拓扑；<br>要求 SM100；层状态必须预热，不能在捕获里懒建。</td></tr>
     </tbody>
   </table>
@@ -860,7 +860,7 @@ ValueError: moe_a2a_backend='pplx' requires --enable-dp-attention with at least 
 ValueError: FP8/MXFP8 Cutlass MoE is only supported with ep_size == 1
 ValueError: FlashInfer MegaMOE is only supported with dp_size == tp_size and --enable-dp-attention
 
-<span class="c"># 3) 容量类：能启动，但跑到大 batch 才炸（所以钩子里有提前校验）</span>
+<span class="c"># 3) 容量类：能启动，但到大批量才失败（所以 hook 里做了提前校验）</span>
 ValueError: DeepEP v2 per-rank prefill budget exceeds SGLANG_DEEPEP_V2_NUM_MAX_DISPATCH_TOKENS_PER_RANK:
             required=8192, capacity=128. ...
 ValueError: num_tokens (...) exceeds max_num_tokens (...)      <span class="c"># flashinfer 工作区</span>

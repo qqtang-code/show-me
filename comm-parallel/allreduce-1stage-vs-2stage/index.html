@@ -211,7 +211,7 @@
     <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>comm-parallel<span class="sep">/</span>allreduce-1stage-vs-2stage
   </div>
   <h1>1-stage → 2-stage AllReduce：省下的是 4 倍字节</h1>
-  <p class="sub">8 卡 PCIe 服务器（无 NVLink）· TP8 · 单次归约 kernel 907 → 222.6 μs，端到端 1k/4k C64 <span class="mono">847.82 → 1358.47 tok/s</span></p>
+  <p class="sub">8 卡 PCIe 服务器（无 NVLink）· TP8 · 单次 AllReduce kernel 907 → 222.6 μs，端到端 1k/4k C64 <span class="mono">847.82 → 1358.47 tok/s</span></p>
   <div class="metarow">
     <span>2026-09-15</span><span>AllReduce</span><span>张量并行</span><span>通信优化</span>
     <span>PCIe</span><span>投机解码</span><span>Amdahl</span>
@@ -557,7 +557,7 @@
 
   <details>
     <summary>5. 为什么说 1-stage 是 O(N·P)、2-stage 是 O(2P)？后者为什么与 TP 无关？</summary>
-    <div class="ans">1-stage 每个 rank 要收齐其他所有人的完整载荷，(N−1) 份，随 N 线性增长。
+    <div class="ans">1-stage 每个 rank 要收集其他所有 rank 的完整载荷，(N−1) 份，随 N 线性增长。
       2-stage 把载荷先切成 N 份，每个 rank 在 scatter 和 gather 两阶段各只经手 (N−1) 份<b>小块</b>，
       合起来是 2(N−1)/N·P —— N 变大时 (N−1)/N → 1，<b>总量趋近 2P</b>，与 N 无关。</div>
   </details>
@@ -565,7 +565,7 @@
   <h2 id="read">延伸阅读</h2>
   <ul class="links">
     <li><a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html" target="_blank" rel="noopener">NCCL · Collectives 文档</a>
-      <span class="why">AllReduce / ReduceScatter / AllGather 的官方定义与算法选择逻辑，想搞清楚生产库怎么按消息大小分流就看这里。</span></li>
+      <span class="why">AllReduce / ReduceScatter / AllGather 的官方定义与算法选择逻辑，介绍生产库按消息大小分流的算法选择逻辑。</span></li>
     <li><a href="http://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/" target="_blank" rel="noopener">Bringing HPC Techniques to Deep Learning（ring all-reduce 图解）</a>
       <span class="why">经典长文，用手绘图讲清 ring 结构为什么能做到带宽最优 —— 理解「2(N−1)/N·P 下界」的最佳读物。</span></li>
     <li><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang / RadixAttention 论文</a>
