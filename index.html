@@ -70,7 +70,7 @@
 <div class="wrap">
   <h1>show-me 知识库</h1>
   <p class="sub">每次 <code>/show-me</code> 产出的图解与概念解释归档于此。一篇一个目录：<code>index.html</code> 是产物本体，<code>meta.json</code> 是元数据，纯文字回答存 <code>notes.md</code>。</p>
-  <p class="statline"><span>10 篇图解</span><i></i><span>2 个分类</span><i></i><span>最近更新 2026-09-24</span></p>
+  <p class="statline"><span>11 篇图解</span><i></i><span>3 个分类</span><i></i><span>最近更新 2026-10-13</span></p>
 
   <div class="controls">
     <div class="searchwrap">
@@ -289,9 +289,31 @@ const ENTRIES = [
     "extra_files": [
       "allreduce-infographic.png"
     ]
+  },
+  {
+    "title": "torchrun 是怎么把一次命令变成 N 个训练进程的",
+    "slug": "torchrun-launch-internals",
+    "category": "tooling",
+    "date": "2026-10-13",
+    "tags": [
+      "torchrun",
+      "torchelastic",
+      "rendezvous",
+      "TCPStore",
+      "DDP",
+      "分布式训练",
+      "源码走读",
+      "容错重启"
+    ],
+    "one_liner": "沿着 torch.distributed.run → elastic_launch → LocalElasticAgent 这条链把 torchrun 拆开：第 2 步就把单节点命令悄悄改成 c10d+localhost:0，rank 不是参数算出来的而是 rendezvous 排出来的（RANK = GROUP_RANK×LOCAL_WORLD_SIZE+LOCAL_RANK），注入给 worker 的是一个 13 项的环境变量字典而不是命令行参数，而 --master-addr/--master-port/--node-rank 只在 static 模式下有效 —— c10d 模式下训练 store 的地址由 rendezvous 现场商定并广播；--max-restarts 重启的是整个 worker group，且成员变更不消耗额度。",
+    "artifact": "index.html",
+    "_dir": "tooling/torchrun-launch-internals",
+    "extra_files": [
+      "notes.md"
+    ]
   }
 ];
-const CATS = {"inference-systems": "推理系统", "comm-parallel": "通信与并行"};
+const CATS = {"inference-systems": "推理系统", "comm-parallel": "通信与并行", "tooling": "工具与方法"};
 const state = { q: "", tag: null };
 
 function matches(e) {

@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>torchrun 是怎么把一次命令变成 N 个训练进程的</title>
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px;
+       overflow-wrap:anywhere}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7d8aa3}
+  pre .hl{color:#b23a10;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  tr.hot td{background:#fff7f2}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none}
+    tr.hot td{background:none}
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+
+  /* ---------- 管线示意 ---------- */
+  .pipe{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:18px 0 6px}
+  .stage{flex:1 1 160px;min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;
+         padding:12px 13px 11px;position:relative}
+  .stage .sn{font:600 10.5px var(--mono);color:#94a3b8;letter-spacing:.08em}
+  .stage .st{font-weight:700;font-size:13.5px;color:var(--ink);margin:2px 0 6px;line-height:1.35}
+  .stage .sw{font-size:12.5px;color:var(--dim);line-height:1.6;margin:0;padding-left:0;list-style:none}
+  .stage .sw li{margin:0 0 3px;padding-left:9px;position:relative}
+  .stage .sw li::before{content:'·';position:absolute;left:0;color:#b6c0d0}
+  .stage .tag{display:inline-block;font:10.5px var(--mono);color:#4d5b73;background:#f1f4fa;
+              border:1px solid #e2e8f2;border-radius:999px;padding:1px 7px;margin-top:7px}
+  .stage.hot{border-color:#f0cdb8;background:#fffaf6}
+  .stage.hot .sw li.big{color:#b23a10;font-weight:600}
+  .stage .badge{position:absolute;top:9px;right:10px;font:600 9.5px var(--mono);letter-spacing:.06em;
+                color:#fff;background:#b23a10;border-radius:999px;padding:2px 7px}
+  .pipelinewrap{overflow-x:auto}
+  .arrowline{display:flex;gap:10px;flex-wrap:wrap;margin:2px 0 0;font:11px var(--mono);color:#a8b2c2}
+  @media (max-width:640px){
+    .stage{flex:1 1 100%}
+  }
+
+  /* ---------- 图表卡（lieflat Mono · 作用域化） ---------- */
+  .chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;min-width:0}
+  .chartcard h2{border:0;padding:0;margin:0 0 3px;font-size:16.5px;font-weight:700;letter-spacing:-.02em;color:#1C1C1A}
+  .chartcard .csub{font-size:11.5px;color:#8F8E88;margin:0 0 14px;line-height:1.55}
+  .chartcard .csrc{font-size:9.5px;color:#C6C5BF;margin-top:10px;letter-spacing:.08em;font-weight:500;line-height:1.6}
+  .chartwrap{overflow-x:auto}
+  .chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+  .chartcard svg text{font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+  @media (max-width:640px){
+    .chartcard{padding:22px 20px 16px}
+    .chartcard svg{min-width:400px}
+  }
+  /* MONO.MOTION.css（原样，无 :root/body 规则） */
+  .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+  @keyframes pop{from{transform:scale(0)}to{transform:none}}
+  .fade{animation:fade .9s ease both}
+  @keyframes fade{from{opacity:0}}
+  .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (prefers-reduced-motion:reduce){
+    .pop,.fade{animation:none}
+    .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+  }
+
+  /* 图 + 读法 双栏 */
+  .figrow{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;margin:18px 0 6px}
+  .figrow > .read{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .read h4{margin:0 0 8px;font:600 12.5px var(--mono);color:var(--dim);letter-spacing:.04em}
+  .read ul{margin:0;padding-left:17px}
+  .read li{font-size:13.5px;color:#3b4860;margin:7px 0;line-height:1.62}
+  .read li b{color:var(--ink)}
+  .read .num{font-family:var(--mono);color:#12489c;font-size:12.8px}
+  @media (max-width:860px){ .figrow{grid-template-columns:1fr} }
+
+  .callout{border-left:3px solid var(--accent);background:#fff;border-radius:0 10px 10px 0;
+           padding:12px 16px;margin:16px 0;font-size:14px;color:#3b4860}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout b{color:var(--ink)}
+  .srcline{font:12px var(--mono);color:var(--dim2);background:#fff;border:1px solid var(--line);
+           border-radius:8px;padding:10px 12px;margin:12px 0;overflow-x:auto;white-space:nowrap}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+
+<style>
+  /* ---------- 本页新增组件（与全站同色） ---------- */
+  @media (max-width:640px){
+    .pciegroup{flex-wrap:wrap;min-width:0}
+    .prow .lbl{min-width:0;flex:1 0 100%}
+  }
+  /* ---------- 流程步骤 ---------- */
+  .flow{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  /* 流程步骤：编号圆点 + 正文两列（.flow 的容器规则在共用块里） */
+  .flow .step{display:grid;grid-template-columns:26px minmax(0,1fr);gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52;min-width:0}
+  .flow .step .t b{color:var(--ink)}
+  .flow .step .t .sub2{display:block;color:var(--dim);font-size:13px;margin-top:3px}
+  .flow .step .t .where{font:11.5px var(--mono);color:var(--dim2);margin-top:4px;display:block;overflow-wrap:anywhere}
+  .tree{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0;overflow-x:auto}
+  .tree pre{background:none;border:0;padding:0;margin:0}
+  .two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin:16px 0}
+  @media (max-width:760px){.two{grid-template-columns:minmax(0,1fr)}}
+  .card{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px 16px}
+  .card h4{margin:0 0 8px;font:600 12.5px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .card ul{margin:0;padding-left:17px}
+  .card li{font-size:13.5px;color:#3b4860;margin:5px 0}
+  .card p{margin:6px 0;font-size:13.5px;color:#3b4860}
+  .kv{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
+  .kv code{font-size:11.5px}
+  .lane{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px 16px;margin:16px 0}
+  .lane .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:7px 0;min-width:0}
+  .lane .lb{font:11.5px var(--mono);color:var(--dim2);min-width:92px;flex:none}
+  .lane .n{font:11.5px var(--mono);padding:4px 9px;border-radius:6px;border:1px solid #cfd8e8;background:#f7f9ff;color:#1b2740}
+  .lane .n.a{background:#e8eefb;border-color:#b9cdf0}
+  .lane .n.b{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .lane .w{font:11.5px var(--mono);color:var(--dim2);flex:none}
+  .errs{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin:16px 0}
+  .err{border:1px solid var(--line);border-left:3px solid #d9534f;border-radius:10px;background:var(--panel);padding:12px 15px}
+  .err h4{margin:0 0 6px;font:600 12.5px var(--mono);color:#a5322e}
+  .err .msg{font:11.5px/1.6 var(--mono);background:#fdf3f2;border:1px solid #f3dcd9;border-radius:7px;
+            padding:6px 9px;color:#7a2a26;margin:0 0 8px;overflow-x:auto}
+  .err ul{margin:0;padding-left:17px}
+  .err li{font-size:13px;color:#3b4860;margin:4px 0}
+  .err li b{color:var(--ink)}
+  table.cmp{font-size:13px}
+  table.cmp td.v{white-space:normal}
+  details{margin:12px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px 15px}
+  summary{cursor:pointer;font-size:13.5px;font-weight:600;color:var(--ink)}
+  details[open] summary{margin-bottom:8px}
+  details p{font-size:13.5px;color:#3b4860}
+  .calc{border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:12px;padding:15px 17px;margin:16px 0}
+  .calc .ctr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  @media (max-width:620px){.calc .ctr{grid-template-columns:minmax(0,1fr)}}
+  .calc label{display:block;font:11.5px var(--mono);color:var(--dim2);margin-bottom:5px}
+  .calc input[type=range]{width:100%;accent-color:var(--accent)}
+  .calc .out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
+  @media (max-width:620px){.calc .out{grid-template-columns:minmax(0,1fr)}}
+  .calc .o{background:#fff;border:1px solid var(--accent-line);border-radius:9px;padding:9px 11px}
+  .calc .o .k{font:11px var(--mono);color:var(--dim2)}
+  .calc .o .v{font:600 17px/1.3 var(--mono);color:var(--accent)}
+  .calc .note{font-size:12.5px;color:var(--dim);margin:12px 0 0}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
+  .chip{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;border-radius:6px;padding:3px 8px;color:#3f4c63}
+  .chip b{color:var(--ink)}
+  code.hl{background:#e8f0ff;color:#0f3f9c;border:1px solid #d3e0fb}
+  .callout{border:1px solid #f0e0bd;background:#fffaf0;border-radius:10px;padding:12px 15px;margin:14px 0}
+  .callout p{margin:4px 0;font-size:13.5px;color:#5a4a25}
+  .callout b{color:#7a5c14}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me</a><span class="sep">/</span>
+    <a href="../../index.html#tooling">tooling</a><span class="sep">/</span>
+    <span>torchrun-launch-internals</span>
+  </div>
+
+  <h1><code>torchrun</code> 是怎么把一次命令变成 N 个训练进程的</h1>
+
+  <div class="metarow">
+    <span>2026-10-13</span><span>torchrun</span><span>torchelastic</span><span>rendezvous</span><span>DDP</span><span>源码走读</span>
+  </div>
+
+  <p class="lead">你敲下 <code>torchrun --nproc-per-node=8 train.py</code>，最后跑起来的是 8 个各自持有一张卡的 Python 进程，它们能互相找到、能组成一个 process group、挂了还能被拉起来。中间发生的事全部在 <code>torch.distributed.run</code> 和它下面的 torchelastic 里：<b>解析参数 → 每台机器起一个 agent → agent 用 rendezvous 给所有节点排座次 → agent 按座次给每个 worker 拼一份环境变量 → 用 <code>subprocess.Popen</code> 把它们生出来 → 循环监控、失败就整组重启</b>。这一页把这条链路拆开，每个结论都指到源码里的那一行。</p>
+
+  <div class="nav">
+    <a href="#tldr">结论</a>
+    <a href="#map">谁是谁</a>
+    <a href="#flow">启动流程 9 步</a>
+    <a href="#rdzv">rendezvous</a>
+    <a href="#env">环境变量</a>
+    <a href="#agent">守护与重启</a>
+    <a href="#initpg">init_process_group</a>
+    <a href="#cmd">命令行示例</a>
+    <a href="#code">脚本适配</a>
+    <a href="#pit">踩坑排查</a>
+  </div>
+
+  <h2 id="tldr"><span class="n">01</span>结论</h2>
+  <div class="tldr">
+    <h4>TL;DR</h4>
+    <ul>
+      <li><b>torchrun 自己不跑训练，也不做通信。</b>它只是一个 launcher：进程里跑的是 <code>elastic_launch</code> → <code>LocalElasticAgent</code>，agent 再 <code>Popen</code> 出真正的训练进程。torchrun 退出 = agent 退出 = 所有 worker 被 <code>killpg</code> 收走。</li>
+      <li><b>真正的 rank 不是参数算出来的，是 rendezvous 排出来的。</b>每台机器的 agent 带着 <code>(min_nodes, max_nodes, nproc_per_node)</code> 去 rendezvous 报到，拿到一个 <b>group_rank</b>（节点的座次）和 <b>group_world_size</b>（本轮节点数），然后 <code>global_rank = group_rank × local_world_size + local_rank</code>。所以 rank 在重启后会变。</li>
+      <li><b><code>--master-addr/--master-port/--node-rank</code> 只在 <code>--rdzv-backend=static</code>（默认）下有效</b>；<code>--rdzv-backend=c10d</code> 下会被忽略甚至告警，<code>MASTER_ADDR/MASTER_PORT</code> 改由 rendezvous 现场商定。</li>
+      <li><b>注入给 worker 的是完整的环境变量字典</b>（<code>RANK/WORLD_SIZE/LOCAL_RANK/MASTER_ADDR/MASTER_PORT/…</code>），不是命令行参数。脚本里 <code>dist.init_process_group()</code> 无参就能跑，靠的就是它默认走 <code>env://</code>。</li>
+      <li><b><code>--max-restarts</code> 重启的是「整个 worker group」</b>，不是坏掉的那个 worker：任一 worker 挂掉 → 所有节点的 worker 全被杀 → 重新 rendezvous → 全部用新 rank 重开。<b>不存 checkpoint 就等于白丢</b>。</li>
+    </ul>
+  </div>
+
+  <h2 id="map"><span class="n">02</span>谁是谁：六个角色</h2>
+  <p>先分清这几个东西，后面所有细节才挂得住。<code>torchrun</code> 是 <code>torch.distributed.run</code> 的 console script，两者完全等价（<code>python -m torch.distributed.run</code> 也行）。它启动后，进程里做的第一件正事是构造 <code>LaunchConfig</code> 并调用 <code>elastic_launch</code>。</p>
+
+  <table class="cmp">
+    <thead><tr><th>角色</th><th>进程数</th><th>它负责什么</th><th>关键代码</th></tr></thead>
+    <tbody>
+      <tr><td class="k">torchrun</td><td class="v">每节点 1</td><td>解析参数、把 <code>PET_*</code> 环境变量并进参数、构造 <code>LaunchConfig</code>、调 <code>elastic_launch</code></td><td class="v">run.py: config_from_args / run</td></tr>
+      <tr><td class="k">LocalElasticAgent</td><td class="v">每节点 1</td><td>代表这台机器参与 rendezvous、分配 rank、给每个 worker 拼环境变量、<code>Popen</code>、监控、重启</td><td class="v">local_elastic_agent.py</td></tr>
+      <tr><td class="k">RendezvousHandler</td><td class="v">对象，非进程</td><td>决定「本轮谁参加、一共几个节点、你是几号」，返回一份 <code>RendezvousInfo</code></td><td class="v">static_tcp_rendezvous.py / dynamic_rendezvous.py</td></tr>
+      <tr><td class="k">TCPStore</td><td class="v">1 个 server</td><td>rendezvous 的强一致 KV 存储；rank 0 那台机器上被 agent 承包，多租户复用</td><td class="v">c10d_rendezvous_backend.py / TCPStore.cpp</td></tr>
+      <tr><td class="k">Worker（训练进程）</td><td class="v">每节点 nproc</td><td>真正 import 你的 <code>train.py</code>、调 <code>init_process_group</code>、建 NCCL 通信域</td><td class="v">你写的脚本</td></tr>
+      <tr><td class="k">ProcessGroup(NCCL)</td><td class="v">每进程 1</td><td>worker 之间真正的集合通信；它连的 store 和 rendezvous 的 store 是两个东西</td><td class="v">distributed_c10d.py</td></tr>
+    </tbody>
+  </table>
+
+  <div class="tree"><pre><code>torchrun  (python)                                  ← 你敲的命令
+  └─ main() → run(args)                              run.py
+       ├─ 参数兜底：--standalone / nnodes==1 且无 endpoint
+       │    → rdzv_backend=c10d, rdzv_endpoint=localhost:0, rdzv_id=uuid4()
+       ├─ config_from_args(args)                     run.py
+       │    ├─ parse_min_max_nnodes("1:4") → (1, 4)
+       │    ├─ determine_local_world_size("gpu") → 8
+       │    ├─ rdzv_configs["rank"] = args.node_rank  (仅 static)
+       │    ├─ get_rdzv_endpoint() → "master_addr:master_port" (仅 static)
+       │    └─ cmd = sys.executable, cmd_args = ["-u", "train.py", ...]
+       └─ elastic_launch(config, entrypoint=cmd)(*cmd_args)
+            └─ launch_agent()                        launcher/api.py
+                 ├─ RendezvousParameters(...) → get_rendezvous_handler()
+                 ├─ WorkerSpec(role, local_world_size=nproc, master_addr/port)
+                 └─ LocalElasticAgent(spec).run()    elastic/agent/server/
+                      ├─ _invoke_run()               ← 守护循环
+                      │    ├─ _initialize_workers()
+                      │    │    ├─ _rendezvous()     ← 拿到 group_rank / world_size
+                      │    │    │    ├─ handler.next_rendezvous()
+                      │    │    │    └─ _assign_worker_ranks(store, ...)
+                      │    │    └─ _start_workers()  ← 拼 env + Popen
+                      │    ├─ _monitor_workers()     ← 每 monitor_interval 轮询
+                      │    └─ _restart_workers()     ← 失败且还有余额时
+                      └─ _exit_barrier()             ← 等其它节点也跑完</code></pre></div>
+
+  <h2 id="flow"><span class="n">03</span>启动流程：从命令行到 8 个进程</h2>
+  <p>下面九步对应源码里从 <code>run(args)</code> 到 <code>Popen</code> 的真实顺序。第 5 步的 <code>monitor_interval</code> 和 <code>start_method</code> 用的是默认值 <code>0.1s / spawn</code>。</p>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t"><b>解析参数，并用 <code>PET_*</code> 环境变量兜底</b>
+      <span class="sub2">每个 <code>--flag</code> 都注册了 <code>action=env</code>：命令行没给就看 <code>PET_FLAG</code>（下划线转连字符、大写）。所以 <code>PET_NNODES=2 torchrun train.py</code> 等价于 <code>--nnodes=2</code>。</span>
+      <span class="where">run.py: get_args_parser() · torch/distributed/argparse_util.py: class env</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t"><b>给默认值兜底，决定 rendezvous 怎么走</b>
+      <span class="sub2">① <code>--standalone</code> → 强制 <code>c10d / localhost:0 / uuid4</code>；② 没写 endpoint 且 <code>--nnodes</code> 最大值是 1 → 同样悄悄换成 <code>c10d / localhost:0</code>；③ <code>master_port</code> 为 <code>None</code> 时填 <code>29500</code>。</span>
+      <span class="where">run.py: run()  —  所以单机单节点不写任何 rdzv 参数也不会撞 29500</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t"><b>算出节点数与每节点进程数</b>
+      <span class="sub2"><code>parse_min_max_nnodes("1:4") → (1,4)</code>；<code>determine_local_world_size</code> 支持 <code>auto/cpu/gpu/xpu/int</code>，<code>gpu</code> 取 <code>torch.cuda.device_count()</code>。若 <code>nproc_per_node &gt; 1</code> 且 <code>OMP_NUM_THREADS</code> 未设，torchrun 会替你设成 <code>1</code> 并打一条大告警。</span>
+      <span class="where">run.py: parse_min_max_nnodes / determine_local_world_size / config_from_args</span></div></div>
+    <div class="step"><div class="i">4</div><div class="t"><b>拼出 <code>LaunchConfig</code> 和 worker 的启动命令</b>
+      <span class="sub2">命令 = <code>sys.executable -u train.py &lt;剩余参数原文&gt;</code>（<code>-u</code> 保证日志不缓冲；<code>PYTHON_EXEC</code> 可覆盖解释器；<code>-m</code> 走模块）。<b>注意：这里没有 rank 相关参数</b>，rank 全走环境变量。</span>
+      <span class="where">run.py: config_from_args 末尾  —  仅当老式 <code>use_env=False</code> 才追加 <code>--local-rank=</code></span></div></div>
+    <div class="step"><div class="i">5</div><div class="t"><b>构造 handler 与 agent</b>
+      <span class="sub2"><code>get_rendezvous_handler(params)</code> 按字符串查注册表（<code>static/c10d/etcd/etcd-v2</code>，插件可扩展），再连同 <code>WorkerSpec</code> 一起塞进 <code>LocalElasticAgent</code>。</span>
+      <span class="where">launcher/api.py: launch_agent() · elastic/rendezvous/registry.py</span></div></div>
+    <div class="step"><div class="i">6</div><div class="t"><b>等所有节点到齐 —— rendezvous</b>
+      <span class="sub2">每台机器一个 agent 去 rendezvous 报到。静态模式就是「连 rank0 的 TCPStore」；c10d/etcd 模式是「一轮一轮 join，凑够 <code>min_nodes</code> 且到 deadline 就成团」。回来的是 <code>group_rank</code> 与 <code>group_world_size</code>。</span>
+      <span class="where">agent: _rendezvous() → handler.next_rendezvous()</span></div></div>
+    <div class="step"><div class="i">7</div><div class="t"><b>把座次摊成每个 worker 的 global_rank</b>
+      <span class="sub2"><code>global_rank = group_rank × local_world_size + local_rank</code>。默认（非 identical）走 store 慢路径：各 agent 写 <code>torchelastic/role_info/&lt;group_rank&gt;</code>，group_rank 0 算好后写回 <code>assigned_ranks/&lt;i&gt;</code>，其余 agent 阻塞 <code>get</code> 等结果。</span>
+      <span class="where">agent: _assign_worker_ranks()  —  快路径需 TORCH_ELASTIC_WORKER_IDENTICAL=1</span></div></div>
+    <div class="step"><div class="i">8</div><div class="t"><b>为每个 worker 生成一份环境变量字典</b>
+      <span class="sub2">13 个变量一次写全（见下一节），其中 <code>LOCAL_RANK</code>、<code>RANK</code>、<code>WORLD_SIZE</code>、<code>MASTER_ADDR/PORT</code> 是分布式初始化的全部输入。有 <code>CUDA_VISIBLE_DEVICES</code> 就原样继承，不切割。</span>
+      <span class="where">agent: _start_workers() 的 worker_env 构造 + _set_local_rank_env()</span></div></div>
+    <div class="step"><div class="i">9</div><div class="t"><b>真正 fork/exec 出进程并进入监控循环</b>
+      <span class="sub2"><code>entrypoint</code> 是字符串 → <code>SubprocessContext</code> → 每 rank 一个 <code>subprocess.Popen(args, env=父环境+worker_env, start_new_session=True)</code>，退出时 <code>os.killpg</code> 整组杀。（只有当你用 python API 传函数时才会走 <code>torch.multiprocessing</code>，那时 <code>--start-method</code> 才生效。）</span>
+      <span class="where">elastic/multiprocessing/__init__.py: start_processes → SubprocessContext → SubprocessHandler._popen</span></div></div>
+  </div>
+
+  <div class="callout">
+    <p><b>一个容易误解的点：</b><code>--start-method</code>（<code>spawn/fork/forkserver</code>）对 torchrun 命令行路径<b>不起作用</b>。<code>start_processes</code> 只看 <code>entrypoint</code> 的类型：字符串 → <code>SubprocessContext</code>（<code>Popen</code>），只有函数才 → <code>MultiprocessContext</code>（<code>torch.multiprocessing</code>）。torchrun 传进来的永远是解释器路径这个字符串。</p>
+  </div>
+
+  <h2 id="rdzv"><span class="n">04</span>rendezvous：rank 是谁定的</h2>
+  <p><code>--rdzv-backend</code> 决定用哪个 <code>RendezvousHandler</code> 实现，三者的差别只在「谁当裁判」和「能不能弹性」：</p>
+
+  <table class="cmp">
+    <thead><tr><th>模式</th><th>触发方式</th><th>裁判是谁</th><th>合适场景</th></tr></thead>
+    <tbody>
+      <tr><td class="k">static</td><td class="v">默认值</td><td>你自己：<code>--node-rank</code> + <code>--master-addr/--master-port</code> 直接喂进去，<code>rank=node_rank</code>、<code>world_size=max_nodes</code>，rank0 起一个 <code>TCPStore(is_master=True)</code>，别人连它</td><td class="v">节点数固定、脚本化调度（k8s Job / Slurm）</td></tr>
+      <tr><td class="k">c10d</td><td class="v"><code>--rdzv-backend=c10d --rdzv-endpoint=host:port</code></td><td>一个 rendezvous 存储本身（TCPStore / FileStore）。支持 <code>min:max</code> 弹性、动态成员变更、<code>--standalone</code> 也用它</td><td class="v">多机、需要容错与弹性扩容</td></tr>
+      <tr><td class="k">etcd / etcd-v2</td><td class="v"><code>--rdzv-backend=etcd-v2 --rdzv-endpoint=...</code></td><td>外部 etcd（必须开 v2 API）。功能等价 c10d，<code>etcd</code> 已进维护模式</td><td class="v">已有 etcd 集群的存量环境</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">三种模式下 <code>MASTER_ADDR / MASTER_PORT</code> 从哪来</h3>
+  <div class="lane">
+    <div class="row"><span class="lb">static</span><span class="n a">--master-addr</span><span class="w">+</span><span class="n a">--master-port</span><span class="w">→</span><span class="n b">handler 直接用</span><span class="w">→</span><span class="n">env: MASTER_ADDR/PORT</span></div>
+    <div class="row"><span class="lb">c10d / etcd</span><span class="n a">rendezvous 成团</span><span class="w">→</span><span class="n">rank0 在 store 里写 <code>MASTER_ADDR/MASTER_PORT</code></span><span class="w">→</span><span class="n b">所有 rank 读同一份</span><span class="w">→</span><span class="n">env</span></div>
+    <div class="row"><span class="lb">端口的坑</span><span class="n">rank0 会另找一个空闲端口给训练用 store，并在 store 里广播</span><span class="w">≠</span><span class="n">rdzv-endpoint 的 29400</span></div>
+  </div>
+  <p class="hint">这就是「c10d 模式下你改 <code>--master-port</code> 没用」的根源：那两个值在 c10d 路径里由 rendezvous 现场商定并写进 store（<code>RendezvousStoreInfo.build()</code>，rank0 用 <code>get_free_port()</code> 或共享 TCPStore 的真实端口），<code>--master-addr/--master-port</code> 只被 <code>spec.master_addr or rdzv_info.bootstrap_store_info.master_addr</code> 这一行当作可选的覆盖项读取。</p>
+
+  <h3 class="mini">c10d 一轮 rendezvous 里到底发生了什么</h3>
+  <div class="flow">
+    <div class="step"><div class="i">a</div><div class="t"><b>先参加上一轮的「离场」</b><span class="sub2">每轮开始先跑一次 exit op，把自己从上一轮的 participants 里摘出去。<b>心跳（heartbeat）</b>决定一个节点是否还活着；心跳过期的节点会被判定退出。</span><span class="where">dynamic_rendezvous.py: next_rendezvous → _RendezvousExitOp</span></div></div>
+    <div class="step"><div class="i">b</div><div class="t"><b>再 join 本轮，等 quorum</b><span class="sub2">人数 <code>≥ min_nodes</code>、<code>≤ max_nodes</code>，且到达 <code>deadline</code> 才「成团」（complete）。<code>--rdzv-conf=timeout=...</code> 控制这个等待窗口。已经满员的后来者先挂 <b>wait_list</b>，满太久就进 <b>redundancy_list</b> 等着替补。</span><span class="where">dynamic_rdzv.py: _RendezvousJoinOp</span></div></div>
+    <div class="step"><div class="i">c</div><div class="t"><b>成团后拿到自己的号</b><span class="sub2"><code>rank, world_size = self._get_world()</code> —— 这就是前面的 <code>group_rank</code> 与 <code>group_world_size</code>。</span><span class="where">dynamic_rdzv.py: next_rendezvous 末尾</span></div></div>
+    <div class="step"><div class="i">d</div><div class="t"><b>顺带把训练用的 store 地址广播出去</b><span class="sub2">rank0 建（或复用）一个 TCPStore，把 <code>MASTER_ADDR/MASTER_PORT</code> 写进 store；所有 rank 读同一份 → 这就是 <code>RendezvousStoreInfo</code>。它的存在让每个 worker 不必自己再起一个 store server。</span><span class="where">rdzv_api.py: RendezvousStoreInfo.build</span></div></div>
+  </div>
+
+  <div class="callout">
+    <p><b>弹性（elasticity）的语义就藏在这里：</b>节点数写成 <code>--nnodes=1:4</code> 时，多来的节点排进 wait_list，等下一轮成团；<code>HEALTHY</code> 状态下 agent 每次轮询都会看 <code>rdzv_handler.num_nodes_waiting()</code>，只要有人排队，就<b>主动重启整个 worker group</b>（成员变更不计入 restart 次数）。</p>
+    <p>代价说明写在官方文档里：<b>成员一变，所有存活的 worker 立刻被杀</b>，新的一轮用新的 <code>RANK</code> 和 <code>WORLD_SIZE</code> 重开。所以 world_size 会变，不能写死，rank→数据的映射也必须在重启后重建。</p>
+  </div>
+
+  <h2 id="env"><span class="n">05</span>注入给 worker 的环境变量：13 个 + 例外</h2>
+  <p>这是整条链路里最值得背下来的一张表 —— <code>_start_workers()</code> 里那个 <code>worker_env</code> 字典就是它，逐字对应。此外还有几个只在特定开关下出现、容易踩坑的变量，单列在后面。</p>
+
+  <table class="cmp">
+    <thead><tr><th>变量</th><th>值 / 含义</th><th>谁在用</th></tr></thead>
+    <tbody>
+      <tr><td class="k">LOCAL_RANK</td><td class="v">本机第几个 worker，0..nproc-1。配 <code>torch.cuda.set_device</code> / <code>device_ids</code> 用</td><td class="v">你的脚本；<code>DDP</code></td></tr>
+      <tr><td class="k">RANK</td><td class="v">全局座次 = <code>group_rank × local_world_size + local_rank</code></td><td class="v"><code>env://</code> rendezvous</td></tr>
+      <tr><td class="k">WORLD_SIZE</td><td class="v">全局进程总数 = 节点数 × nproc_per_node</td><td class="v"><code>env://</code> rendezvous</td></tr>
+      <tr><td class="k">LOCAL_WORLD_SIZE</td><td class="v">等于 <code>--nproc-per-node</code></td><td class="v">data loader 分片</td></tr>
+      <tr><td class="k">GROUP_RANK</td><td class="v">本机在集群里的编号（通常就是 node rank）</td><td class="v">日志、按节点分工</td></tr>
+      <tr><td class="k">GROUP_WORLD_SIZE</td><td class="v">本轮的节点数 = rendezvous 给的 <code>world_size</code></td><td class="v">诊断</td></tr>
+      <tr><td class="k">ROLE_NAME / ROLE_RANK / ROLE_WORLD_SIZE</td><td class="v">角色名（默认 <code>default</code>）与该角色内的序号/总数。单角色时 role_rank == rank</td><td class="v">多角色作业</td></tr>
+      <tr><td class="k">MASTER_ADDR</td><td class="v">rank0 的地址：static 下来自 <code>--master-addr</code>，否则来自 rendezvous 广播</td><td class="v"><code>env://</code> rendezvous</td></tr>
+      <tr><td class="k">MASTER_PORT</td><td class="v">同一个 store 的端口</td><td class="v"><code>env://</code> rendezvous</td></tr>
+      <tr><td class="k">TORCHELASTIC_RESTART_COUNT</td><td class="v">本 worker group 已经重启了几次；<b>写进日志最省事</b></td><td class="v">你</td></tr>
+      <tr><td class="k">TORCHELASTIC_MAX_RESTARTS</td><td class="v"><code>--max-restarts</code> 的值</td><td class="v">你</td></tr>
+      <tr><td class="k">TORCHELASTIC_RUN_ID</td><td class="v">本次作业 id（<code>--rdzv-id</code>，standalone 时是 uuid4）</td><td class="v">日志目录命名</td></tr>
+      <tr><td class="k">TORCHELASTIC_USE_AGENT_STORE</td><td class="v">"True" 时 worker 复用 agent 的 TCPStore，而不是自己再起一个 server</td><td class="v">distributed_c10d</td></tr>
+      <tr><td class="k">TORCH_NCCL_ASYNC_ERROR_HANDLING</td><td class="v">agent 会透传（默认注入 "1"）</td><td class="v">NCCL 卡死检测</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">三个例外，都不是 torchrun 主动设的</h3>
+  <div class="two">
+    <div class="card">
+      <h4>OMP_NUM_THREADS</h4>
+      <p>只在 <code>nproc_per_node &gt; 1</code> 且父环境没设时，torchrun 会在 <b>config_from_args</b> 里把 <code>os.environ["OMP_NUM_THREADS"]="1"</code>，然后经由 <code>Popen</code> 的环境继承传下去（<code>_start_workers</code> 里再显式拷一次）。</p>
+      <p>N 卡跑 N 个进程时如果不设，每个进程默认起满线程 → 争抢 CPU，吞吐反而掉。</p>
+    </div>
+    <div class="card">
+      <h4>TORCHELASTIC_TIMER_FILE</h4>
+      <p>只有你显式设了 <code>TORCHELASTIC_ENABLE_FILE_TIMER=1</code>，agent 才会建一个命名管道做「worker 还活着吗」的本地看门狗，并把管道路径塞进 worker 环境。</p>
+      <p>用得上它的场景：NCCL 卡死的集合通信（desync），进程还在但不推进。</p>
+    </div>
+    <div class="card">
+      <h4>VT_ / PET_ / MASTER_* 的继承</h4>
+      <p>worker 的环境 = <b>父进程环境全量拷贝 + 上表覆盖</b>（<code>env_vars = os.environ.copy(); env_vars.update(env)</code>）。</p>
+      <p>所以你在 shell 里 <code>export</code> 的 <code>NCCL_*</code>、<code>CUDA_VISIBLE_DEVICES</code>、<code>PYTHONPATH</code> 都会带进去；反过来，父进程里 stale 的 <code>MASTER_ADDR</code> 会被正确覆盖，但 <b>stale 的 <code>LOCAL_RANK</code></b> 之类只会在 worker 自己 fork 子进程时添乱。</p>
+    </div>
+    <div class="card">
+      <h4>PYTHON_EXEC</h4>
+      <p><code>cmd = os.getenv("PYTHON_EXEC", sys.executable)</code>：想强制用别的解释器（比如带特定 CUDA 版本的 venv），设这个变量比改 PATH 更可靠。</p>
+      <p>注意 <code>--no-python</code> 会跳过解释器直接执行脚本，此时 <code>--module</code> 会直接报错。</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>细节：CUDA_VISIBLE_DEVICES 到底有没有被改？</summary>
+    <p>传统模式（默认）<b>不切割</b>：<code>_set_local_rank_env</code> 只把父进程的 <code>CUDA_VISIBLE_DEVICES</code> 原样拷给 worker，<code>LOCAL_RANK</code> 给真实序号。所以 8 卡机器上 8 个进程都能看到 8 张卡，靠 <code>torch.cuda.set_device(LOCAL_RANK)</code> 各就各位 —— 这也是「忘了 set_device 时 8 个进程全挤在 GPU0」的原因。</p>
+    <p><code>--virtual-local-rank</code> 是另一套：每个 worker 的 <code>LOCAL_RANK</code> 都设成 0，并把 <code>CUDA_VISIBLE_DEVICES</code> 收紧成它那一张卡（ROCm 下同时设 <code>HIP_VISIBLE_DEVICES</code>）。适合那些写死 <code>cuda:0</code> 的老代码，但注意它和 <code>LOCAL_RANK</code> 语义假设会打架。</p>
+  </details>
+
+  <h2 id="agent"><span class="n">06</span>进程管理与容错：谁在看着谁</h2>
+  <p>agent 的主循环 <code>_invoke_run()</code> 长这样（去掉了日志和指标）：</p>
+  <pre><code><span class="cm"># elastic/agent/server/api.py: SimpleElasticAgent._invoke_run()</span>
+_initialize_workers(worker_group)          <span class="cm"># rendezvous + 拼 env + Popen</span>
+while True:
+    time.sleep(monitor_interval)           <span class="cm"># 默认 0.1 s</span>
+    run_result = _monitor_workers(worker_group)
+    state = run_result.state
+
+    if state == SUCCEEDED:
+        _exit_barrier()                    <span class="cm"># 等其它节点的 agent 也跑完</span>
+        return run_result
+    elif state in {UNHEALTHY, FAILED}:
+        if self._remaining_restarts &gt; 0:
+            self._remaining_restarts -= 1
+            _restart_workers(worker_group) <span class="cm"># 停全组 → 重新 rendezvous → 全组重开</span>
+        else:
+            _stop_workers(worker_group)
+            return run_result              <span class="cm"># 交给上层抛 ChildFailedError</span>
+    elif state == HEALTHY:
+        if rdzv_handler.num_nodes_waiting() &gt; 0:
+            _restart_workers(worker_group) <span class="cm"># 弹性：有人排队 → 成员变更，不计次</span></code></pre>
+
+  <div class="lane">
+    <div class="row"><span class="lb">kill 语义</span><span class="n">Popen(start_new_session=True)</span><span class="w">→</span><span class="n b">os.killpg(pid, SIGTERM)</span><span class="w">→</span><span class="n">等 shutdown_timeout（默认 30s）</span><span class="w">→</span><span class="n">SIGKILL</span></div>
+    <div class="row"><span class="lb">「全组」</span><span class="n">本机是 killpg；</span><span class="n a">跨节点靠 store 里的集体状态</span><span class="w">→</span><span class="n">任一节点重启，其它节点看到 rendezvous 变化后跟着重启</span></div>
+    <div class="row"><span class="lb">退出</span><span class="n">worker 全成功</span><span class="w">→</span><span class="n">_exit_barrier()</span><span class="w">→</span><span class="n">在 store 上 bar，等所有 agent 到齐（默认 300s）</span></div>
+  </div>
+
+  <h4 class="micro">Root cause 是怎么被找出来的</h4>
+  <p>子进程启动时设了 <code>TORCHELASTIC_ERROR_FILE</code> 指向一个临时 json；只要你的 main 被 <code>@record</code> 装饰，异常与 traceback 就会被写进去。agent 收集各 rank 的错误文件，<b>按时间戳取最早的那个</b>当 root cause，汇总成一条错误报告，并且把这份错误文件的内容复制到 launcher 自己的错误文件上 —— 所以最后你看到的是「第一个真正出错的那个 rank」，而不是一串级联失败。</p>
+
+  <div class="callout">
+    <p><b>失败模式对照（官方文档的原话翻译）：</b>worker 失败 → 全组停、重启，最多 <code>max_restarts</code> 次；agent 失败 / 节点掉线 → 等于本机 worker group 失败，由 job manager 决定是 kill 整个作业（gang 语义）还是换节点；<b>重启后 rank 不稳定</b>，本地 worker 可能被分到完全不同的 rank 区间，所以「rank 0 才存盘」这种假设在重启后会错乱，标准做法是每个 rank 都存、或者只按 <code>RANK==0</code> 存但保证幂等。</p>
+  </div>
+
+  <h2 id="initpg"><span class="n">07</span>worker 侧：<code>init_process_group</code> 怎么接上这份环境变量</h2>
+  <p><code>dist.init_process_group(backend="nccl")</code> 不传 <code>init_method</code> 时默认就是 <code>env://</code>，于是走 <code>_env_rendezvous_handler</code>：读 <code>RANK</code>、<code>WORLD_SIZE</code>、<code>MASTER_ADDR</code>、<code>MASTER_PORT</code> 四个变量（<b>缺任何一个</b>都直接抛「environment variable X expected, but not set」），建/连 TCPStore，然后由 backend 建通信域。</p>
+
+  <div class="tree"><pre><code>dist.init_process_group(backend="nccl")
+  └─ init_method 为空 → 默认 "env://"                distributed_c10d.py
+       └─ _env_rendezvous_handler()                   torch/distributed/rendezvous.py
+            ├─ rank       = int(os.environ["RANK"])
+            ├─ world_size = int(os.environ["WORLD_SIZE"])
+            ├─ master_addr=     os.environ["MASTER_ADDR"]
+            ├─ master_port= int(os.environ["MASTER_PORT"])
+            └─ _create_c10d_store(master_addr, master_port, ...)
+                 ├─ TORCHELASTIC_USE_AGENT_STORE=True 且就是 agent 自己的 addr:port
+                 │     → 所有 rank 都只做 client（server 由 agent 承包）
+                 └─ 否则 rank0 建 TCPStore(is_master=True, multi_tenant=True)
+       └─ ProcessGroupNCCL(...)  ← 这里才真正建 NCCL 通信域、开始 all-reduce</code></pre></div>
+
+  <p>几个由此推出的实践结论：</p>
+  <div class="two">
+    <div class="card">
+      <h4>agent 的 store ≠ 训练用的 store</h4>
+      <p>rendezvous 用的 store 承担「谁来了、你是几号」；训练用的是同一个 TCPStore 服务器（多租户命名空间隔离，<code>PrefixStore</code> 前缀 <code>torch.rendezvous.&lt;run_id&gt;</code>），也可能由 rank0 的 worker 另起一个端口。</p>
+      <p>所以「MASTER_PORT 被占用」和「rdzv-endpoint 被占用」是两件不同的事，报错位置也不同。</p>
+    </div>
+    <div class="card">
+      <h4>为什么 <code>device_id=</code> 值得带</h4>
+      <p><code>init_process_group(device_id=torch.device("cuda", LOCAL_RANK))</code> 会让 NCCL 通信域<b>立刻</b>初始化（而不是第一次集合通信时懒加载），错误在初始化处就暴露，而不是在第一个 all-reduce 变成超时。</p>
+      <p>PyTorch 2.6 起，不传 backend 时也会用 <code>device_id</code> 推断后端（cuda→nccl）。</p>
+    </div>
+  </div>
+
+  <h2 id="cmd"><span class="n">08</span>命令行示例与常用参数</h2>
+
+  <h4 class="micro">单机 8 卡</h4>
+  <pre><code>torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py --bs 32 --lr 1e-4</code></pre>
+  <p class="hint">最省心的一种：<code>--standalone</code> 让 torchrun 自动选一个空闲端口（<code>localhost:0</code>）并生成 uuid 作 rdzv_id。等价的显式写法是 <code>--rdzv-backend=c10d --rdzv-endpoint=localhost:0</code>。不写 <code>--standalone</code> 且 nnodes 最大值为 1 时，torchrun 也会自动走到同样的路径。</p>
+
+  <h4 class="micro">多机 4 节点 × 8 卡（static，节点数固定）</h4>
+  <pre><code><span class="cm"># 在 node0 上（node_rank=0 是 rank0 所在节点，必须能被其它节点访问到）</span>
+torchrun --nnodes=4 --nproc-per-node=8 \
+         --node-rank=0 --master-addr=10.0.0.1 --master-port=29500 \
+         train.py --bs 32
+
+<span class="cm"># node1 / node2 / node3：只有 --node-rank 不同</span>
+torchrun --nnodes=4 --nproc-per-node=8 \
+         --node-rank=1 --master-addr=10.0.0.1 --master-port=29500 \
+         train.py --bs 32</code></pre>
+  <p class="hint">static 模式下每个节点的 <code>--node-rank</code> 必须互不相同且从 0 连续；<code>--master-addr</code> 写 node0 的地址（FQDN 或 IP，IPv6 用 <code>[::1]</code> 形式）。所有节点的其它参数、脚本参数必须完全一致。</p>
+
+  <h4 class="micro">多机 + 容错（c10d，最多重启 3 次）</h4>
+  <pre><code>torchrun --nnodes=4 --nproc-per-node=8 \
+         --rdzv-backend=c10d --rdzv-endpoint=node0.example.com:29400 \
+         --rdzv-id=my-job-20261013 --max-restarts=3 \
+         train.py --bs 32</code></pre>
+  <p class="hint">所有节点跑<b>同一条命令</b>（没有 node_rank 之分）。<code>--rdzv-id</code> 必须同一个作业一致 —— 它是 store 里的命名空间，写错会让两个作业互相看不见或互相串味。<code>--rdzv-endpoint</code> 省略端口时默认 <code>29400</code>。</p>
+
+  <h4 class="micro">弹性（节点数 1..4，成员变更也算作业的一部分）</h4>
+  <pre><code>torchrun --nnodes=1:4 --nproc-per-node=8 \
+         --rdzv-backend=c10d --rdzv-endpoint=node0.example.com:29400 \
+         --rdzv-id=my-job-20261013 --max-restarts=3 \
+         train.py --bs 32</code></pre>
+
+  <h4 class="micro">同一台机器并行跑多个作业</h4>
+  <pre><code>torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
+         --nnodes=1 --nproc-per-node=4 train.py     <span class="cm"># 端口 0 = 让内核挑</span></code></pre>
+  <p class="hint">两个作业若共用同一个 MASTER_PORT，会出现「互相当成同一组的成员」这种最难查的故障 —— 症状是 world_size 对不上或 rank 重复。用 <code>:0</code> 或给每个作业分配不同端口。</p>
+
+  <h4 class="micro">参数速查</h4>
+  <table class="cmp">
+    <thead><tr><th>参数</th><th>默认</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="k">--nnodes</td><td class="v">1:1</td><td>节点数，或 <code>MIN:MAX</code> 区间。<code>MIN&lt;MAX</code> 即开启弹性</td></tr>
+      <tr><td class="k">--nproc-per-node</td><td class="v">1</td><td>每节点进程数，支持 <code>auto/cpu/gpu/xpu/int</code>；多机场景所有节点必须一致</td></tr>
+      <tr><td class="k">--node-rank</td><td class="v">0</td><td><b>仅 static</b>：本节点编号</td></tr>
+      <tr><td class="k">--master-addr / --master-port</td><td class="v">127.0.0.1 / 29500</td><td><b>仅 static</b>：rank0 地址与 store 端口</td></tr>
+      <tr><td class="k">--rdzv-backend</td><td class="v">static</td><td><code>static / c10d / etcd-v2 / etcd</code></td></tr>
+      <tr><td class="k">--rdzv-endpoint</td><td class="v">空</td><td><code>host:port</code>；static 下不写则回落到 <code>master_addr:master_port</code></td></tr>
+      <tr><td class="k">--rdzv-id</td><td class="v">none</td><td>作业命名空间，同作业所有节点一致</td></tr>
+      <tr><td class="k">--rdzv-conf</td><td class="v">空</td><td>透传给 handler 的 KV，如 <code>timeout=900,join_timeout=...</code></td></tr>
+      <tr><td class="k">--standalone</td><td class="v">false</td><td>单机一键：自动 <code>c10d + localhost:0 + uuid</code></td></tr>
+      <tr><td class="k">--max-restarts</td><td class="v">0</td><td>worker group 最多重启次数；<b>0 表示挂了就整体退出</b></td></tr>
+      <tr><td class="k">--monitor-interval</td><td class="v">0.1</td><td>轮询 worker 状态的间隔（秒）</td></tr>
+      <tr><td class="k">--rdzv-backend 相关超时</td><td class="v">900s</td><td><code>LaunchConfig</code> 里 rdzv timeout 的默认值，可用 <code>--rdzv-conf=timeout=</code> 覆盖</td></tr>
+      <tr><td class="k">--tee / --redirects / --log-dir</td><td class="v">0</td><td>把各 rank 的 stdout/stderr 落到 <code>log_dir/&lt;local_rank&gt;/{stdout,stderr}.log</code>；<code>--tee 3</code> 同时打屏并加 <code>[default3]:</code> 前缀</td></tr>
+      <tr><td class="k">--local-ranks-filter</td><td class="v">空</td><td>只让指定 local rank 的日志上屏（文件仍全写）</td></tr>
+      <tr><td class="k">--log-line-prefix-template</td><td class="v">[${role_name}${local_rank}]:</td><td>可用宏 <code>${role_name} ${local_rank} ${rank} ${hostname}</code>；多机排障建议改成 <code>"${hostname}:${rank}: "</code></td></tr>
+      <tr><td class="k">--numa-binding</td><td class="v">None</td><td>把 worker 绑到离它那张卡近的 CPU 上（多 NUMA 机器上有效）</td></tr>
+      <tr><td class="k">--virtual-local-rank</td><td class="v">false</td><td>每个 worker 的 LOCAL_RANK 都是 0，同时收紧 CUDA_VISIBLE_DEVICES</td></tr>
+      <tr><td class="k">-m / --no-python / --run-path</td><td class="v">—</td><td>按模块跑 / 直接执行非 Python 脚本 / 同解释器内 runpy 执行</td></tr>
+      <tr><td class="k">--print-completion</td><td class="v">—</td><td>输出 bash/zsh/tcsh 补全脚本（需 <code>shtab</code>）</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">所有 <code>--flag</code> 都能用 <code>PET_&lt;FLAG&gt;</code> 环境变量给默认值（下划线、大写）。容器编排里把参数放环境变量、把镜像 entrypoint 固定成 <code>torchrun</code> 是常见做法。</p>
+
+  <h2 id="code"><span class="n">09</span>训练脚本要改什么：最小可运行示例</h2>
+  <p>脚本侧只有三件事必须做对：<b>读 <code>LOCAL_RANK</code> 并选卡、无参 <code>init_process_group</code>、用 <code>DDP</code> 包模型并让 DataLoader 按 rank 分片</b>。</p>
+
+  <pre><code><span class="cm"># train.py —— torchrun 直接跑这个文件</span>
+import os, torch, torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.distributed.elastic.multiprocessing.errors import record
+
+<span class="cm"># 1) 分布式训练必须用 DDP：每个进程一张卡</span>
+def setup():
+    <span class="cm"># LOCAL_RANK 由 torchrun 注入；单卡调试时回落到 0</span>
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)          <span class="cm"># ← 漏了这句 8 个进程全挤 GPU0</span>
+
+    <span class="cm"># 2) 无参初始化：RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT 全部来自 torchrun</span>
+    dist.init_process_group(
+        backend="nccl",
+        device_id=torch.device("cuda", local_rank),   <span class="cm"># 立即建通信域，错误早暴露</span>
+        timeout=__import__("datetime").timedelta(minutes=30),
+    )
+    <span class="cm"># 或者显式：dist.init_process_group("nccl", init_method="env://")</span>
+    return dist.get_rank(), dist.get_world_size()
+
+@record                                    <span class="cm"># 让 root cause 带完整 traceback</span>
+def main():
+    rank, world_size = setup()
+    is_main = rank == 0
+
+    model = MyModel().to(rank)
+    model = DDP(model, device_ids=[rank])   <span class="cm"># device_ids=LOCAL_RANK，output_device 同理</span>
+
+    dataset = MyDataset()
+    <span class="cm"># 3) 数据分片：sampler 负责让每个 rank 看到不重叠的子集</span>
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    loader = DataLoader(dataset, batch_size=32, sampler=sampler,
+                        num_workers=4, pin_memory=True)
+
+    for epoch in range(NUM_EPOCHS):
+        sampler.set_epoch(epoch)            <span class="cm"># ← 漏了这句每个 epoch 的分片顺序都一样</span>
+        for x, y in loader:
+            x, y = x.to(rank, non_blocking=True), y.to(rank, non_blocking=True)
+            loss = model(x, y)
+            loss.backward()
+            optimizer.step(); optimizer.zero_grad(set_to_none=True)
+
+        <span class="cm"># 4) 容错：任何 rank 都可能被重启，checkpoint 必须可重复写</span>
+        save_checkpoint_atomic(model, optimizer, epoch, path=CKPT)
+        dist.barrier()
+
+    if is_main:
+        print("done", rank, world_size)
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+  <div class="two">
+    <div class="card">
+      <h4>为什么不要手写 MASTER_ADDR</h4>
+      <p>很多人习惯在脚本里 <code>os.environ["MASTER_ADDR"]="127.0.0.1"</code> 兜底「方便单机调试」—— 这在多节点上会让每个节点的 rank0 都去连自己的 localhost，于是形成若干个互相看不见的孤岛，最典型的症状是 <b>torchrun 卡在 init_process_group 直到 timeout</b>。</p>
+      <p>正确的单卡调试方式是 <code>python train.py</code> 时用 <code>getenv</code> 返回默认值，而不是覆盖 env。</p>
+    </div>
+    <div class="card">
+      <h4>rank → 卡 的映射规则</h4>
+      <p>torchrun <b>不</b>帮你设 current device，只给 <code>LOCAL_RANK</code>。是否调 <code>set_device</code> 完全由脚本决定，这也是「设备不对」（NCCL 报 invalid device / 显存爆在 GPU0）最常见的原因。</p>
+      <p>习惯写法：<code>device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))</code>，之后所有 <code>.to(device)</code> 都用它。</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>PyTorch 2.0 起的 <code>--local-rank</code> 变化（老脚本会在这里炸）</summary>
+    <p>2.0 之前 torchrun 会往命令行里塞 <code>--local_rank=N</code>（下划线）；2.0 起改成 <code>--local-rank=N</code>（连字符），<b>并且只在 <code>use_env=False</code> 的老式路径下才注入</b> —— 现在默认全程走环境变量，压根不加这个参数。</p>
+    <p>如果你的 argparse 只注册了 <code>--local_rank</code>，而某个环境又注入了连字符版本，会报 <code>unrecognized arguments: --local-rank=N</code>。兼容写法：<code>parser.add_argument("--local-rank", "--local_rank", type=int)</code>。新脚本建议直接只用环境变量。</p>
+  </details>
+
+  <h2 id="pit"><span class="n">10</span>踩坑与排查</h2>
+  <p>下面每一条都给了<b>典型报错原文的关键片段</b>（括号里是它出现在哪一层）和排查顺序，按「看到什么 → 先查什么」排列。</p>
+
+  <div class="errs">
+    <div class="err">
+      <h4>① 端口占用 / 两个作业串成一组</h4>
+      <p class="msg">Address already in use · The server socket on ...:29500 has failed to bind (TCPStore, rank0) · Timed out after 300 seconds waiting for clients. 4/8 clients joined.</p>
+      <ul>
+        <li><b>先分清是哪个端口</b>：<code>MASTER_PORT</code>（训练 store）与 <code>--rdzv-endpoint</code>（29400，rendezvous store）。两者都可能被占。</li>
+        <li><code>lsof -i :29500</code> / <code>ss -ltnp | grep 29400</code> 看是不是上个作业没退干净；<code>pkill -f torchrun</code> 后重试。</li>
+        <li>同机多作业：用 <code>--standalone</code> 或 <code>--rdzv-endpoint=localhost:0</code> 让内核挑端口，别手工分配。</li>
+        <li><b>「clients joined 卡在中途」通常不是端口，是节点之间的网络</b>：某些节点根本没连上 store。先在每台机器上 <code>nc -vz &lt;master_addr&gt; &lt;port&gt;</code>。</li>
+      </ul>
+    </div>
+
+    <div class="err">
+      <h4>② rendezvous 超时 / 节点对不齐</h4>
+      <p class="msg">RendezvousTimeoutError · The node 'xxx' has failed to join the rendezvous 'none' in 900 seconds · RendezvousConnectionError: The connection to the C10d store has failed.</p>
+      <ul>
+        <li><b>先看每个节点是否都在跑、参数是否一致</b>：<code>--rdzv-id</code> 不同 = 各自开新作业；<code>--nnodes</code> 不同 = 永远凑不齐 quorum。</li>
+        <li>rank0 地址不可达：<code>--master-addr/--rdzv-endpoint</code> 用了容器内的 <code>127.0.0.1</code>、或用了没做反向解析的短主机名。用 IP 或 FQDN，并在每台机器验证可达。</li>
+        <li>时间不同步（NTP）会让心跳判定错乱，表现为随机节点被踢出；多机环境先确认时钟同步。</li>
+        <li>调大等待窗口：<code>--rdzv-conf=timeout=1800</code>；排查阶段把 <code>--monitor-interval</code> 调小没关系，但真正影响成团的是 rdzv timeout。</li>
+      </ul>
+    </div>
+
+    <div class="err">
+      <h4>③ 环境变量没设对 → 初始化直接失败</h4>
+      <p class="msg">ValueError: Error initializing torch.distributed using env:// rendezvous: environment variable RANK expected, but not set  (或 WORLD_SIZE / MASTER_ADDR / MASTER_PORT)</p>
+      <ul>
+        <li><b>这是「脚本没被 torchrun 启动」的经典信号</b>：直接 <code>python train.py</code> 就没有这些变量。</li>
+        <li>脚本里不要自己 <code>os.environ[...] = ...</code> 覆盖；确需调试就 <code>os.environ.setdefault</code> + <code>WORLD_SIZE=1</code>。</li>
+        <li>缺 <code>LOCAL_RANK</code> 时脚本若写了 <code>os.environ["LOCAL_RANK"]</code> 会 KeyError，建议 <code>getenv</code> 兜底为 0。</li>
+        <li>自定义 launcher / 二次 fork 时最常见：父进程的环境没透传，检查 <code>env_vars = os.environ.copy(); env_vars.update(worker_env)</code> 这条链路是否被你自己打断。</li>
+      </ul>
+    </div>
+
+    <div class="err">
+      <h4>④ rank 分配与「谁来存盘」假设冲突</h4>
+      <p class="msg">现象：重启后 <code>TORCHELASTIC_RESTART_COUNT</code> 涨了，但 checkpoint 目录被另一个 rank 覆盖 / 恢复时 world_size 对不上</p>
+      <ul>
+        <li>rank 在重启与成员变更后<b>不稳定</b>，官方明确要求不要对 rank 的稳定性、以及 rank 与 local_rank 的相关性做任何假设。</li>
+        <li>弹性开启时 <code>WORLD_SIZE</code> 会变，checkpoint 里要记录 world_size 与 shard 方案，恢复时按新 world_size 重切。</li>
+        <li>只在 <code>RANK==0</code> 存盘要配原子写（写 tmp + <code>os.replace</code>），否则半个文件会被当成有效 checkpoint。</li>
+        <li>在日志里打印 <code>TORCHELASTIC_RESTART_COUNT</code> 与 <code>TORCHELASTIC_RUN_ID</code>，很多「数据重复」的问题一打印就现形。</li>
+      </ul>
+    </div>
+
+    <div class="err">
+      <h4>⑤ 卡死：初始化完成但集合通信不返回</h4>
+      <p class="msg">NCCL timeout / Watchdog caught collective operation timeout · ProcessGroupNCCL is aborting · 或者干脆没有任何输出，torchrun 一直挂着</p>
+      <ul>
+        <li><b>先判断是「组里少了一个 rank」还是「网络坏了」</b>：<code>nvidia-smi</code> 看每张卡上是否都有进程；<code>--tee 3 --log-dir</code> 把每个 rank 的日志落盘，看谁的进度条停住了。</li>
+        <li>集合通信次数/顺序不一致（某个 rank 进了 <code>if</code> 分支）是最常见的根因 —— 检查是否有依赖数据的控制流、以及 <code>DistributedSampler</code> 的 <code>set_epoch</code>。</li>
+        <li>NCCL 的两种等法：<code>TORCH_NCCL_BLOCKING_WAIT=1</code>（阻塞等待）或 <code>TORCH_NCCL_ASYNC_ERROR_HANDLING=1</code>（异步中止，torchrun 会透传）；配 <code>TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC</code> 能拿到更早的报错。</li>
+        <li>多网卡机器：<code>NCCL_SOCKET_IFNAME=eth0</code> / <code>NCCL_IB_HCA=...</code> 指错网卡时，会以「连不上但也不报错」的方式卡住。</li>
+        <li>用 <code>torch.distributed.breakpoint()</code> 或 <code>TORCHELASTIC_ENABLE_FILE_TIMER=1</code> 的文件看门狗抓「进程还在但不推进」。</li>
+      </ul>
+    </div>
+
+    <div class="err">
+      <h4>⑥ worker 挂掉 → 全组被杀，看起来像「莫名其妙重启」</h4>
+      <p class="msg">[default0]: exitcode: 1 (pid: 12345) · [default2]: exitcode: -9 · ChildFailedError: torchrun failed with 1 ... (附各 rank 时间戳与 traceback)</p>
+      <ul>
+        <li><b>OOM 被内核杀 = exitcode -9</b>，看 <code>dmesg | tail</code>；显存 OOM 则是 CUDA OOM 的 Python 异常。</li>
+        <li>任何一个 rank 抛未捕获异常，torchrun 就停掉全组（这是设计，不是 bug）。所以看到「8 个 rank 全崩」时，要按时间戳找<b>最早</b>那个，torchrun 已经帮你标了 root cause。</li>
+        <li>没加 <code>@record</code> 时错误摘要里只有 exitcode 没 traceback —— 这是官方点名推荐的修饰器，直接加。</li>
+        <li>被 SIGKILL 卡在 D 状态的进程会拖住重启；新版 agent 会把卡住的 worker group 标成 UNHEALTHY 并放弃重启，此时看日志里的 D-state 提示。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="calc"><span class="n">11</span>算一遍：世界大小与端口从哪来</h2>
+  <p>把上面的规则做成小计算器，拖动看看改 <code>--nnodes</code> 与 <code>--nproc-per-node</code> 之后每个 rank 拿到什么。</p>
+
+  <div class="calc">
+    <div class="ctr">
+      <div>
+        <label>--nnodes（本页按固定节点数） <b id="nn_v">4</b></label>
+        <input type="range" id="nn" min="1" max="16" step="1" value="4">
+      </div>
+      <div>
+        <label>--nproc-per-node <b id="np_v">8</b></label>
+        <input type="range" id="np" min="1" max="8" step="1" value="8">
+      </div>
+    </div>
+    <div class="out">
+      <div class="o"><div class="k">WORLD_SIZE</div><div class="v" id="ws">32</div></div>
+      <div class="o"><div class="k">总进程数</div><div class="v" id="tp">32</div></div>
+      <div class="o"><div class="k">RANK 区间 / 节点</div><div class="v" id="rr">0–7 … 24–31</div></div>
+    </div>
+    <div class="out" style="margin-top:10px">
+      <div class="o"><div class="k">node2 · local0 的 RANK</div><div class="v" id="ex1">16</div></div>
+      <div class="o"><div class="k">该进程的 LOCAL_RANK</div><div class="v" id="ex2">0</div></div>
+      <div class="o"><div class="k">该进程的 GROUP_RANK</div><div class="v" id="ex3">2</div></div>
+    </div>
+    <p class="note" id="warn"></p>
+    <p class="note">公式来自 <code>_assign_worker_ranks()</code>：<code>RANK = GROUP_RANK × LOCAL_WORLD_SIZE + LOCAL_RANK</code>，<code>WORLD_SIZE = GROUP_WORLD_SIZE × LOCAL_WORLD_SIZE</code>。static 模式下 <code>GROUP_RANK = --node-rank</code>；c10d 模式下由 rendezvous 成团顺序决定。</p>
+  </div>
+
+  <h2 id="faq"><span class="n">12</span>三个高频误解</h2>
+  <div class="two">
+    <div class="card">
+      <h4>误解 1：「torchrun 就是多了个循环的 python -m torch.distributed.launch」</h4>
+      <p><code>launch</code> 是老 API，只管「起 N 个进程、给 <code>--local_rank</code>」；<code>torchrun</code> 走的是 torchelastic 的 <b>agent + rendezvous</b>：多机拓扑由 rendezvous 决定、有成员变更语义、有重启预算、有 root cause 汇总。<code>launch</code> 里那些 <code>--use-env/--node-rank</code> 的旧行为只作为兼容参数留在 <code>--node-rank</code> 上。</p>
+    </div>
+    <div class="card">
+      <h4>误解 2：「<code>--max-restarts=3</code> 是每个 worker 3 次」</h4>
+      <p>是 <b>worker group</b> 3 次。任何一次失败都停掉全部 worker、重新 rendezvous、全部重开，且不计入 monitor 的失败计数 —— 弹性成员变更甚至<b>不消耗</b>这个额度。</p>
+    </div>
+    <div class="card">
+      <h4>误解 3：「rdzv 和 init_process_group 用的是两套东西，所以能各配各的」</h4>
+      <p>两者确实各有一套（rdzv endpoint 29400 vs 训练 store），但 c10d 模式下训练 store 的地址是<b>由 rendezvous 决定并广播</b>的，手工改 <code>MASTER_PORT</code> 无效。只有在 static 模式下才是「你说了算」。</p>
+    </div>
+    <div class="card">
+      <h4>一句话记住控制面与数据面</h4>
+      <p><b>控制面</b>：torchrun/agent/rendezvous/store，管「谁参加、你是几号、挂了怎么办」，走 TCP + KV。<br><b>数据面</b>：worker 之间的 NCCL/NCCL-IB，管「梯度怎么换」，走 NVLink/IB/RoCE。两者的日志、报错、调优参数完全不通用。</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>自测题：4 个节点 × 8 卡，node2 上 local_rank=5 的进程，它的 RANK / WORLD_SIZE / GROUP_RANK 各是多少？</summary>
+    <p><code>LOCAL_WORLD_SIZE = 8</code>、<code>GROUP_WORLD_SIZE = 4</code> → <code>WORLD_SIZE = 32</code>；<code>GROUP_RANK = 2</code>（static 下即 <code>--node-rank=2</code>）；<code>RANK = 2 × 8 + 5 = 21</code>。</p>
+    <p>追问：如果第 3 个节点在训练中途掉线、<code>--nnodes=1:4</code> 弹性生效，重启后这个进程的 RANK 还是 21 吗？<b>不一定</b> —— 新一轮 rendezvous 会重新排座次，<code>WORLD_SIZE</code> 也可能变成 24。</p>
+  </details>
+
+  <footer>
+    <p>源码对齐 PyTorch 上游 <code>torch/distributed/</code>（main 分支）：<code>run.py</code>、<code>launcher/api.py</code>、<code>elastic/agent/server/api.py</code>、<code>elastic/agent/server/local_elastic_agent.py</code>、<code>elastic/rendezvous/{registry,static_tcp_rendezvous,c10d_rendezvous_backend,dynamic_rendezvous,api,utils}.py</code>、<code>elastic/multiprocessing/{__init__,api}.py</code> 与 <code>subprocess_handler/subprocess_handler.py</code>、<code>argparse_util.py</code>、<code>rendezvous.py</code>、<code>distributed_c10d.py</code>、<code>csrc/distributed/c10d/TCPStore.cpp</code>。参数清单与失败模式另对齐官方文档 <a href="https://docs.pytorch.org/docs/stable/elastic/run.html">torchrun (Elastic Launch)</a>。</p>
+    <p>文中的变量名、字典字段、判定条件与默认值均为源码里的字面内容；本机未安装 PyTorch，未做运行时实测，所有行为描述以源码与官方文档为准。默认值（<code>monitor_interval=0.1</code>、rdzv timeout <code>900s</code>、<code>shutdown_timeout=30</code>、<code>exit_barrier_timeout=300</code>、<code>MASTER_PORT=29500</code>、rdzv 默认端口 <code>29400</code>）随版本可能变化，请以你所用版本的 <code>torchrun --help</code> 复核。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var nn = document.getElementById('nn'), np = document.getElementById('np');
+  function upd(){
+    var nodes = +nn.value, nproc = +np.value;
+    document.getElementById('nn_v').textContent = nodes;
+    document.getElementById('np_v').textContent = nproc;
+    var ws = nodes * nproc;
+    document.getElementById('ws').textContent = ws;
+    document.getElementById('tp').textContent = ws;
+    var last = (nodes - 1) * nproc;
+    document.getElementById('rr').textContent = '0–' + (nproc - 1) + ' … ' + last + '–' + (ws - 1);
+    document.getElementById('ex1').textContent = (2 % nodes) * nproc;
+    document.getElementById('ex2').textContent = '0';
+    document.getElementById('ex3').textContent = 2 % nodes;
+    var w = document.getElementById('warn');
+    if (nodes * nproc > 512) {
+      w.textContent = '注意：' + ws + ' 个进程意味着 ' + ws + ' 份模型副本与优化器状态，先算显存再算端口。';
+    } else if (nproc > 8) {
+      w.textContent = '注意：单机 ' + nproc + ' 个进程通常超过物理卡数，除非你确实在跑 CPU 或共享卡。';
+    } else {
+      w.textContent = '';
+    }
+  }
+  nn.addEventListener('input', upd); np.addEventListener('input', upd); upd();
+})();
+</script>
+</body>
+</html>
