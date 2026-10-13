@@ -15,6 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SKIP_PREFIXES = ("http://", "https://", "#", "mailto:", "data:", "javascript:")
 LINK_RE = re.compile(r'(?:href|src)="([^"]+)"')
+# 门户 index.html 的链接是 JS 在运行时按数据拼出来的，静态扫描只看得到模板片段，
+# 会把 ' + esc(e._dir) + '/… 这类表达式误判成失效链接。这些由脚本内置的路径在
+# 交互探针里断言（见 SKILL.md「the portal」一节），静态检查跳过。
+RUNTIME_PATH_MARKERS = ("${", " + ", "`")
 
 
 def check() -> list[tuple[str, str]]:
@@ -24,7 +28,7 @@ def check() -> list[tuple[str, str]]:
             continue
         html = page.read_text(encoding="utf-8", errors="ignore")
         for raw in LINK_RE.findall(html):
-            if raw.startswith(SKIP_PREFIXES) or "${" in raw:
+            if raw.startswith(SKIP_PREFIXES) or any(m in raw for m in RUNTIME_PATH_MARKERS):
                 continue
             target = raw.split("#", 1)[0]
             if not target:
