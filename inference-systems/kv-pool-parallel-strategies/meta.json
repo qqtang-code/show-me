@@ -1,0 +1,31 @@
+{
+  "title": "SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b",
+  "slug": "kv-pool-parallel-strategies",
+  "category": "inference-systems",
+  "date": "2026-10-21",
+  "tags": [
+    "SGLang",
+    "KV Cache",
+    "TP / PP / CP / DCP / EP / DP",
+    "MLA",
+    "DSA",
+    "GLM 5.3",
+    "容量模型",
+    "Attention DP"
+  ],
+  "one_liner": "把 KV 池容量写成 B/b 一个公式后，每条并行策略只需要回答它动了分子还是分母：TP 只靠权重分片放大 B（普通 MLA 的 b 不变），PP 同时把本地层数从 78 变 39 所以 8 卡下容量翻倍，CP 会挤掉 attention TP 吃掉 B 而普通池不省 b（只有 DSA 层分片按 ceil(L/CP)+1 才缩分母），EP 在固定 TP 组宽时只换存法不改份额，Attention DP 则把 8 份重复的 latent 换成 8 个独立池使唯一 token 容量从约 N 到约 8N —— 而 PP 的多 stage 取 MIN，分层不均衡直接吃掉整个实例。源码侧的 13 处引用已按 v0.5.21 逐条核对通过。",
+  "artifact": "index.html",
+  "extra_files": [
+    "notes.md"
+  ],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "知乎《SGLang 各并行策略对 KV 池容量大小影响（以 GLM 5.3 为例）》（2026-10-21，https://zhuanlan.zhihu.com/p/2096216847276364514）：算例口径（78 层 / kv_lora_rank 512 / qk_rope_head_dim 64 / index_head_dim 128 / scaled FP8）、源码定位与策略矩阵表均来自原文",
+    "源码核对：按 sgl-project/sglang 的 v0.5.21 标签（annotated tag 7337b27 → commit e00930c5489053f26d86b179cee0d087f846acbb）逐条拉取原文比对 13 处符号与行号，全部命中；其中 quant_block_size=128 与 rope_storage_dtype=torch.bfloat16 在 memory_pool.py:4870/4872 直接确认，index_head_dim==128 在 memory_pool.py:4924 被 assert，而 78 层 / 512 / 64 属 checkpoint config，源码中无法确认默认值",
+    "num_effective_layers 在 layer_setup.py:158–159 另有 ×loop_num 一层，默认 loop_num=1 不影响本页算术"
+  ],
+  "visibility": "public",
+  "redactions": [],
+  "enriched": "2026-10-21"
+}

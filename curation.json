@@ -1,11 +1,12 @@
 [
   {
     "name": "一条请求的主线",
-    "desc": "先把一条请求从进到出、流式输出、KV 分层看全 —— 后面大多数篇目都挂在这条主线上。",
+    "desc": "先把一条请求从进到出、流式输出、KV 分层与容量算清 —— 后面大多数篇目都挂在这条主线上。",
     "items": [
       "inference-systems/sglang-request-lifecycle",
       "inference-systems/sglang-stream-interval",
       "inference-systems/hicache-mooncake",
+      "inference-systems/kv-pool-parallel-strategies",
       "inference-systems/kv-prefetch-prediction"
     ]
   },

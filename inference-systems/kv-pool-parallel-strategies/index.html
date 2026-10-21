@@ -1,0 +1,1072 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</title><!-- show-me:shell:begin -->
+<meta name="description" content="把 KV 池容量写成 B/b 一个公式后，每条并行策略只需要回答它动了分子还是分母：TP 只靠权重分片放大 B（普通 MLA 的 b 不变），PP 同时把本地层数从 78 变 39 所以 8 卡下容量翻倍，CP 会挤掉 attention TP 吃掉 B 而普通池不省 b（只有 DSA 层分片按 ceil(L/CP)+1 才缩分母），EP 在固定 TP 组宽时只换存法不改份额，Attention DP 则把 8 份重复的 latent 换成 8 个独立池使唯一 token 容量从约 N 到约 8N —— 而 PP 的多 stage 取 MIN，分层不均衡直接吃掉整个实例。源码侧的 13 处引用已按 v0.5.21 逐条核对通过。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b">
+<meta property="og:description" content="把 KV 池容量写成 B/b 一个公式后，每条并行策略只需要回答它动了分子还是分母：TP 只靠权重分片放大 B（普通 MLA 的 b 不变），PP 同时把本地层数从 78 变 39 所以 8 卡下容量翻倍，CP 会挤掉 attention TP 吃掉 B 而普通池不省 b（只有 DSA 层分片按 ceil(L/CP)+1 才缩分母），EP 在固定 TP 组宽时只换存法不改份额，Attention DP 则把 8 份重复的 latent 换成 8 个独立池使唯一 token 容量从约 N 到约 8N —— 而 PP 的多 stage 取 MIN，分层不均衡直接吃掉整个实例。源码侧的 13 处引用已按 v0.5.21 逐条核对通过。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/inference-systems/kv-pool-parallel-strategies/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/inference-systems/kv-pool-parallel-strategies/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px;
+       overflow-wrap:anywhere}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7d8aa3}
+  pre .hl{color:#b23a10;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  tr.hot td{background:#fff7f2}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none}
+    tr.hot td{background:none}
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+
+  /* ---------- 管线示意 ---------- */
+  .pipe{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:18px 0 6px}
+  .stage{flex:1 1 160px;min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;
+         padding:12px 13px 11px;position:relative}
+  .stage .sn{font:600 10.5px var(--mono);color:#94a3b8;letter-spacing:.08em}
+  .stage .st{font-weight:700;font-size:13.5px;color:var(--ink);margin:2px 0 6px;line-height:1.35}
+  .stage .sw{font-size:12.5px;color:var(--dim);line-height:1.6;margin:0;padding-left:0;list-style:none}
+  .stage .sw li{margin:0 0 3px;padding-left:9px;position:relative}
+  .stage .sw li::before{content:'·';position:absolute;left:0;color:#b6c0d0}
+  .stage .tag{display:inline-block;font:10.5px var(--mono);color:#4d5b73;background:#f1f4fa;
+              border:1px solid #e2e8f2;border-radius:999px;padding:1px 7px;margin-top:7px}
+  .stage.hot{border-color:#f0cdb8;background:#fffaf6}
+  .stage.hot .sw li.big{color:#b23a10;font-weight:600}
+  .stage .badge{position:absolute;top:9px;right:10px;font:600 9.5px var(--mono);letter-spacing:.06em;
+                color:#fff;background:#b23a10;border-radius:999px;padding:2px 7px}
+  .pipelinewrap{overflow-x:auto}
+  .arrowline{display:flex;gap:10px;flex-wrap:wrap;margin:2px 0 0;font:11px var(--mono);color:#a8b2c2}
+  @media (max-width:640px){
+    .stage{flex:1 1 100%}
+  }
+
+  /* ---------- 图表卡（lieflat Mono · 作用域化） ---------- */
+  .chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;min-width:0}
+  .chartcard h2{border:0;padding:0;margin:0 0 3px;font-size:16.5px;font-weight:700;letter-spacing:-.02em;color:#1C1C1A}
+  .chartcard .csub{font-size:11.5px;color:#8F8E88;margin:0 0 14px;line-height:1.55}
+  .chartcard .csrc{font-size:9.5px;color:#C6C5BF;margin-top:10px;letter-spacing:.08em;font-weight:500;line-height:1.6}
+  .chartwrap{overflow-x:auto}
+  .chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+  .chartcard svg text{font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+  @media (max-width:640px){
+    .chartcard{padding:22px 20px 16px}
+    .chartcard svg{min-width:400px}
+  }
+  /* MONO.MOTION.css（原样，无 :root/body 规则） */
+  .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+  @keyframes pop{from{transform:scale(0)}to{transform:none}}
+  .fade{animation:fade .9s ease both}
+  @keyframes fade{from{opacity:0}}
+  .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (prefers-reduced-motion:reduce){
+    .pop,.fade{animation:none}
+    .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+  }
+
+  /* 图 + 读法 双栏 */
+  .figrow{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;margin:18px 0 6px}
+  .figrow > .read{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .read h4{margin:0 0 8px;font:600 12.5px var(--mono);color:var(--dim);letter-spacing:.04em}
+  .read ul{margin:0;padding-left:17px}
+  .read li{font-size:13.5px;color:#3b4860;margin:7px 0;line-height:1.62}
+  .read li b{color:var(--ink)}
+  .read .num{font-family:var(--mono);color:#12489c;font-size:12.8px}
+  @media (max-width:860px){ .figrow{grid-template-columns:1fr} }
+
+  .callout{border-left:3px solid var(--accent);background:#fff;border-radius:0 10px 10px 0;
+           padding:12px 16px;margin:16px 0;font-size:14px;color:#3b4860}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout b{color:var(--ink)}
+  .srcline{font:12px var(--mono);color:var(--dim2);background:#fff;border:1px solid var(--line);
+           border-radius:8px;padding:10px 12px;margin:12px 0;overflow-x:auto;white-space:nowrap}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+<style>
+  /* ===== 本页新增组件 ===== */
+  .fmla{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px 16px;
+        background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:16px 0}
+  .fmla .frac{display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;text-align:center}
+  .fmla .num{border-bottom:1.5px solid #94a3b8;padding:0 12px 4px;font:600 13.5px var(--mono);color:var(--ink)}
+  .fmla .den{padding:4px 12px 0;font:600 13.5px var(--mono);color:var(--dim)}
+  .fmla .eq{font:600 15px var(--mono);color:var(--dim2)}
+  .fmla .res{font:700 15px var(--mono);color:var(--accent)}
+
+  .ded{width:100%;border-collapse:collapse;font-size:13.5px;margin:14px 0}
+  .ded th,.ded td{padding:9px 11px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  .ded th{font:600 11px var(--mono);letter-spacing:.05em;color:#4d5b73;background:#f4f7fc;text-transform:uppercase}
+
+  .ruler{background:#fff;border:1px solid var(--line);border-radius:12px;padding:15px 17px;margin:16px 0}
+  .rbar{display:flex;height:32px;border-radius:7px;overflow:hidden;border:1px solid var(--line);margin:9px 0 5px}
+  .rbar i{display:block;height:100%;min-width:2px}
+  .rbar i.lat{background:#1d4ed8}
+  .rbar i.sc{background:#93a9d8}
+  .rbar i.rope{background:#2f7d5b}
+  .rbar i.idx{background:#a35a06}
+  .rbar i.idxs{background:#c9a05a}
+  .rtick{display:flex;justify-content:space-between;font:10.5px var(--mono);color:var(--dim2)}
+  .rlegend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font:11.5px var(--mono);color:var(--dim)}
+  .rlegend span{display:inline-flex;align-items:center;gap:6px}
+  .rlegend i{width:9px;height:9px;border-radius:2px;flex:none}
+
+  .gpup{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+  @media(max-width:760px){.gpup{grid-template-columns:1fr}}
+  .gpanel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px 14px;min-width:0}
+  .gstage{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:9px}
+  .gcard{border:1px solid var(--line2);border-radius:8px;padding:7px 6px;background:var(--lane);min-width:0}
+  .gcard .gid{font:9px var(--mono);color:var(--dim2);white-space:nowrap}
+  .gcard .gw{font:600 10.5px var(--mono);color:var(--ink);margin-top:3px;overflow-wrap:anywhere}
+  .gcard .gk{font:10px var(--mono);color:var(--dim);margin-top:2px;white-space:nowrap}
+  .gbar{height:5px;border-radius:3px;background:#dfe7f5;margin-top:5px;overflow:hidden}
+  .gbar i{display:block;height:100%;background:var(--accent)}
+
+  .poolcmp{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+  @media(max-width:760px){.poolcmp{grid-template-columns:1fr}}
+  .pool{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px 14px;min-width:0}
+  .pool h4{font-size:13px;margin:0 0 3px;color:var(--ink)}
+  .pool .psub{font:11px var(--mono);color:var(--dim2);margin:0 0 9px}
+  .ranks{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+  .rank{border:1px solid var(--line2);border-radius:6px;padding:5px 4px;background:var(--lane);min-width:0}
+  .rank .rid{font:9px var(--mono);color:var(--dim2)}
+  .chipr{display:inline-block;font:9px var(--mono);padding:1px 4px;border-radius:3px;margin:2px 2px 0 0;
+         background:#e6eefb;color:#17509e}
+  .pool.diff .chipr{background:#eaf6ef;color:#0b6b3f}
+
+  .calc{background:#fff;border:1px solid var(--line);border-radius:12px;padding:15px 17px;margin:16px 0}
+  .calc .ctl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 16px}
+  @media(max-width:760px){.calc .ctl{grid-template-columns:1fr 1fr}}
+  .calc .ctl>div{min-width:0}
+  .calc label{display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+              font:11px var(--mono);color:var(--dim2);margin-bottom:5px}
+  .calc input[type=range]{display:block;width:100%;height:18px;accent-color:var(--accent);margin:0}
+  .calc .val{font:600 12px var(--mono);color:var(--ink);white-space:nowrap}
+  .calc .out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:15px;
+             border-top:1px solid var(--line2);padding-top:14px}
+  @media(max-width:760px){.calc .out{grid-template-columns:1fr 1fr}}
+  .calc .o{background:var(--lane);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;min-width:0}
+  .calc .o b{display:block;font:700 17px var(--mono);color:var(--ink);letter-spacing:-.01em;
+             overflow-wrap:anywhere;line-height:1.25}
+  .calc .o span{font:10px var(--mono);color:var(--dim2)}
+  .calc input[type=checkbox]{accent-color:var(--accent)}
+  .figrow>.chartcard h2{border-bottom:0;padding-bottom:0;margin:0 0 3px}
+  .capnote{min-width:0;padding-top:2px}
+  .capnote p{margin:0 0 11px;font-size:13.5px;line-height:1.75;color:var(--dim)}
+  .capnote p:last-child{margin-bottom:0}
+  .capnote b{color:var(--ink)}
+  .readlist{margin:10px 0 0;padding-left:18px;line-height:1.8}
+  .readlist li{margin:0 0 11px}
+  .readlist li:last-child{margin-bottom:0}
+  .readlist .rnote{display:block;margin-top:2px;font-size:12.5px;line-height:1.7;color:var(--dim2)}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">14 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-21</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 7 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me</a><span class="sep">/</span>
+    <a href="../../index.html#inference-systems">inference-systems</a><span class="sep">/</span>
+    <span>kv-pool-parallel-strategies</span>
+  </div>
+
+  <h1>SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</h1>
+  <div class="metarow">
+    <span>2026-10-21</span><span>SGLang</span><span>KV Cache</span><span>TP / PP / CP / DCP / EP / DP</span><span>GLM 5.3</span><span>MLA + DSA</span>
+  </div>
+  <p class="lead">同样 8 张卡，<b>TP8</b>、<b>TP4＋PP2</b>、<b>TP2＋PP4</b> 谁缓存得更多？答案不在"并行度"这个名字里，而在两个数上：每卡还剩多少字节可分给 KV（<b>分子 B</b>），以及一个 token 在这张卡上要占多少字节（<b>分母 b</b>）。单池容量 ≈ <b>B / b</b>。想清楚一条策略动了哪一边，容量变化不用跑实验也算得出来 —— 但<b>只有 PP 同时动两边</b>，这也是 8 卡下它翻倍、而 TP 不翻倍的全部原因。</p>
+
+  <div class="nav">
+    <a href="#tldr">结论</a>
+    <a href="#formula">两个数</a>
+    <a href="#numer">分子 B</a>
+    <a href="#denom">分母 b</a>
+    <a href="#tppp">TP 与 PP</a>
+    <a href="#cp">CP</a>
+    <a href="#dcp">DCP</a>
+    <a href="#ep">EP</a>
+    <a href="#dp">DP 与 Attention DP</a>
+    <a href="#matrix">策略矩阵</a>
+    <a href="#calc">计算器</a>
+    <a href="#myth">常见误解</a>
+    <a href="#quiz">自测</a>
+  </div>
+
+  <p class="hint"><b>术语约定</b>：并行维度沿用 SGLang flag 的写法（<code>tp_size</code> / <code>pp_size</code> / <code>attn_cp_size</code> / <code>attn_dcp_size</code> / <code>moe_ep_size</code> / <code>attn_dp_size</code>），不译成"张量维度""流水维度"这类自造词。容量一律指 <b>token 数</b>，不是字节；<code>B</code> 是字节、<code>b</code> 是字节/token，两者混用时以单位区分。</p>
+
+  <h2 id="tldr"><span class="n">01</span>结论</h2>
+
+  <div class="tldr">
+    <h4>TL;DR</h4>
+    <ul>
+      <li><b>容量只有一个公式：单池 ≈ B / b。</b> 任何并行策略的容量影响，都能拆成"它动了 B"还是"它动了 b"；两边同时动时，容量倍率 = B 的变化倍率 ÷ b 的变化倍率。</li>
+      <li><b>TP 只动分子。</b> 权重按 TP 分片释放显存，但普通 MLA 的每个 attention TP rank 仍然保存<b>全部本地层的完整 latent KV</b> —— b 一点没变，收益全部来自 B 变大。</li>
+      <li><b>PP 同时动两边。</b> 本地层数从 78 变成 39，b 直接减半；而权重份额在 8 卡下没变（1/2 层数 × 1/4 分片仍是 1/8）。<b>容量翻倍的唯一来源是 KV 层数减少</b>，不是权重变少。</li>
+      <li><b>Attention DP 换的是"重复"。</b> TP8 时 8 个 attention rank 存同一批请求的同一份 latent；Attention DP8 时 8 个池各存不同请求，<b>唯一 token 容量从约 N 变成约 8N</b> —— 但单条请求仍受单池 N 约束。</li>
+      <li><b>PP 的多 stage 取最小。</b> 代码对 <code>token_capacity</code> 做 <code>AllReduce(MIN)</code>，所以分层不均衡会直接吃掉整个实例的容量：PP4 的 19–20 层里，决定容量的是 20 层那个 stage。</li>
+    </ul>
+  </div>
+
+  <h2 id="formula"><span class="n">02</span>先把问题写成两个数</h2>
+
+  <p>这个问题拆两步：<b>每张卡还剩多少显存分给 KV</b>（分子），<b>一个 token 在这张卡上需要多少缓存</b>（分母）。两个量都是"每卡"口径，所以并行策略只要改变"每卡"的分摊方式，就会改变容量。</p>
+
+  <div class="fmla">
+    <span class="res">单池容量</span>
+    <span class="eq">≈</span>
+    <span class="frac"><span class="num">B　每卡可分给 KV 的字节</span><span class="den">b　每个 token 在本卡占的字节</span></span>
+  </div>
+
+  <table class="ded">
+    <thead><tr><th>量</th><th>口径</th><th>由什么决定</th><th>主要受哪些策略影响</th></tr></thead>
+    <tbody>
+      <tr><td class="k">B</td><td>字节 / 卡</td><td>显存总预算减去本地权重、运行时预留、激活、通信缓冲、graph 捕获等工作区</td><td>TP、PP、EP（分片权重释放 B）；Attention DP、CP（复制权重或放大工作区吃掉 B）</td></tr>
+      <tr><td class="k">b</td><td>字节 / token / 卡</td><td>本地缓存层数 × 每层每 token 成本（主 KV＋index-K）</td><td>PP（本地层数变少）；CP 的 DSA 层分片；DCP（位置分片）</td></tr>
+    </tbody>
+  </table>
+
+  <p class="hint">两者同时变时，别再用"并行度翻倍容量就翻倍"这类线性直觉。<b>容量倍率 = (B 变化倍率) / (b 变化倍率)</b>；协同实例还要再取各 rank 的最小值。</p>
+
+  <h2 id="numer"><span class="n">03</span>分子：B 是测量出来的，不是算出来的</h2>
+
+  <p>SGLang 在加载模型之后<b>测</b>一次空闲显存，此时权重占用已经体现在测量结果里。所以"权重少了多少"不需要你手算 —— 手算的权重值反而不准（<code>PPMissingLayer</code>、量化 layout、对齐都会让名义分片和实际占用差开）。</p>
+
+  <div class="srcline">KVCacheConfigurator._profile_available_bytes · mem_cache/kv_cache_configurator.py · L2186–L2208</div>
+<pre><code>gc.collect()
+available_gpu_memory = get_available_gpu_memory(
+    self.device, self.gpu_id,
+    distributed=get_parallel().launch_world_size &gt; 1,
+    cpu_group=get_parallel().world_group.cpu_group,
+)
+slack_gb = pre_model_load_memory * (1 - get_schedule().mem_fraction_static)
+...
+mm_reservation_gb = mm_runtime_reservation_gb(...)
+rest_memory = available_gpu_memory - slack_gb - mm_reservation_gb</code></pre>
+
+  <p>得到字节预算后，除以每 token 成本、<b>按页向下对齐</b>，再应用用户上限：</p>
+
+  <div class="srcline">DefaultPoolConfigurator.calculate_pool_sizes · model_executor/pool_configurator.py · L552–L562</div>
+<pre><code>max_total_num_tokens = available_bytes // self._cell_size
+max_total_num_tokens = max_total_num_tokens // page_size * page_size</code></pre>
+
+  <div class="callout warn"><b>容易漏的一步：</b><code>--max-total-tokens</code> 会盖住测算值。扩大理论预算后容量仍可能停在这个上限上，所以分析容量时要同时看<b>测算值</b>和<b>配置值</b> —— 只看源码算出来的数，会和实际跑的实例差一截。</div>
+
+  <h2 id="denom"><span class="n">04</span>分母：GLM 5.3 的一个 token 缓存什么</h2>
+
+  <p>GLM 5.3 的相关配置：<b>78</b> 层、<code>kv_lora_rank=512</code>、<code>qk_rope_head_dim=64</code>、<code>index_head_dim=128</code>，模型类继承 DeepSeek MLA：</p>
+
+  <p class="hint"><b>这四个数字的来源不一样，别当成同一类事实。</b>「78 层 / 512 / 64」是 checkpoint 的 <code>config.json</code>（<code>num_hidden_layers</code> / <code>kv_lora_rank</code> / <code>qk_rope_head_dim</code>），源码里读不到默认值，只有 <code>kv_cache_configurator.py:2603</code> 的注释 <code># nope(512 fp8) + rope(64 fp8)</code> 可以佐证；<code>index_head_dim=128</code> 虽然也来自 HF config，但在 <code>memory_pool.py:4924</code> 被 <code>assert index_head_dim == 128</code> 硬断言。反过来，<code>quant_block_size=128</code> 与「RoPE 按 bf16 存 2 字节」都能在代码里直接确认（<code>memory_pool.py:4870</code>、<code>:4872</code> 的 <code>rope_storage_dtype = torch.bfloat16</code>）。</p>
+
+  <div class="srcline">GlmMoeDsaForCausalLM · models/glm4_moe.py · L1437–L1438</div>
+<pre><code>class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
+    fused_shared_experts_architecture = "GlmMoeDsaForCausalLM"</code></pre>
+
+  <p>MLA 把历史 K/V 压成各 query head 共用的 latent，所以每层的缓存宽度不是"head × dim"，而是 latent 宽度＋量化 scale＋RoPE。按本文算例的 <b>scaled FP8</b> 布局，每层每 token 是 <b>656 B</b>；DSA 还要再存 index-K，每层每 token <b>132 B</b>。</p>
+
+  <div class="ruler">
+    <h4 class="micro">一个 token、一层的字节布局 · 788 B</h4>
+    <div class="rbar" role="img" aria-label="主 KV 656 B 与 DSA index-K 132 B 的字节布局">
+      <i class="lat"  style="width:64.97%"></i>
+      <i class="sc"   style="width:2.03%"></i>
+      <i class="rope" style="width:16.24%"></i>
+      <i class="idx"  style="width:16.24%"></i>
+      <i class="idxs" style="width:0.51%"></i>
+    </div>
+    <div class="rtick"><span>0</span><span>512</span><span>656</span><span>788 B</span></div>
+    <div class="rlegend">
+      <span><i class="lat" style="background:#1d4ed8"></i>latent 512 × 1 B = 512 B</span>
+      <span><i style="background:#93a9d8"></i>scale (512/128) × 4 B = 16 B</span>
+      <span><i style="background:#2f7d5b"></i>RoPE 64 × 2 B = 128 B</span>
+      <span><i style="background:#a35a06"></i>index-K 128 × 1 B = 128 B</span>
+      <span><i style="background:#c9a05a"></i>index scale 4 B</span>
+    </div>
+    <p class="csub">主 KV 656 B ＋ index-K 132 B = 788 B / token / 层 · 条宽按字节比例绘制</p>
+  </div>
+
+  <p>于是分母就是"层数 × 单层成本"：</p>
+
+  <div class="fmla">
+    <span class="frac"><span class="num">b　每 token 成本</span><span class="den">主 KV 层数 × 单层成本 ＋ index 层数 × index 单层成本 ＋ 其他随 token 增长的缓存</span></span>
+  </div>
+
+  <pre><code>78 层：78 × (656 + 132) = 61,464 B ≈ 60.02 KiB / token / 卡
+39 层：39 × (656 + 132) = 30,732 B ≈ 30.01 KiB / token / 卡
+20 层：20 × (656 + 132) = 15,760 B ≈ 15.39 KiB / token / 卡   ← PP4 最重 stage</code></pre>
+
+  <div class="callout"><b>DSA 的 top-k 不减少主 KV。</b> indexer 选择历史位置，减少的是 attention 的<b>访问与计算量</b>；主 KV 仍然保存完整历史。它能改变的是 index-K 的<b>分配层数</b>（部分层可复用 top-k 结果），而不是把 656 B 压小。</div>
+
+  <h2 id="tppp"><span class="n">05</span>TP 与 PP：一个切矩阵，一个切层</h2>
+
+  <p>两者的差别不在"切多少"，而在<b>切的是什么</b>。</p>
+
+  <p><b>TP 切矩阵。</b> 线性层沿输出维／输入维分区，每卡拿到矩阵的一片：</p>
+
+  <div class="srcline">ColumnParallelLinear / RowParallelLinear · layers/linear.py · L360–L365 / L1477–L1481</div>
+<pre><code>self.output_size_per_partition = divide(self.output_size, tp_size)   # 列并行
+self.input_size_per_partition  = divide(input_size, self.tp_size)    # 行并行</code></pre>
+
+  <p>权重分片了，显存释放了，但<b>层数没变</b>：78 层还在，每层仍然要为这批请求保存一份完整 latent。普通 MLA 的每个 attention TP rank 都需要访问这批请求共享的 latent 历史，所以 <code>layer_num</code> 和 <code>kv_cache_dim</code> 都不随 TP 变化。TP 的容量收益<b>全部来自权重分片释放的 B</b>。</p>
+
+  <p><b>PP 切层。</b> 本 stage 之外的所有层都换成 <code>PPMissingLayer</code> 占位：</p>
+
+  <div class="srcline">make_layers · utils/common.py · L1526–L1539 · resolve_layer_indices · layer_setup.py · L153–L154</div>
+<pre><code>[PPMissingLayer() for _ in range(start_layer)]
+  + [layer_fn(idx=idx) for idx in range(start_layer, end_layer)]
+  + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
+
+num_effective_layers = pp_range.end_layer - pp_range.start_layer
+num_effective_layers = num_effective_layers * loop_num   # L158–L159</code></pre>
+
+  <p class="hint">最后那行 <code>× loop_num</code> 是核对源码时补上的：本 stage 的层数在重复循环（<code>loop_num</code>）下会再乘一次。默认 <code>loop_num=1</code> 时它不改变上面的算术，但如果你的模型开了层循环，b 要按乘之后的层数算。</p>
+
+  <p>于是 PP <b>同时改两个数</b>：本地权重重了（分片更大）但层少了，<b>KV 层数也少了</b>。</p>
+
+  <div class="gpup">
+    <div class="gpanel">
+      <h4 class="micro">TP8 ＋ PP1</h4>
+      <p class="csub">8 卡同一个 stage，每卡都是全部 78 层</p>
+      <div class="gstage">
+        <div class="gcard"><div class="gid">GPU0</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+        <div class="gcard"><div class="gid">GPU1</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+        <div class="gcard"><div class="gid">GPU2</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+        <div class="gcard"><div class="gid">GPU3</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+        <div class="gcard"><div class="gid">GPU4</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+        <div class="gcard"><div class="gid">GPU5</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+        <div class="gcard"><div class="gid">GPU6</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+        <div class="gcard"><div class="gid">GPU7</div><div class="gw">78 层 × 1/8 权重</div><div class="gk">KV 78 层</div><div class="gbar"><i style="width:100%"></i></div></div>
+      </div>
+    </div>
+    <div class="gpanel">
+      <h4 class="micro">TP4 ＋ PP2</h4>
+      <p class="csub">两个 stage 各 4 卡，每卡 39 层</p>
+      <div class="gstage">
+        <div class="gcard"><div class="gid">S0·G0</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+        <div class="gcard"><div class="gid">S0·G1</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+        <div class="gcard"><div class="gid">S0·G2</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+        <div class="gcard"><div class="gid">S0·G3</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+        <div class="gcard"><div class="gid">S1·G0</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+        <div class="gcard"><div class="gid">S1·G1</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+        <div class="gcard"><div class="gid">S1·G2</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+        <div class="gcard"><div class="gid">S1·G3</div><div class="gw">39 层 × 1/4</div><div class="gk">KV 39 层</div><div class="gbar"><i style="width:50%"></i></div></div>
+      </div>
+    </div>
+  </div>
+  <p class="csub">底部小条 = 每卡 KV 层数（相对 78 层的比例）。两种配置的每卡权重份额都是约 1/8，<b>唯一变化的是 KV 层数</b>。</p>
+
+  <p>固定 8 卡、78 层，假设路由专家权重均匀分配：</p>
+
+  <table>
+    <thead><tr><th>配置</th><th>每卡层数</th><th>每卡专家权重份额</th><th>每 token KV 成本</th><th>固定 B 时理论容量</th></tr></thead>
+    <tbody>
+      <tr><td class="k">TP8＋PP1</td><td class="v">78</td><td>总量约 1/8</td><td class="v">约 61,464 B</td><td class="v">1 倍</td></tr>
+      <tr><td class="k">TP4＋PP2</td><td class="v">39</td><td>1/2 层 × 1/4 分片，约 1/8</td><td class="v">约 30,732 B</td><td class="v">约 2 倍</td></tr>
+      <tr class="hot"><td class="k">TP2＋PP4</td><td class="v">19–20</td><td>1/4 层 × 1/2 分片，约 1/8</td><td class="v">最重 stage 15,760 B</td><td class="v">约 3.9 倍</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">上表<b>固定分子</b>，只展示"减少 KV 层数"带来的理论变化。实际容量还要代入首尾组件、注意力权重复制、量化 scale／padding 和通信工作区。</p>
+
+  <div class="callout warn"><b>PP 的容量由最穷的 stage 决定。</b> 代码对容量取各 PP rank 的最小值：</div>
+
+  <div class="srcline">KVCacheConfigurator._apply_token_constraints · L2280–L2288</div>
+<pre><code>if get_parallel().pp_size &gt; 1:
+    tensor = torch.tensor(token_capacity, dtype=torch.int64)
+    torch.distributed.all_reduce(
+        tensor, op=torch.distributed.ReduceOp.MIN,
+        group=get_parallel().world_group.cpu_group,
+    )
+    token_capacity = tensor.item()</code></pre>
+
+  <p>所以 PP4 的 19–20 层不是"平均 19.5 层"：决定整个实例容量的是那个 <b>20 层</b>的 stage。分层不均衡直接吃掉容量。</p>
+
+  <h2 id="cp"><span class="n">06</span>CP：计算切分和存储切分是两件事</h2>
+
+  <p>Prefill CP 把序列位置的计算分给不同 rank，再 gather 回来。要分开看两件事：</p>
+
+  <p><b>① 普通池不省缓存。</b> 普通 MLA／DSA 池在 CP 过程中重建完整 latent 历史，分母仍按本地层数和完整缓存宽度算 —— 和 TP 一样，b 不变。</p>
+
+  <p><b>② 但 CP 会吃掉分子。</b> 因为它挤掉了 attention TP：</p>
+
+  <div class="srcline">derive_attention_widths · runtime_context.py · L73–L78</div>
+<pre><code>attn_dp_size = dp_size if enable_dp_attention else 1
+return attn_dp_size, tp_size // attn_dp_size // attn_cp_size</code></pre>
+
+  <p>Attention DP=1 时：</p>
+  <pre><code>TP8 ＋ CP1  →  attention TP8
+TP4 ＋ CP4  →  attention TP1</code></pre>
+
+  <p>第二种配置把注意力投影<b>复制到 4 个 CP rank 上</b>（<code>q_b_proj</code> 等按 <code>attn_tp</code> 分片），每卡权重占用上升，B 下降；激活和通信工作区也一起变。CP 对容量的净影响，是"b 没变、B 变小"的合并结果 —— <b>方向是不利的</b>，除非打开层分片。</p>
+
+  <p><b>③ DSA 层分片才动分母。</b> <code>--enable-dsa-cache-layer-split</code> 让每个 CP rank 只保存一部分 KV／index 层，另预留一个远程层 scratch：</p>
+
+  <div class="srcline">get_glm_dsa_layer_split_effective_num_layers · layers/cp/utils.py · L85–L91</div>
+<pre><code>owned_layers_upper_bound = (num_layers + shard_size - 1) // shard_size
+return max(1, owned_layers_upper_bound + 1)</code></pre>
+
+  <div class="pipe">
+    <div class="stage"><div class="sn">L = 78</div><div class="st">CP1 · 不分片</div><ul class="sw"><li>本地有效层数 78</li><li>b = 78 × 788</li></ul></div>
+    <div class="stage"><div class="sn">CP4</div><div class="st">分片后</div><ul class="sw"><li>ceil(78/4) = 20 层</li><li>+ 1 层远程 scratch</li><li>本地有效层数 <b>21</b></li></ul></div>
+    <div class="stage"><div class="sn">b 的变化</div><div class="st">21 / 78 ≈ 0.269</div><ul class="sw"><li>分母降到原来的约 27%</li><li>scratch 层也计入同一分母</li></ul></div>
+  </div>
+  <p class="csub">78 层、CP4：主缓存按 21 个有效层计算 —— 20 个所属层的预算，加 1 个远程层 scratch。</p>
+
+  <div class="callout warn"><b>层分片有硬条件。</b> 这个版本要求 PD prefill、interleave CP、Mooncake 且 <b>PP1</b>；PP 与它互斥，参数处理处直接抛错：</div>
+
+  <div class="srcline">handle_model_specific_adjustments · arg_groups/model_hook.py · L364–L370</div>
+<pre><code>if cfg.enable_dsa_cache_layer_split and cfg.pp_size &gt; 1:
+    raise ValueError(
+        "--enable-dsa-cache-layer-split is not supported with "
+        "pipeline parallelism (pp_size &gt; 1) yet. ..."
+    )</code></pre>
+
+  <h2 id="dcp"><span class="n">07</span>DCP：沿上下文位置分主 KV</h2>
+
+  <p>DCP 把<b>同一请求的历史位置</b>分给不同 rank：各 rank 对本地分片算部分 attention，再归并。所以它必须区分"本地物理行数"和"整个组的逻辑 token 空间"：</p>
+
+  <pre><code>DCP4：
+  rank 0 → token 0、4、8、12……
+  rank 1 → token 1、5、9、13……
+  rank 2 → token 2、6、10、14……
+  rank 3 → token 3、7、11、15……</code></pre>
+
+  <div class="srcline">KVCacheConfigurator.logical_token_capacity · L319–L328</div>
+<pre><code>if self.is_hybrid_swa:
+    return max_total_num_tokens
+return max_total_num_tokens * get_parallel().attn_dcp_size // self.loc_space_scale</code></pre>
+
+  <div class="fmla"><span class="res">逻辑 token 容量</span><span class="eq">=</span><span class="frac"><span class="num">本地物理行数</span><span class="den">÷ loc_space_scale</span></span><span class="eq">×</span><span class="res">DCP 组宽</span></div>
+
+  <p>分母侧：目标主 KV 按位置分片，每逻辑 token 的这部分成本缩为原来的 <b>1/c</b>。分子侧：<code>--enable-cp-decode-attn-tp</code> 之类的 Q 投影复制会新增本卡权重，压小 B。<b>B 近似不变时容量接近 c 倍；启用 Q 复制后要看两边降幅谁大。</b></p>
+
+  <div class="callout warn"><b>本页算例不走 DCP。</b> 上面是 v0.5.21 通用 target MLA 的容量映射；GLM 5.3 的 DSA 算例用的是 <b>DCP1</b>。应用时还要匹配模型后端的 token 寻址、KV 收发和 attention 归并路径 —— 公式对不等于这条模型路径实现了它。</div>
+
+  <h2 id="ep"><span class="n">08</span>EP：换个方式存专家权重</h2>
+
+  <p>EP 按专家分配权重，MoE TP 按专家矩阵的中间维分片。两个数乘起来决定本地专家权重：</p>
+
+  <div class="srcline">FusedMoE.init · layers/moe/fused_moe_triton/layer.py · L397–L408</div>
+<pre><code>self._num_local_routed = self._num_global_routed // storage_ep_size
+self.intermediate_size_per_partition = intermediate_size // self.moe_tp_size</code></pre>
+
+  <div class="fmla"><span class="res">本地路由专家权重</span><span class="eq">≈</span><span class="frac"><span class="num">本 stage 路由专家权重</span><span class="den">EP　×　MoE_TP</span></span></div>
+
+  <p>固定 TP 总组宽、<code>MoE_DP=1</code> 时派生关系是 <code>MoE_TP = TP / EP</code>，于是 <code>EP × MoE_TP = TP</code> 恒定 —— <b>把 EP 从 1 调到 8，每卡路由专家权重仍然是约 1/8</b>，和 TP8 的矩阵分片得到同样的份额。所以：</p>
+
+  <div class="callout"><b>EP 主要改的是"怎么存"，不是"存多少"。</b> 固定 TP 组宽时 B 近似不变；两者的差别在通信、专家布局、padding 和工作区 —— 这些会进一步改变可用于 KV 的预算，方向不定。要增加 GPU 同时保持 MoE TP，B 才真正变大。</div>
+
+  <h2 id="dp"><span class="n">09</span>DP 与 Attention DP：换掉的是"重复"</h2>
+
+  <p><b>普通 DP 复制整个实例。</b> 每套副本跑完整模型、有各自的 KV 池；增加副本会<b>合计</b>变大，但固定总卡数时每副本的 TP／PP 被压缩，权重重复量上升，B 要重算。</p>
+
+  <p><b>Attention DP 解决的是另一件事：让同一批卡的 KV 不再存重复。</b> 这是全篇最值得看图的一处 ——</p>
+
+  <div class="poolcmp">
+    <div class="pool">
+      <h4>普通 TP8</h4>
+      <div class="psub">8 个 attention rank 都在存同一批请求</div>
+      <div class="ranks"><div class="rank"><div class="rid">rank0</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div><div class="rank"><div class="rid">rank1</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div><div class="rank"><div class="rid">rank2</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div><div class="rank"><div class="rid">rank3</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div><div class="rank"><div class="rid">rank4</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div><div class="rank"><div class="rid">rank5</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div><div class="rank"><div class="rid">rank6</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div><div class="rank"><div class="rid">rank7</div><span class="chipr">R1</span><span class="chipr">R2</span><span class="chipr">R3</span></div>
+        </div>
+      <p class="hint" style="margin:9px 0 0">同一份 latent 被存了 8 遍 → <b>唯一 token 容量 ≈ N</b></p>
+    </div>
+    <div class="pool diff">
+      <h4>Attention DP8（attention TP1）</h4>
+      <div class="psub">8 个 attention 组各带走一批请求</div>
+      <div class="ranks"><div class="rank"><div class="rid">dp0</div><span class="chipr">R1</span></div><div class="rank"><div class="rid">dp1</div><span class="chipr">R2</span></div><div class="rank"><div class="rid">dp2</div><span class="chipr">R3</span></div><div class="rank"><div class="rid">dp3</div><span class="chipr">R4</span></div><div class="rank"><div class="rid">dp4</div><span class="chipr">R5</span></div><div class="rank"><div class="rid">dp5</div><span class="chipr">R6</span></div><div class="rank"><div class="rid">dp6</div><span class="chipr">R7</span></div><div class="rank"><div class="rid">dp7</div><span class="chipr">R8</span></div>
+        </div>
+      <p class="hint" style="margin:9px 0 0">8 个独立请求池，每池约 N → <b>合计约 8N</b></p>
+    </div>
+  </div>
+
+  <p>代价在分子：attention TP 从 8 降到 1，注意力权重每卡份额上升，B 下降。所以两个指标要分开问：</p>
+
+  <table>
+    <thead><tr><th>问题</th><th>普通 TP8</th><th>Attention DP8</th></tr></thead>
+    <tbody>
+      <tr><td class="k">单条请求能放多长</td><td>约 N（全机共用）</td><td>约 N（受所属池约束）</td></tr>
+      <tr><td class="k">整机同时承载的唯一 token</td><td class="v">≈ N</td><td class="v">≈ 8N</td></tr>
+      <tr><td class="k">每卡权重占用</td><td>注意力 1/8 分片</td><td>注意力权重复制更多 → B 下降</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">实际 attention TP 缩小时，各池的 N 要按新预算重算 —— 上表的 8N 是"B 不变"的上界。</p>
+
+  <h2 id="matrix"><span class="n">10</span>把所有策略放回同一个公式</h2>
+
+  <p>每条策略只列一行，单位是"该策略并行度增大时"。统一条件：同一模型、同权重与 KV 精度、同单卡显存预算。</p>
+
+  <table>
+    <thead><tr><th>策略</th><th>分子 B</th><th>分母 b</th><th>单池容量</th><th>合计容量</th></tr></thead>
+    <tbody>
+      <tr><td class="k">TP ↑</td><td>增大（权重分片）</td><td>相等（普通 MLA 存完整 latent）</td><td class="v">增大</td><td class="v">增大</td></tr>
+      <tr class="hot"><td class="k">PP ↑</td><td>增大（本地层权重减少）</td><td>减小（KV 层数减少）</td><td class="v">增大更多</td><td class="v">取各 stage 最小</td></tr>
+      <tr><td class="k">CP ↑</td><td>减小（attn_tp 变小，注意力权重复制）</td><td>普通池相等；层分片时减小</td><td class="v">普通池减小</td><td class="v">分情况</td></tr>
+      <tr><td class="k">DCP ↑</td><td>近似相等；启用 Q 投影复制时减小</td><td>减小（主 KV 缩为 1/c）</td><td class="v">近似 c 倍</td><td class="v">分情况</td></tr>
+      <tr><td class="k">EP ↑</td><td>固定 TP 组宽时近似相等</td><td>相等</td><td class="v">近似相等</td><td class="v">近似相等</td></tr>
+      <tr><td class="k">普通 DP ↑</td><td>加 GPU 时相等；固定卡数时减小</td><td>相等</td><td class="v">不变或减小</td><td class="v">d × 单池</td></tr>
+      <tr><td class="k">Attention DP ↑</td><td>减小（注意力权重份额增大）</td><td>相等</td><td class="v">减小</td><td class="v">D × 单池</td></tr>
+      <tr><td class="k">PD 分离</td><td>各角色不变</td><td>各角色不变</td><td class="v">同角色相等</td><td class="v">P 侧随副本增加</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout"><b>怎么读这张表：</b>① B 增大且 b 相等 → 容量按 B 的倍率增大；② B 相等且 b 减小 → 容量按 1/b 的倍率增大；③ 两边都动 → 用 B 的倍率除以 b 的倍率；④ 协同实例取各 rank 最小值，独立池按各池求和。<b>先判断"这条策略动的是哪一侧"，再谈倍数。</b></div>
+
+  <div class="figrow">
+    <style>
+/* ── chartcard · 卡片与动效，全部作用域化，不改宿主页面的 :root / body ── */
+.chartcard.card{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;color:#1C1C1A;
+  border:0;box-shadow:none;text-align:left;
+  font-family:'Inter','Helvetica Neue',Helvetica,Arial,'PingFang SC','Noto Sans SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+  -webkit-font-smoothing:antialiased}
+.chartcard h2{font-weight:700;font-size:16.5px;letter-spacing:-.02em;margin:0 0 3px;line-height:1.34;color:#1C1C1A}
+.chartcard .sub{font-size:11.5px;color:#8F8E88;margin:0 0 14px;line-height:1.65;letter-spacing:0}
+.chartcard .src{font-size:9.5px;color:#C6C5BF;margin-top:10px;letter-spacing:.08em;font-weight:500;line-height:1.6}
+.chartcard .chartwrap{width:100%}
+.chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+.chartcard svg text{font-family:inherit}
+
+/* 动效 token（MOTION.css 的 pop / fade / draw），keyframes 加了 cc 前缀避免撞名 */
+.chartcard .pop{transform-box:fill-box;transform-origin:center;animation:ccPop .5s cubic-bezier(.2,.7,.3,1.3) both}
+@keyframes ccPop{from{transform:scale(0)}to{transform:none}}
+.chartcard .fade{animation:ccFade .9s ease both}
+@keyframes ccFade{from{opacity:0}}
+.chartcard .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:ccDraw 1s cubic-bezier(.4,0,.2,1) both}
+@keyframes ccDraw{to{stroke-dashoffset:0}}
+
+/* reduced-motion / headless 截图：直接给终态 */
+.chartcard .cc-static .pop,.chartcard .cc-static .fade{animation:none}
+.chartcard .cc-static .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+@media (prefers-reduced-motion:reduce){
+  .chartcard .pop,.chartcard .fade{animation:none}
+  .chartcard .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+}
+/* ≤640px：卡片保持 400px 设计宽度，在自己内部横向滚动，不压缩字号 */
+@media (max-width:640px){
+  .chartcard .chartwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .chartcard svg{min-width:400px}
+}
+</style>
+
+<!-- ════ card · F5 Tick Rows（basics-gallery.html · "Six teams, shipped and counted"）════ -->
+<div class="card chartcard">
+  <h2>同样的 KV 预算，PP4 装下 3.9 倍的 token</h2>
+  <div class="sub">一条 tick = 一层 = 788 B/token · 条长 = 每卡层数 = 每 token KV 字节 · 固定 B，容量 = B ÷ 每 token KV 字节</div>
+  <div class="chartwrap">
+    <svg id="kvpp-ticks" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet" role="img"
+         aria-label="三种 TP/PP 组合下每张 GPU 的层数、每 token KV 字节，以及固定 B 下的容量倍数"></svg>
+  </div>
+  <div class="src">TICK ROWS · MONO-BASIC · 8 卡 · GLM 5.3 · 字节按 MLA + DSA 布局推算，非实测</div>
+</div>
+
+<script>
+(() => {
+/* ═══════════════════════════════════════════════════════════════
+   Inline of mono-tokens.js (colors / rnd / el / txt / tip / obsReveal)
+   整个片段包在 IIFE 里：不向宿主页面泄漏任何全局变量。
+   ═══════════════════════════════════════════════════════════════ */
+const MONO = (() => {
+  const INK='#1C1C1A', PAPER='#F0EFEB', MUTED='#8F8E88', FAINT='#C6C5BF', GRID='#DEDDD6';
+  const NS='http://www.w3.org/2000/svg';
+  const el=(p,t,a)=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);p.appendChild(n);return n};
+  const txt=(p,a,s)=>{const n=el(p,'text',a);n.textContent=s;return n};
+  const tip=(n,s)=>{const t=document.createElementNS(NS,'title');t.textContent=s;n.appendChild(t)};
+  const rnd=(i,k)=>Math.abs(((i*73856093)^(k*19349663))%1000)/1000;
+  const timers={};
+  const keep=(id,t)=>{(timers[id]=timers[id]||[]).push(t)};
+  // 动画只负责入场；headless 截图/打印不会推进 CSS 动画，直接给终态
+  const STATIC=window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    || /HeadlessChrome/i.test(navigator.userAgent);
+  const obsReveal=(id,fn)=>{
+    const n=document.getElementById(id);
+    let done=false;
+    const go=()=>{
+      (timers[id]||[]).forEach(clearInterval); timers[id]=[];
+      if(n.tagName==='svg'||n.tagName==='SVG') n.innerHTML='';
+      fn(n);
+      if(STATIC) n.classList.add('cc-static');
+    };
+    const once=()=>{if(done)return;done=true;go()};
+    const io=new IntersectionObserver(es=>{if(es[0].isIntersecting){once();io.disconnect()}},{threshold:.3});
+    io.observe(n);
+    n.style.cursor='pointer';
+    n.addEventListener('click',()=>{done=true;io.disconnect();go()});
+    // 首屏已在视口内：立即播（也避开 headless 截图 / 打印不投递 IO 的问题）；
+    // 视口外的图仍然等滚动才播。
+    const r=n.getBoundingClientRect();
+    if(r.top<innerHeight&&r.bottom>0){once();io.disconnect()}
+  };
+  return {INK,PAPER,MUTED,FAINT,GRID,rnd,el,txt,tip,keep,obsReveal};
+})();
+
+// ════ F5 · tick rows → 每卡层数 / 每 token KV / 固定 B 容量 ════
+// 结构照 basics-gallery.html「C1 · tick rows」：一行一条轨道，1 tick = 1 个诚实单位，
+// 每 5 个 tick 一个点标，行尾大数。这里把单位换成「层」：1 层 = 788 B/token，
+// 因此条长就是每卡每 token 的 KV 字节；容量作为固定 B 下的推算值单列在右。
+(() => {
+  const {INK,PAPER,MUTED,FAINT,GRID,el,txt,tip,rnd,obsReveal}=MONO;
+
+  // 数据：78 层 / 788 B 为精确算术，非实测
+  const D = [
+    {cfg:'TP8 + PP1', lpc:'78 层/卡',      n:78, bytes:'61,464 B', cap:'1.0×', note:''},
+    {cfg:'TP4 + PP2', lpc:'39 层/卡',      n:39, bytes:'30,732 B', cap:'2.0×', note:''},
+    {cfg:'TP2 + PP4', lpc:'19–20 层/卡',   n:20, bytes:'15,760 B', cap:'3.9×', note:'最重 stage 20 层 · 容量按它算'}
+  ];
+
+  obsReveal('kvpp-ticks', s => {
+    const X0=84, P=2.78, XMAX=X0+78*P;      // 轨道满格 = 78 层（TP8 每卡）
+    const RY=[74,134,194], NX=386;          // 三行基线 / 右侧数值列右端
+
+    // ── 列头（轴即单位说明）
+    txt(s,{x:X0,y:30,'font-size':7,'font-weight':600,fill:MUTED,'letter-spacing':'.1em',
+      class:'fade'},'每卡层数 · 1 tick = 1 层');
+    txt(s,{x:NX,y:30,'font-size':7,'font-weight':600,fill:MUTED,'text-anchor':'end',
+      'letter-spacing':'.1em',class:'fade'},'固定 B 下容量');
+
+    D.forEach((d,i)=>{
+      const y=RY[i];
+      // 行标签（配置 + 每卡层数；PP4 的 19–20 写在标签里）
+      txt(s,{x:76,y:y-1,'font-size':8.5,'font-weight':700,fill:'#6A6963','text-anchor':'end',
+        'letter-spacing':'.04em',class:'fade',style:`animation-delay:${i*.08}s`},d.cfg);
+      txt(s,{x:76,y:y+11,'font-size':7,'font-weight':600,fill:MUTED,'text-anchor':'end',
+        class:'fade',style:`animation-delay:${i*.08}s`},d.lpc);
+
+      // 轨道（每行都画到满格，作为共同刻度，不给 PP4 造假缺口）
+      el(s,'line',{x1:X0,y1:y,x2:XMAX,y2:y,stroke:GRID,'stroke-width':.6,
+        class:'fade',style:`animation-delay:${i*.08}s`});
+
+      // tick：一条 = 一层
+      for(let k=0;k<d.n;k++){
+        const x=X0+k*P+P/2, h=13+rnd(k+1,i+2)*5;
+        el(s,'line',{x1:x,y1:y,x2:x,y2:y-h,stroke:INK,'stroke-width':.9,
+          opacity:.55+rnd(k+3,i+5)*.45,class:'fade',
+          style:`animation-delay:${i*.08+k*.012}s`});
+        if(k%5===4)el(s,'circle',{cx:x,cy:y+3.6,r:.8,fill:FAINT,
+          class:'fade',style:`animation-delay:${i*.08+k*.012}s`});
+      }
+
+      // 行尾：固定 B 下的容量倍数（推算值，字号最大）+ 每 token 字节（精确值）
+      const cap=txt(s,{x:NX,y:y-1,'font-size':14,'font-weight':800,fill:INK,'text-anchor':'end',
+        class:'fade',style:`animation-delay:${.4+i*.08}s`},d.cap);
+      tip(cap,`${d.cfg} — 固定 B 下容量 ${d.cap}（基线 TP8 + PP1）`);
+      txt(s,{x:NX,y:y+12,'font-size':7,'font-weight':600,fill:MUTED,'text-anchor':'end',
+        class:'fade',style:`animation-delay:${.4+i*.08}s`},`${d.bytes} / token`);
+
+      // PP4 不平衡：在空轨道里就地注明最重 stage 才是上限
+      if(d.note)txt(s,{x:X0+d.n*P+13,y:y-2,'font-size':7,'font-weight':600,fill:'#6A6963',
+        class:'fade',style:`animation-delay:${.6+i*.08}s`},d.note);
+    });
+
+    // ── 注脚：两条，承担「3.9× 的来历」与「算术不是实测」
+    el(s,'line',{x1:20,y1:218,x2:380,y2:218,stroke:GRID,'stroke-width':.6,
+      class:'fade',style:'animation-delay:.7s'});
+    txt(s,{x:20,y:236,'font-size':7.5,'font-weight':600,fill:'#6A6963',class:'fade',
+      style:'animation-delay:.8s'},
+      'PP4 每卡 19–20 层，容量由最重 stage（20 层）决定：78 ÷ 20 = 3.9×，不是按平均 19.5 得 4.0×。');
+    txt(s,{x:20,y:248,'font-size':7.5,'font-weight':600,fill:'#6A6963',class:'fade',
+      style:'animation-delay:.85s'},
+      '字节按 MLA + DSA 布局精确推算（656 + 132 = 788 B/层/token），非实测；B 固定时容量 = B ÷ 每 token KV。');
+
+    // ── 模板签名行（F5 的 ONE TICK = ONE ... 位）
+    txt(s,{x:200,y:288,'font-size':7.5,'font-weight':600,fill:'#B0AFA9','text-anchor':'middle',
+      'letter-spacing':'.12em',class:'fade',style:'animation-delay:.9s'},
+      '一条 tick = 一层 · 每隔 5 层一个点 · 灰轨满格 = 78 层');
+  });
+})();
+})();
+</script>
+    <div class="capnote">
+      <p><b>为什么长度按"层数"画。</b> 每层每 token 恒为 788 B，所以层数与字节严格成正比 —— 一条 tick 就是一层，
+         78 / 39 / 20 可以直接数出来，不必先换算成字节。这也是这份数据里唯一不可再分的诚实单位。</p>
+      <p><b>翻倍的来源在长度里，不在权重里。</b> 三种配置的每卡专家权重份额都约 1/8，长度之差全部来自
+         "每卡还要缓存几层"。这就是"PP 动两侧、TP 只动一侧"的可视版本。</p>
+      <p class="hint">图中的字节是布局算出来的，不是测出来的。若"B 固定"这条假设不成立
+         （例如 PP 之后通信工作区变大、首尾组件不一致），容量倍数要按 B 的实际变化重算，不能直接照搬 1× / 2× / 3.9×。</p>
+      <p><b>容量只是决策的一半。</b> PP 把层切开之后，stage 之间每次前向都要过一次 ring；PP4 换来 3.9× 容量，
+         代价落在跨 stage 的通信与气泡上。这一篇只算容量那一半 —— 选配置时另一半点在第 10 节的策略矩阵里（"合计容量"不等于"更好用"）。</p>
+    </div>
+  </div>
+
+  <div class="callout warn"><b>并行组会复用同一批卡。</b> 例如 TP4＋PP2＋CP4 用 8 张卡，每个 stage 的 TP4 组同时承担 CP4；Attention DP 和 EP 也各有派生关系。算资源规模时先画出进程和组的对应关系，再代入容量公式。</div>
+
+  <h2 id="calc"><span class="n">11</span>把你的配置代进去</h2>
+
+  <p>下面按本文算例的口径算：78 层、每层每 token 788 B（主 KV 656 ＋ index-K 132）、scaled FP8。拖动任意一项，容量立刻重算。</p>
+
+  <div class="calc">
+    <div class="ctl">
+      <div><label for="c-n">总卡数 N<span class="val" id="v-n">8</span></label><input id="c-n" type="range" min="1" max="16" step="1" value="8"></div>
+      <div><label for="c-tp">TP<span class="val" id="v-tp">8</span></label><input id="c-tp" type="range" min="1" max="16" step="1" value="8"></div>
+      <div><label for="c-pp">PP<span class="val" id="v-pp">1</span></label><input id="c-pp" type="range" min="1" max="8" step="1" value="1"></div>
+      <div><label for="c-cp">CP<span class="val" id="v-cp">1</span></label><input id="c-cp" type="range" min="1" max="8" step="1" value="1"></div>
+      <div><label for="c-adp">Attention DP<span class="val" id="v-adp">1</span></label><input id="c-adp" type="range" min="1" max="8" step="1" value="1"></div>
+      <div><label for="c-b">每卡 KV 预算 B（GiB）<span class="val" id="v-b">20</span></label><input id="c-b" type="range" min="4" max="80" step="1" value="20"></div>
+    </div>
+    <p style="margin:12px 0 0"><label style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dim)">
+      <input id="c-split" type="checkbox"> 启用 DSA 层分片（<code>--enable-dsa-cache-layer-split</code>，要求 PP=1）
+    </label></p>
+    <div class="out">
+      <div class="o"><b id="o-layers">78</b><span>每卡本地层数</span></div>
+      <div class="o"><b id="o-b">60.0</b><span>每 token 成本 b（KiB）</span></div>
+      <div class="o"><b id="o-atp">8</b><span>派生 attention TP</span></div>
+      <div class="o"><b id="o-pool">—</b><span>单池容量（token）</span></div>
+      <div class="o"><b id="o-pools">1</b><span>独立池数</span></div>
+      <div class="o"><b id="o-total">—</b><span>合计容量（token）</span></div>
+    </div>
+    <p class="hint" id="c-warn" style="margin:12px 0 0"></p>
+  </div>
+
+  <p class="hint"><b>这个计算器只算 b 那一边。</b> B 是你直接输入的，不替你估权重、激活、通信缓冲和图捕获 —— 那些得实测（见 03 节）。Attention DP 的合计按"各池预算相同"估算；实际上 attention TP 变小会复制注意力权重，B 会下降，所以真实合计小于这里的 D × 单池。</p>
+
+  <h2 id="myth"><span class="n">12</span>常见误解</h2>
+
+  <div class="callout warn"><b>✗「TP 越大，KV 池越大，因为权重少了」</b><br>对一半。权重分片确实释放 B，但普通 MLA 的 b 完全不变 —— 每个 attention TP rank 仍为这批请求保存全部本地层的完整 latent。别指望 TP 能同时压小分母。</div>
+
+  <div class="callout warn"><b>✗「PP 只是把权重摊开」</b><br>PP 把<b>层</b>摊开，所以连 KV 要缓存的层数一起少了。8 卡下 TP8 → TP4＋PP2 容量翻倍，靠的是把 78 层变成 39 层，而不是权重份额变化（两者都是约 1/8）。</div>
+
+  <div class="callout warn"><b>✗「Attention DP 能让单条请求放更多上下文」</b><br>不能。它提升的是<b>整机同时承载的唯一 token 数</b>；单条请求仍受它所落那个池的容量约束。问"能放多长"和问"能同时跑多少"是两个问题。</div>
+
+  <div class="callout warn"><b>✗「DSA 用 top-k 选历史，所以 KV 变小了」</b><br>top-k 减少的是 attention 的访问与计算量，主 KV 仍保存完整历史。index-K 有自己的 132 B／层／token，而且它只在部分层分配时才省。</div>
+
+  <h2 id="quiz"><span class="n">13</span>自测：能答上这五题就算懂了</h2>
+
+  <details><summary>1. 8 卡、78 层，TP8＋PP1 换成 TP4＋PP2，容量为什么约翻倍？权重份额变了吗？</summary>
+  <p>没变。两种配置的每卡路由专家权重份额都约 1/8（1 层数比 × 分片比）。翻倍来自 <b>b 减半</b>：每卡保存的 KV 层数从 78 降到 39。B 近似不变，容量 ≈ B/b 翻倍。</p></details>
+
+  <details><summary>2. 把 TP 从 4 调到 8，普通 MLA 的 b 会变吗？为什么？</summary>
+  <p>不会。普通 MLA 的每个 attention TP rank 都要访问这批请求共享的 latent 历史，<code>layer_num</code> 和 <code>kv_cache_dim</code> 都不随 TP 变。TP 的收益全部来自权重分片释放的 B。</p></details>
+
+  <details><summary>3. TP2＋PP4 的理论容量写了 3.9 倍，为什么不是 4 倍？</summary>
+  <p>78 层分成 4 个 stage 不是整数：19–20 层。决定容量的是最重的那一个 stage（20 层），所以是 78/20 = 3.9，而不是 78/19.5 = 4。代码对 <code>token_capacity</code> 做 <code>AllReduce(MIN)</code>，最穷的 stage 说了算。</p></details>
+
+  <details><summary>4. 开了 DSA 层分片，78 层 CP4，为什么主缓存按 21 层算而不是 20 层？</summary>
+  <p><code>ceil(78/4) = 20</code> 个所属层，再加 1 个远程层 scratch。<code>get_glm_dsa_layer_split_effective_num_layers</code> 返回 <code>max(1, owned + 1)</code>，scratch 层计入同一个分母。</p></details>
+
+  <details><summary>5. EP 从 1 调到 8（固定 TP 组宽），每卡专家权重会变小吗？</summary>
+  <p>不会。固定 TP 总组宽且 <code>MoE_DP=1</code> 时有 <code>MoE_TP = TP / EP</code>，所以 <code>EP × MoE_TP = TP</code> 恒定，本地路由专家权重 ≈ 本 stage 权重 / TP 不变。EP 换的是"怎么存"，差别在通信、专家布局和 padding。</p></details>
+
+  <h2 id="read"><span class="n">14</span>延伸阅读</h2>
+  <ul class="readlist">
+    <li><a href="https://zhuanlan.zhihu.com/p/2096216847276364514">原文：SGLang 各并行策略对 KV 池容量大小影响（以 GLM 5.3 为例）</a><span class="rnote">本页的算例口径、源码定位与那张策略矩阵表都来自这篇。</span></li>
+    <li><a href="../../inference-systems/hicache-mooncake/index.html">L1–L4 缓存与 KV 分层</a><span class="rnote">b 算清楚之后，往下就是"这些 token 放哪一层"。</span></li>
+    <li><a href="../../comm-parallel/prefill-cp8-decode-tp8/index.html">Prefill CP8 / Decode TP8</a><span class="rnote">同一套 CP 切分，换成从通信与算子形状看收益。</span></li>
+    <li><a href="../../inference-systems/sglang-request-lifecycle/index.html">SGLang 推理全流程</a><span class="rnote">容量算出来之后，一轮调度里它怎么被消耗。</span></li>
+  </ul>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-next" href="../../inference-systems/sglang-stream-interval/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">--stream-interval 为什么在长输出场景有提升</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../inference-systems/sglang-stream-interval/index.html"><span class="sm-more-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-24</span></a><a class="sm-more-a" href="../../inference-systems/moe-a2a-megamoe/index.html"><span class="sm-more-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-09-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-prefetch-prediction/index.html"><span class="sm-more-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/sglang-request-lifecycle/index.html"><span class="sm-more-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-more-m">19 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/hicache-mooncake/index.html"><span class="sm-more-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-18</span></a><a class="sm-more-a" href="../../inference-systems/dflash-pp-adaptation/index.html"><span class="sm-more-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-16</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p>数据来源：知乎《SGLang 各并行策略对 KV 池容量大小影响（以 GLM 5.3 为例）》（2026-10-21）。</p>
+    <p><b>源码核对</b>：本页引用的 13 处符号与行号，已按 <code>sgl-project/sglang</code> 的
+      <code>v0.5.21</code> 标签（annotated tag <code>7337b27</code> → commit <code>e00930c</code>）逐条
+      拉取原文比对，全部命中，没有改名或路径漂移 —— <code>KVCacheConfigurator</code> 与
+      <code>model_executor/pool_configurator.py</code> 都确实存在于该版本。引用这个版本时，用 commit
+      <code>e00930c5489053f26d86b179cee0d087f846acbb</code> 比用标签更稳。</p>
+    <p>本页<b>没有跑运行时实测</b>：61,464 B / 30,732 B / 15,760 B 与 1× / 2× / 3.9× 都是从 788 B 的布局
+      与层数直接算出来的，不是测出来的。B 的绝对值依赖权重、激活、通信缓冲与图捕获，需要实测。</p>
+    <p class="lic">内容 CC BY 4.0 · 脚本 MIT ·
+      <a href="../../index.html">返回 show-me 知识库</a></p>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var LAYERS = 78, PER_LAYER = 788, GIB = 1073741824;
+  var byId = function (id) { return document.getElementById(id); };
+  var ids = ["n", "tp", "pp", "cp", "adp", "b"];
+  var fmt = function (n) {
+    if (!isFinite(n)) return "—";
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + "G";
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(Math.round(n));
+  };
+
+  function run() {
+    var N = +byId("c-n").value, tp = +byId("c-tp").value, pp = +byId("c-pp").value,
+        cp = +byId("c-cp").value, adp = +byId("c-adp").value, bGib = +byId("c-b").value;
+    var split = byId("c-split").checked;
+    var warn = [];
+
+    ids.forEach(function (k) { byId("v-" + k).textContent = byId("c-" + k).value; });
+
+    if (split && pp > 1) { warn.push("层分片要求 PP=1，已按 PP=1 计算"); pp = 1; }
+    if (tp * pp > N) warn.push("TP×PP=" + (tp * pp) + " 超过 " + N + " 卡（并行组不能在卡间复用）");
+    if (cp > tp) warn.push("CP 不能大于 TP：CP rank 复用 TP 组");
+    if (adp * cp > tp) warn.push("Attention DP × CP 不能大于 TP");
+    if (tp % Math.max(1, cp) !== 0) warn.push("TP 不能被 CP 整除，attention TP 会向下取整");
+    if (adp > 1 && tp % (adp * cp) !== 0) warn.push("TP 不能被 Attention DP × CP 整除");
+
+    var localLayers = Math.ceil(LAYERS / pp);
+    var effLayers = split ? Math.max(1, Math.ceil(localLayers / cp) + 1) : localLayers;
+    var bBytes = effLayers * PER_LAYER;
+    var attnTp = Math.max(1, Math.floor(tp / Math.max(1, adp) / Math.max(1, cp)));
+    var perPool = (bGib * GIB) / bBytes;
+    var total = perPool * adp;
+
+    byId("o-layers").textContent = effLayers + (split ? "（含 scratch）" : "");
+    byId("o-b").textContent = (bBytes / 1024).toFixed(1);
+    byId("o-atp").textContent = attnTp;
+    byId("o-pool").textContent = fmt(perPool);
+    byId("o-pools").textContent = adp;
+    byId("o-total").textContent = fmt(total);
+
+    var el = byId("c-warn");
+    if (warn.length) {
+      el.innerHTML = "⚠ " + warn.join("；") + "。";
+      el.style.color = "var(--warn)";
+    } else {
+      el.innerHTML = "每卡 " + effLayers + " 层 × " + PER_LAYER + " B = " + bBytes +
+        " B/token；" + bGib + " GiB ÷ " + (bBytes / 1024).toFixed(1) + " KiB ≈ " +
+        fmt(perPool) + " token。";
+      el.style.color = "";
+    }
+  }
+
+  ids.forEach(function (k) { byId("c-" + k).addEventListener("input", run); });
+  byId("c-split").addEventListener("change", run);
+  run();
+})();
+</script>
+</body>
+</html>
