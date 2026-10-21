@@ -1529,6 +1529,70 @@ def check_regression(root: Path, rep: Reporter) -> None:
 
 
 # ---------------------------------------------------------------------------
+# F. 样式 class 撞名
+# ---------------------------------------------------------------------------
+# 一个元素带多个 class 时，两个 class 各自定义同一属性就会互相覆盖，后写的赢。
+# 这条曾经真的发布过一次：门户里 `.btn.sec`（次级按钮）撞上 `.sec`（区块容器），
+# 区块的 `padding:38px 0 6px` 把按钮的 `padding:10px 16px` 吃掉 ——
+# 按钮变成 68px 高、文字贴左边框，而 scrollWidth 检查完全看不到（溢出在左侧）。
+# 只比对「选择器就是一个类名」的规则：这正是那次事故的形态。
+SINGLE_CLASS_RULE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+
+
+def single_class_decls(html: str) -> dict[str, dict[str, str]]:
+    css = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S | re.I))
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    out: dict[str, dict[str, str]] = {}
+    for sel_group, body in SINGLE_CLASS_RULE.findall(css):
+        sel_group = sel_group.strip().split("}")[-1].strip()   # 展平 @media
+        for sel in sel_group.split(","):
+            m = re.fullmatch(r"\.([A-Za-z0-9_-]+)", sel.strip())
+            if not m:
+                continue
+            bucket = out.setdefault(m.group(1), {})
+            for decl in body.split(";"):
+                if ":" not in decl:
+                    continue
+                prop, val = decl.split(":", 1)
+                bucket[prop.strip().lower()] = val.strip()
+    return out
+
+
+def check_class_collisions(root: Path, rep: Reporter) -> None:
+    rep.section("F. 样式 CLASS 撞名 COLLISIONS")
+    pages = [root / "index.html"] + article_pages(root)
+    pages = [p for p in pages if p.exists()]
+    problems: list[str] = []
+    for page in pages:
+        html = read_text(page)
+        body_at = html.find("<body")
+        body = html[body_at:] if body_at >= 0 else html
+        decl = single_class_decls(html)
+        seen: dict[tuple[str, str], list[str]] = {}
+        for attr in re.findall(r'class="([^"]*)"', body, re.I):
+            cls = attr.split()
+            for i in range(len(cls)):
+                for j in range(i + 1, len(cls)):
+                    a, b = decl.get(cls[i]), decl.get(cls[j])
+                    if not a or not b:
+                        continue
+                    clash = [p for p in a if p in b and a[p] != b[p]]
+                    if clash:
+                        seen.setdefault((cls[i], cls[j]), sorted(set(clash)))
+        for (a, b), props in seen.items():
+            problems.append(
+                f"{rel(root, page)}: .{a} + .{b} 同定义 {', '.join(props)}"
+            )
+    if problems:
+        rep.fail("[css] 多类元素的两套样式互不覆盖", f"{len(problems)} 处冲突")
+        for item in problems[:10]:
+            print(f"        └ {item}")
+    else:
+        rep.ok("[css] 多类元素的两套样式互不覆盖",
+               f"{len(pages)} 个页面：0 处跨类属性冲突")
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
@@ -1570,6 +1634,7 @@ def main(argv: list[str] | None = None) -> int:
         check_layout(root, rep, tmpdir, chrome, widths)
         check_portal(root, rep, tmpdir, chrome)
         check_regression(root, rep)
+        check_class_collisions(root, rep)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
