@@ -26,11 +26,15 @@ def check() -> list[tuple[str, str]]:
     for page in sorted(ROOT.rglob("*.html")):
         if ".git" in page.parts:
             continue
+        # templates/ 放的是未替换占位符的门户源模板，不是可访问页面，跳过自检
+        if "templates" in page.relative_to(ROOT).parts[:-1]:
+            continue
         html = page.read_text(encoding="utf-8", errors="ignore")
         for raw in LINK_RE.findall(html):
             if raw.startswith(SKIP_PREFIXES) or any(m in raw for m in RUNTIME_PATH_MARKERS):
                 continue
-            target = raw.split("#", 1)[0]
+            # 查询串不是路径的一部分：index.html?q=xxx 校验的是 index.html
+            target = raw.split("#", 1)[0].split("?", 1)[0]
             if not target:
                 continue
             if not (page.parent / target).resolve().exists():

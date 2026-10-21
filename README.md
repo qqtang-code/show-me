@@ -24,10 +24,15 @@
 
 ```
 show-me/
-├── build_index.py             # 扫 meta.json → 重建 README 表格与门户 index.html
-├── build_index.py             # 扫 meta.json → 重建 README 表格与门户 index.html
+├── build_index.py             # 扫 meta.json + 解析文章页 → 重建门户、README 表格、各页站点外壳
+├── theme.py                   # 全站设计令牌（颜色/尺寸的唯一来源，门户与文章页外壳共用）
+├── shell.py                   # 给每个文章页注入站点外壳（吸顶条 / 分类侧栏 / 上一篇下一篇），幂等
+├── templates/portal.html      # 门户模板（占位符由 build_index.py 填充，别改根目录的 index.html）
+├── curation.json              # 门户上的阅读路线（哪几篇按什么顺序读）
 ├── check_links.py             # 校验所有页面的相对链接是否可达（sync.sh 会自动跑）
+├── verify_site.py             # 验收：链接 / 六档宽度溢出 / 门户交互 / 外壳幂等
 ├── sync.sh                    # commit + push（skill 每次写完自动调用）
+├── DESIGN.md                  # 站点结构与信息架构说明（改版时先看这份）
 ├── <category>/<slug>/
 │   ├── index.html             # 产物本体（固定文件名）
 │   ├── notes.md               # 纯文字回答也要留档
@@ -60,22 +65,32 @@ show-me/
 ## 维护
 
 ```bash
-open index.html                 # 打开门户（搜索 + 标签筛选）
-python3 build_index.py          # 新增/修改 meta.json 后重建索引
+open index.html                 # 打开门户（全库检索 ⌘K + 分类 + 标签筛选 + 阅读路线）
+python3 build_index.py          # 新增/修改 meta.json 或文章页后重建（门户 + 外壳 + README 表格）
+python3 build_index.py --dry-run    # 只看解析结果：每篇多少分钟、多少小节
+python3 verify_site.py          # 验收：链接、六档宽度、门户交互、外壳幂等
 python3 check_links.py          # 链接体检（sync.sh 里也会自动跑）
 bash sync.sh "show-me: <主题>"   # 提交并推送（幂等；无改动时不产生空提交）
 ```
 
+**别手改根目录的 `index.html`** —— 它由 `templates/portal.html` 渲染生成，下次构建会被覆盖。
+要改门户就去改模板。文章页里的站点外壳同样由 `shell.py` 生成，用
+`<!-- show-me:shell:begin -->…<!-- show-me:shell:end -->` 标出范围，构建时整段重写；
+标记之外的手写正文不受影响。
+
 ## 视觉约定
 
-三篇算一个站点，共用一套设计变量（每页 `<style>` 顶部那份 `:root` 保持一致，页面仍各自自包含）：
+所有页面共用一套设计变量，来源是 `theme.py` 的 `TOKENS_CSS`（门户渲染时注入，文章页外壳注入时内联）。
+每页仍然**自包含**——单个 `index.html` 可以直接发出去，不依赖外部 CSS/JS/字体。
 
 - 底色 `#f5f7fb`、卡片白、边框 `#dde3ee`、文字 `#131c2e` / 次要 `#4a5871`
 - 主色 `#1d4ed8`（链接、速览卡、导航 chip 悬停）
+- 分类色：推理系统 `#1d4ed8` / 通信与并行 `#0b6b3f` / 训练与算法 `#6b2fb5` / 工具与方法 `#a35a06` / 其他 `#5b6b82`——门户的分类点、文章页的分类 pill、阅读路线统一取色
 - 正文 15.5px / 行高 1.72，内容宽 980px
-- 页面骨架：面包屑 → 标题 → 日期与标签 pill → 锚点导航 → 速览卡 → 正文 → 页脚（数据来源 + 许可）
+- 页面骨架：面包屑 → 标题 → 日期与标签 pill → 锚点导航 → 速览卡 → 正文 → 页脚（数据来源 + 许可）；
+  外壳再叠一层：吸顶条（品牌 / 分类 / 阅读时长 / 搜索）+ 宽屏左侧同分类侧栏 + 页尾上一篇/下一篇
 - 交互计算器：按「载荷 / 换算 / 结论」这类逻辑分组，每组 2–3 格，避免出现单独一张的孤儿卡
-- 移动端：导航 chip 横向滚动，计算器的对照组自动折成一列
+- 移动端：导航 chip 横向滚动，计算器的对照组自动折成一列；≥1280px 才出现左侧分类侧栏，正文宽度不随之变化
 - 数据图表：不手写，由 [`lieflat-charts`](https://github.com/larashero3-dotcom/lieflat-charts) skill（模板驱动）生成，`catalog.md` 选型、`templates/` 取骨架。页壳仍用上面这套设计变量，图内排版与最小字号听 lieflat 的；整页只锁一套色系（默认 Mono 灰阶，有序单序列可用 porcelain；用 palm / wire 时把 `--accent` 一起换掉，不留两种主色）
 
 ## 许可

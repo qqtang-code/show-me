@@ -1,0 +1,31 @@
+[
+  {
+    "name": "一条请求的主线",
+    "desc": "先把一条请求从进到出、流式输出、KV 分层看全 —— 后面大多数篇目都挂在这条主线上。",
+    "items": [
+      "inference-systems/sglang-request-lifecycle",
+      "inference-systems/sglang-stream-interval",
+      "inference-systems/hicache-mooncake",
+      "inference-systems/kv-prefetch-prediction"
+    ]
+  },
+  {
+    "name": "多卡通信：先拿掉哪一项开销",
+    "desc": "同一组集合通信，先分清省的是带宽还是固定开销，再决定重叠、换协议还是换切分。",
+    "items": [
+      "comm-parallel/allreduce-1stage-vs-2stage",
+      "comm-parallel/cuda-ipc-direct-push",
+      "comm-parallel/ar-compute-overlap-moe-chunk",
+      "comm-parallel/prefill-cp8-decode-tp8"
+    ]
+  },
+  {
+    "name": "源码走读与实践",
+    "desc": "三篇都是「对着源码把一件事走完」：启动器怎么组进程、MoE 通信开关怎么选、新特性怎么适配进来。",
+    "items": [
+      "tooling/torchrun-launch-internals",
+      "inference-systems/moe-a2a-megamoe",
+      "inference-systems/dflash-pp-adaptation"
+    ]
+  }
+]
