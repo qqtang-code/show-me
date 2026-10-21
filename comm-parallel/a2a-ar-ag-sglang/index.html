@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light">
 <title>三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</title><!-- show-me:shell:begin -->
-<meta name="description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码：allreduce 有 6 级后端优先级、all2all 根本不在 communication_op 里而是一对 dispatch/combine 语义、GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
+<meta name="description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码，再补上 PP 的点对点：send_tensor_dict 只发 1/P 切片、接收端 all_gather 拼回，所以每跨一条 stage 边界都多一次 allgather，且 to_pp 必须在传输前把欠的 sum 全部结清。GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
 <meta property="og:type" content="article">
 <meta property="og:title" content="三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward">
-<meta property="og:description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码：allreduce 有 6 级后端优先级、all2all 根本不在 communication_op 里而是一对 dispatch/combine 语义、GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
+<meta property="og:description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码，再补上 PP 的点对点：send_tensor_dict 只发 1/P 切片、接收端 all_gather 拼回，所以每跨一条 stage 边界都多一次 allgather，且 to_pp 必须在传输前把欠的 sum 全部结清。GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
 <meta property="og:url" content="https://qqtang-code.github.io/show-me/comm-parallel/a2a-ar-ag-sglang/index.html">
 <link rel="canonical" href="https://qqtang-code.github.io/show-me/comm-parallel/a2a-ar-ag-sglang/index.html">
 <meta name="twitter:card" content="summary">
@@ -392,7 +392,7 @@
 </style>
 <!-- show-me:shell:end --></head>
 <body><!-- show-me:shell:begin -->
-<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">32 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-21</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">40 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-21</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
 try{(function(){var b=document.getElementById('sm-progress'),
 u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
 p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
@@ -405,7 +405,7 @@ addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').to
 e.preventDefault();g()}})})()}catch(e){}
 </script>
 <!-- show-me:shell:end --><!-- show-me:shell:begin -->
-<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 5 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 5 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
 <!-- show-me:shell:end -->
 <div class="wrap">
 
@@ -435,6 +435,7 @@ e.preventDefault();g()}})})()}catch(e){}
     <a href="#ag">allgather</a>
     <a href="#a2a">all2all</a>
     <a href="#glm">GLM-5.3 的一条 forward</a>
+    <a href="#pp">PP 的点对点</a>
     <a href="#parallel">并行配置速查</a>
     <a href="#myths">常见误解</a>
     <a href="#quiz">自测</a>
@@ -479,6 +480,12 @@ e.preventDefault();g()}})})()}catch(e){}
         <code>enable_a2a_moe</code> 才为真，随后 <code>capture_output()</code> 对 aux hidden state 做一次
         <code>attn_tp_group.all_gather(..., dim=0)</code> —— 因为 A2A 把 token 打散到了 EP rank 上，
         要还原一条完整序列只能 all-gather。</li>
+      <li><b>6 · PP 用点对点，但这条 p2p 里藏着一次 allgather。</b>
+        <code>send_tensor_dict()</code> 在 <code>all_gather_group=(attn_tp_group)</code> 下
+        <b>只发本 rank 的 1/P 切片</b>，接收端再 <code>all_gather</code> 拼回来
+        （<code>parallel_state.py:1841-1843</code> / <code>:1903</code>）。所以每跨一条 stage 边界都会多一次 allgather；
+        而且正是这个切片协议，逼着 <code>to_pp()</code> 在传输前把欠的 sum 全部结清 ——
+        <i>Every sum the output owes is completed before transport</i>。</li>
     </ul>
   </div>
 
@@ -773,6 +780,10 @@ def attn_tp_gather_input(hidden_states, forward_batch, gather=None):
       </tr>
     </tbody>
   </table>
+
+  <p class="hint">这张表里没有 p2p。它不是漏掉了 —— <b>点对点根本不经过 L3/L4/L5 这三层里的任何一层</b>：
+  它不来自模型层，而是由 <code>managers/scheduler_pp_mixin.py</code> 在调度侧直接调
+  <code>pp_group.send_tensor_dict()</code>。见 <a href="#pp">第 11 节</a>。</p>
 
   <div class="callout">
     <b>为什么 all2all 跳过 L2 和 L3？</b> 因为它的接口不是"张量进、张量出"，而是
@@ -1506,10 +1517,11 @@ self.mlp = Glm5NextMLP(..., reduce_results=False)           <span class="cm">= D
     </div>
     <div class="sitem pp">
       <div class="sh"><b>L1 · PP 边界</b><span class="sbadge pp">send / recv（不是集合通信）</span></div>
-      <p><code>residual_batch.to_pp(...)</code> / <code>attn_boundary.from_pp(...)</code>（<code>:1142</code>、<code>:1221</code>）。
-      PP 用的是点对点，<b>不产生 allreduce / allgather / all2all</b>。
+      <p><code>residual_batch.to_pp(...)</code> / <code>attn_boundary.from_pp(...)</code>（<code>:1140-1143</code>、<code>:1220-1221</code>）。
+      PP 用点对点收发，pp_group 里没有任何 collective —— 但这条 p2p 在 PP + TP 下
+      <b>每跳都套着一次 all-gather</b>，详见 <a href="#pp">第 11 节</a>。
       非首 rank 的 <code>embed_tokens</code>、非末 rank 的 <code>lm_head</code> 都被替换成
-      <code>PPMissingLayer</code>（<code>:1284-1296</code>）。</p>
+      <code>PPMissingLayer</code>（<code>:1284-1297</code>）。</p>
     </div>
     <div class="sitem ag">
       <div class="sh"><b>L2 · 末层 logits</b><span class="sbadge ag">all-gather / all-to-all</span></div>
@@ -1543,7 +1555,216 @@ self.mlp = Glm5NextMLP(..., reduce_results=False)           <span class="cm">= D
     并在 MTP 的捕获路径上<b>补回一次 allgather</b>。三件事必须一起看。
   </div>
 
-  <h2 id="parallel"><span class="n">11</span>并行配置速查：哪种并行触发哪条原语</h2>
+  <h2 id="pp"><span class="n">11</span>PP 的点对点：第四种通信，和它藏在里面的 all-gather</h2>
+  <p><b>一句话答案</b>：PP 不用集合通信，它用 <code>send</code> / <code>recv</code>。
+  但在 PP + TP 下这条 p2p <b>不是裸的点对点</b> —— 每个 rank 只发自己那 1/P 的切片，
+  接收端再 <code>all_gather</code> 拼回来。所以每跨一条 stage 边界，都会出现<b>一次 allgather</b>；
+  而且正是这次 allgather，逼着边界层在传输前把欠的 sum 全部收干净。</p>
+
+  <h3 class="mini">11.1 把 p2p 放回原语地图</h3>
+  <p>前面的表只覆盖了 N→N 的三种。补上按"方向"分类的全景，p2p 的位置就清楚了：</p>
+  <table>
+    <thead><tr><th style="width:64px">方向</th><th style="width:196px">原语</th><th style="width:96px">有 root 吗</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr class="hot"><td class="k" data-label="方向">1 → 1</td><td data-label="原语"><code>send</code> / <code>recv</code></td><td data-label="有 root 吗">无（两端对称）</td>
+        <td data-label="语义">把一份数据交给<b>指定的那一个</b> rank；两端的 <code>src</code> / <code>dst</code> 必须对上</td></tr>
+      <tr><td class="k" data-label="方向">1 → N</td><td data-label="原语"><code>broadcast</code></td><td data-label="有 root 吗">有（root）</td><td data-label="语义">root 的一份完整数据发给所有人</td></tr>
+      <tr><td class="k" data-label="方向">1 → N</td><td data-label="原语"><code>scatter</code></td><td data-label="有 root 吗">有（root）</td><td data-label="语义">root 切成 N 份，一人一份</td></tr>
+      <tr><td class="k" data-label="方向">N → 1</td><td data-label="原语"><code>gather</code> / <code>reduce</code></td><td data-label="有 root 吗">有（dst）</td><td data-label="语义">收到一处，其余人手里不留</td></tr>
+      <tr><td class="k" data-label="方向">N → N</td><td data-label="原语"><code>allreduce</code> / <code>allgather</code> / <code>all2all</code></td><td data-label="有 root 吗">无</td>
+        <td data-label="语义">全员参与、全员拿到结果（第 01–04 节）</td></tr>
+    </tbody>
+  </table>
+  <p><b>p2p 是唯一"只跟一个对端说话"的原语</b>，也正因为如此，它不需要 group 的语义 ——
+  它只需要 <code>src</code> / <code>dst</code>。PP 之所以选它，理由很直接：一条流水线上，
+  stage <i>i</i> 只跟 <i>i±1</i> 有数据依赖，把别的 rank 拉进来纯属浪费。</p>
+
+  <div class="callout">
+    这也是"PP 不降低通信量"这句话的准确含义：<b>它不降低的是"每对相邻 rank 之间"的传输量</b>，
+    而不是"总线上一点通信都没有"。在 PP + TP 的混合布局里，pp_group 是 rank 的一个<b>正交</b>划分
+    （<code>[g0,g4], [g1,g5] …</code>，见 <code>parallel_state.py</code> 里 initialize_model_parallel 的注释），
+    所以同一个 tensor 既会沿 pp 方向被点对点送出去，也会在每组内部被 TP 的集合通信处理。
+  </div>
+
+  <h3 class="mini">11.2 <code>send_tensor_dict()</code>：元数据走 CPU 组，张量走 device 组</h3>
+  <pre><code><span class="cm"># distributed/parallel_state.py:1796</span>
+def send_tensor_dict(self, tensor_dict, dst=None, all_gather_group=None, async_send=False):
+    <span class="cm">"""Send the input tensor dictionary.
+    NOTE: `dst` is the local rank of the source rank."""</span>
+    if dst is None:
+        dst = (<span class="hl">self.rank_in_group + 1</span>) % self.world_size      <span class="cm">← 默认发给"下一个"</span>
+
+    metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+    send_func = torch.distributed.isend if async_send else torch.distributed.send
+
+    p2p_works = self.send_object(metadata_list, dst=dst, async_send=async_send)   <span class="cm">← 元数据走 CPU 组</span>
+    for tensor in tensor_list:
+        if tensor.numel() == 0:
+            continue
+        ...
+        comm_group = metadata_group if tensor.is_cpu else group                       <span class="cm">← 张量走 device 组</span>
+        work = send_func(tensor, self.ranks[dst], group=comm_group)
+        if async_send:
+            p2p_works.append(P2PWork(work, tensor))
+    return p2p_works</code></pre>
+
+  <p>三个细节值得注意：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>它是"字典"级的 p2p，不是张量级的。</b> <code>_split_tensor_dict()</code>（<code>:135</code>）把
+      <code>dict</code> 拆成"元数据列表（key + <code>TensorMetadata</code>）"和"张量列表"两部分，
+      元数据 pickle 后走 CPU 组，张量本体走 device 组。这样接收端可以<b>按需分配</b>张量。
+      源码注释解释了为什么不全部转 CPU：<i>while switching to D2D would introduce an extra D2H copy,
+      our benchmarks show better overall transmission performance with D2D</i>。</li>
+    <li><b>默认方向就是"下一个"。</b> <code>dst</code> 不填时取 <code>rank_in_group + 1</code>，
+      <code>recv_tensor_dict()</code> 的 <code>src</code> 取 <code>rank_in_group - 1</code> ——
+      流水线方向是<b>写在默认参数里</b>的。</li>
+    <li><b>异步发送返回句柄。</b> <code>async_send=True</code> 时用 <code>isend</code>，并返回
+      <code>List[P2PWork]</code>（<code>:129</code>，<code>P2PWork(work, payload)</code>）。
+      <code>payload</code> 字段是必需的 —— 它让被发送的张量在 <code>work</code> 完成前不会被回收。</li>
+  </ul>
+
+  <h3 class="mini">11.3 这条 p2p 里藏着一次 all-gather</h3>
+  <pre><code><span class="cm"># 发送端 parallel_state.py:1841-1843 —— 只发自己那一片</span>
+<span class="cm"># send-allgather: send only a slice, then do allgather.</span>
+if all_gather_group is not None and tensor.numel() % all_gather_size == 0:
+    tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
+
+<span class="cm"># 接收端 parallel_state.py:1885-1903 —— 收齐所有片再拼回来</span>
+if use_all_gather:
+    tensor = <span class="hl">all_gather_group.all_gather(tensor, dim=0)</span>
+    tensor = tensor.reshape(orig_shape)</code></pre>
+
+  <p>调用方在 scheduler 里把 <code>all_gather_group</code> 显式设成 attention-TP 组
+  （<code>managers/scheduler_pp_mixin.py:867</code>）：</p>
+  <pre><code>p2p_work.extend(
+    self.pp_group.send_tensor_dict(
+        tensor_dict=tensor_dict,
+        <span class="hl">all_gather_group=(self.attn_tp_group)</span>,
+        async_send=async_send,
+    )
+)</code></pre>
+
+  <p>于是 PP 的每一跳变成：<b>每个 attn-TP rank 发 1/P 的切片 → 下一 stage 的对应 rank 用 all-gather 拼回整张</b>。
+  字节总数不变（p2p 的 n/P 加上 all-gather 的 (P−1)/P·n，合起来还是 n），
+  换掉的是那一跳 p2p 的规模。至于这样换来的是不是更快，<b>本页不做判断</b> ——
+  代码只写了"send a slice, then do allgather"这句注释，没有给理由。</p>
+
+  <div class="callout warn">
+    <b>但这个切片协议有一个硬性前提，而它正好解释了第 07 节。</b>
+    接收端要 all-gather 出一个正确结果，前提是<b>每个 attn-TP rank 手里那一份补全后必须相同</b>。
+    如果某个 rank 的 hidden state 还是一份 partial（求和没做完），拼出来的就是错的。
+    所以 <code>residual_batch.to_pp()</code>（<code>residual/batch.py:270</code>）的 docstring 写得很直白：
+    <blockquote style="margin:8px 0 0;padding:0 0 0 12px;border-left:2px solid var(--warn);font-size:13.4px">
+      <i>Every sum the output owes is completed before transport, a declared one too: the pipeline sends
+      each tensor as one slice per attention-TP rank and gathers the slices back on the next rank,
+      which reassembles only a tensor that every attention-TP rank holds alike.</i>
+    </blockquote>
+  </div>
+
+  <p>反过来，接收端的 <code>from_pp()</code>（<code>stage.py:270</code>）就据此断言"收到的已经是完整的"：</p>
+  <pre><code>Returns:
+    The received output, complete: the sender completes every sum
+    before transport (see residual_batch.to_pp), so where this stage's
+    entry declares a sum its producer leaves, it takes the path for a
+    sum already completed.</code></pre>
+
+  <p>这就是全页最紧的一处耦合：<b>PP 的切片协议、边界层的"欠账"机制、以及
+  <code>--boundary-reduction</code> 的选择，三者是绑在一起的</b>。
+  <code>to_pp</code> 会把每一笔欠账在出口处结清（哪怕声明的是 <code>always_partial</code>），
+  因为下一跳的 all-gather 不接受 partial。</p>
+
+  <h3 class="mini">11.4 调度侧：带类型的消息 + 独立的 comm stream</h3>
+  <pre><code><span class="cm"># managers/scheduler_pp_mixin.py:849</span>
+def _pp_send_dict_to_next_stage(self, tensor_dict, async_send=True, msg_type="default", ready_event=None):
+    tensor_dict[<span class="hl">"__msg_type__"</span>] = msg_type
+    p2p_work = []
+    with self.pp_comm_stream_ctx:
+        if ready_event is not None:
+            self.device_module.current_stream().wait_event(ready_event)
+        p2p_work.extend(self.pp_group.send_tensor_dict(..., async_send=async_send))
+    return p2p_work</code></pre>
+
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>消息带类型。</b> <code>__msg_type__</code> 取 <code>proxy</code> / <code>output</code> / <code>default</code>。
+      接收端 <code>_pp_recv_typed_dict()</code>（<code>:879</code>）按类型分拣：收到不是想要的那类，
+      就塞进 <code>self._pp_tensor_dict_inbox[msg_type]</code> 队列继续收 ——
+      因为一次 forward 里，PP 会交错发送"本 microbatch 的 hidden state"和"proxy tensor"。</li>
+    <li><b>发送默认异步。</b> <code>async_send=True</code> 是默认值，配合
+      <code>pp_comm_stream</code>（<code>:588-601</code>）把 p2p 放到一条独立 CUDA stream 上，
+      不等下一次 forward。但这条 stream 只在 <code>SGLANG_PP_COMM_OVERLAP</code> 打开时分配，
+      否则 <code>pp_comm_stream_ctx</code> 是 <code>nullcontext()</code> —— 该 env 默认 <code>False</code>（<code>environ.py:676</code>）。</li>
+    <li><b>双向同时收发走原子提交。</b> <code>send_recv_tensor_dict()</code>（<code>:1911</code>）用
+      <code>batch_isend_irecv</code> 把 send / recv 一次性提交，代码注释说明了原因：避免在
+      <code>isend</code> 可能阻塞到匹配 <code>recv</code> 被提交为止的后端（如 NPU / HCCL）上死锁。</li>
+    <li><b>microbatch 是这层的量纲。</b> <code>--pp-size</code> 定 stage 数，
+      <code>--pp-max-micro-batch-size</code> 定每个 stage 同时压几个 micro batch，
+      <code>--pp-async-batch-depth</code> 定异步深度（默认 0）。p2p 的次数 ≈ 每个 microbatch 每跳一次。</li>
+  </ul>
+
+  <h3 class="mini">11.5 GLM-5.3 的 PP 路径</h3>
+  <p>模型侧只有两行，但位置很关键：</p>
+  <pre><code><span class="cm"># models/glm5_next.py:1140-1143 —— 非首 rank：从上一 stage 收</span>
+else:
+    assert pp_proxy_tensors is not None
+    hidden_states = self.layers[self.start_layer].attn_boundary.<span class="hl">from_pp</span>(
+        pp_proxy_tensors, forward_batch
+    )
+
+<span class="cm"># models/glm5_next.py:1220-1221 —— 非末 rank：发给下一 stage</span>
+if not self.pp_group.is_last_rank:
+    return residual_batch.<span class="hl">to_pp</span>(hidden_states, forward_batch)
+else:
+    hidden_states = residual_batch.complete_output(hidden_states, forward_batch)</code></pre>
+
+  <p>首末 rank 的特权也写在构造里：只有 <code>pp_group.is_last_rank</code> 才建 <code>lm_head</code>，
+  其余是 <code>PPMissingLayer()</code>；首 rank 才建 <code>embed_tokens</code>；
+  <code>tie_word_embeddings</code> 与 <code>pp_size &gt; 1</code> 不能同时成立（<code>glm5_next.py:1284-1297</code>）。</p>
+
+  <p>还有两个与"能不能开 PP"直接相关的机制：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>PP 支持是"签名探测"出来的，不是声明出来的。</b> 这个快照里没有
+      <code>supports_pp</code> 这种类属性；<code>model_runner.py:505</code> 用
+      <code>"pp_proxy_tensors" in inspect.signature(self.model.forward).parameters</code> 判断，
+      不满足就在 <code>pp_size &gt; 1</code> 时直接 assert 失败（错误原文：
+      <i>Pipeline Parallel is not compatible with this model.</i>）。
+      GLM-5.3 的 forward 声明了 <code>pp_proxy_tensors</code>（<code>glm5_next.py:1646</code>），所以被接受。</li>
+    <li><b>PP 与 overlap schedule 互斥。</b> <code>arg_groups/overrides.py</code> 的
+      <code>_pipeline_parallel_overlap_disable()</code> 在 <code>pp_size &gt; 1</code> 时
+      强制 <code>disable_overlap_schedule=True</code>，并打印
+      <i>Pipeline parallelism is incompatible with overlap schedule.</i> ——
+      因为 overlap schedule 想要"上一批还在算、下一批就进"，而 PP 的点对点本身就在做批次级流水，
+      两套流水叠在一起无法保证顺序。</li>
+  </ul>
+
+  <h3 class="mini">11.6 更正：PP 不是"完全没有集合通信"</h3>
+  <p>第 12 节那张速查表里，PP 那一行原本写的是"<b>无集合通信</b>"。看到 <code>all_gather_group</code> 之后，
+  这句话需要更精确：</p>
+  <table>
+    <thead><tr><th style="width:150px">视角</th><th>PP 打开时看到什么</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="视角">pp_group 内部</td><td data-label="PP 打开时看到什么">只有 <code>send</code> / <code>recv</code>，
+        <b>没有任何 collective</b> —— 这一点成立</td></tr>
+      <tr class="hot"><td class="k" data-label="视角">attn_tp_group 内部</td><td data-label="PP 打开时看到什么">每跨一条 stage 边界，
+        <b>多一次 all-gather</b>（接收端拼接切片）</td></tr>
+      <tr><td class="k" data-label="视角">整体</td><td data-label="PP 打开时看到什么">PP 不减少"stage 之间"的传输量，但它<b>把一跳 p2p 拆成了
+        "1/P 的 p2p + 一次 all-gather"</b>；而这次 all-gather 是硬性的正确性要求，
+        不是可选的优化</td></tr>
+    </tbody>
+  </table>
+  <p>所以更准确的说法是：<b>PP 的对外接口是 p2p，PP + TP 的内部实现是 p2p 套 all-gather</b>。
+  对第 10 节那张通信清单的影响也有两处，方向相反：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>all-reduce 的<b>位置</b>变了，不是次数变了。</b> 本来会延后到下一层入口才收的那笔 sum，
+      被 <code>to_pp</code> 在 stage 出口一次结清（<code>to_pp</code> 的 docstring 原话：
+      <i>a declared one too</i> —— 连声明为 <code>always_partial</code> 的也要收）。</li>
+    <li><b>all-gather 的次数会增加。</b> 原来的"全流程一次"不再成立：每跨一条 stage 边界，
+      <code>PPProxyTensors</code> 里的每个张量都会在接收端被拼一次 ——
+      按 <code>to_pp</code> 的写法最多是 <code>hidden_states</code> 与 <code>residual</code> 两个，
+      所以一条 <code>pp_size</code> 级的流水线上，这一项最多是 <code>2 × (pp_size − 1)</code> 次。
+      <b>本页没有实测这条路径</b>，这个上限是从 <code>to_pp</code> 的 tensors 字典推出来的。</li>
+  </ul>
+
+  <h2 id="parallel"><span class="n">12</span>并行配置速查：哪种并行触发哪条原语</h2>
   <p>把这页的结论压成一张表。<b>同一个原语可以由完全不同的并行方式触发</b>，
   所以"GLM-5.3 里 allreduce 有几次"这个问题，必须先问并行配置。</p>
 
@@ -1570,12 +1791,13 @@ self.mlp = Glm5NextMLP(..., reduce_results=False)           <span class="cm">= D
         <td data-label="依据（源码位置）"><code>FusedMoE.forward_impl</code>（<code>layer.py:1578</code>）：
           <code>dispatch</code> → GEMM → <code>combine</code>；
           <code>ep_size := tp_size</code>（<code>overrides.py:1612</code>）</td></tr>
-      <tr><td class="k" data-label="并行方式">PP<br><span class="hint">--pp-size N</span></td>
-        <td data-label="触发的原语"><b>无集合通信</b></td>
-        <td data-label="落在哪个 group"><code>pp_group</code></td>
+      <tr class="hot"><td class="k" data-label="并行方式">PP<br><span class="hint">--pp-size N</span></td>
+        <td data-label="触发的原语"><b>p2p</b>（<code>send</code>/<code>recv</code>）<br>+ 接收端一次 <b>all-gather</b></td>
+        <td data-label="落在哪个 group"><code>pp_group</code>（p2p）<br><code>attn_tp_group</code>（拼接）</td>
         <td data-label="依据（源码位置）"><code>residual_batch.to_pp()</code> / <code>attn_boundary.from_pp()</code>
-          （<code>glm5_next.py:1142</code>、<code>:1221</code>）—— 点对点；
-          非首/末 rank 的 embed / lm_head 是 <code>PPMissingLayer</code></td></tr>
+          （<code>glm5_next.py:1140-1143</code>、<code>:1220-1221</code>）→
+          <code>send_tensor_dict()</code>（<code>parallel_state.py:1796</code>）。
+          <b>pp_group 内没有 collective，但每跳的接收端会 all-gather</b> —— 详见 <a href="#pp">第 11 节</a></td></tr>
       <tr><td class="k" data-label="并行方式">CP<br><span class="hint">--attn-cp-size</span></td>
         <td data-label="触发的原语">allgather<br>reduce_scatter</td>
         <td data-label="落在哪个 group"><code>attn_cp_group</code></td>
@@ -1590,11 +1812,12 @@ self.mlp = Glm5NextMLP(..., reduce_results=False)           <span class="cm">= D
     </tbody>
   </table>
 
-  <p class="hint">最后一行值得单独记住：<b>PP 是这张表里唯一不产生集合通信的并行方式</b>。
-  它只做相邻 stage 的点对点发送，所以"PP 为什么不能降低单层延迟"和"PP 为什么不影响通信量"
-  是两个分开的问题 —— 后者成立，前者不成立。</p>
+  <p class="hint">PP 那一行值得单独记住，也值得纠正一次：<b>pp_group 内部确实只发 p2p，一条 collective 都没有</b>；
+  但在 PP + TP 下，<code>send_tensor_dict()</code> 走的是"每 rank 发 1/P 切片 + 接收端 all-gather"，
+  所以<b>每跨一条 stage 边界都会多一次 allgather</b>（见 <a href="#pp">第 11 节</a>）。
+  "PP 不降低 stage 之间的传输量"成立，"PP 一点集合通信都没有"不成立。</p>
 
-  <h2 id="myths"><span class="n">12</span>常见误解</h2>
+  <h2 id="myths"><span class="n">13</span>常见误解</h2>
 
   <div class="myth">
     <p class="wrong">all2all 就是"更通用的 allgather"，因为两者字节数一样的。</p>
@@ -1646,7 +1869,17 @@ self.mlp = Glm5NextMLP(..., reduce_results=False)           <span class="cm">= D
     "<b>配置允许</b>"和"<b>这次请求走了</b>"是两件事。</p>
   </div>
 
-  <h2 id="quiz"><span class="n">13</span>自测</h2>
+  <div class="myth">
+    <p class="wrong">PP 只做点对点，所以开 PP 之后通信和集合通信没关系了。</p>
+    <p class="right">pp_group 内部只发 p2p，但 <b>PP + TP 下每一跳都套着一次 all-gather</b>。</p>
+    <p class="why"><code>send_tensor_dict(..., all_gather_group=attn_tp_group)</code> 里，发送端
+    <code>tensor.reshape(all_gather_size, -1)[all_gather_rank]</code> 只发 1/P 切片
+    （<code>parallel_state.py:1841-1843</code>），接收端 <code>all_gather_group.all_gather(tensor, dim=0)</code>
+    拼回（<code>:1903</code>）。而且这个协议对数据有硬要求：拼出来的必须是对的，所以
+    <code>to_pp()</code> 会在出口把<b>每一笔欠的 sum 都结清</b>——包括声明为 <code>always_partial</code> 的。</p>
+  </div>
+
+  <h2 id="quiz"><span class="n">14</span>自测</h2>
 
   <details class="q">
     <summary>N = 8 的 TP 组上，一次 <code>all_reduce</code> 搬多少字节？换成
@@ -1679,6 +1912,17 @@ self.mlp = Glm5NextMLP(..., reduce_results=False)           <span class="cm">= D
     所以 <code>glm5_next.py:1191</code> 在 <code>enable_a2a_moe and i &gt; first_k_dense_replace</code>
     时补一次 <code>attn_tp_group.all_gather(..., dim=0)</code>，沿 token 维拼回来。
     ——<b>这是"置换"与"复制"两种语义在同一份 forward 里同时出现的实例。</b></p>
+  </details>
+
+  <details class="q">
+    <summary>PP 用的是 <code>send</code>/<code>recv</code>，那为什么 <code>to_pp()</code> 还要先把
+      所有 partial 求和收干净？</summary>
+    <p class="a">因为 PP + TP 下的 p2p 不是裸点对点：发送端只发本 attn-TP rank 的 1/P 切片，
+    接收端用 <code>all_gather</code> 拼回整张。<b>all-gather 只是"把几片拼起来"，不会求和</b>，
+    所以每一片必须本身已经是完整值，否则拼出来的是错的。
+    <code>to_pp()</code> 的 docstring 把这条前提写死了：
+    <i>Every sum the output owes is completed before transport, a declared one too.</i>
+    —— 换句话说，PP 把"延后求和"这个优化给关掉了。</p>
   </details>
 
 <!-- show-me:shell:begin -->
