@@ -1,0 +1,36 @@
+{
+  "title": "DeepInfer × SGLang 深度对比：同一条请求，两种引擎",
+  "slug": "deepinfer-vs-sglang",
+  "category": "inference-systems",
+  "date": "2026-10-21",
+  "tags": [
+    "DeepInfer",
+    "SGLang",
+    "调度",
+    "KV Cache",
+    "DSpark",
+    "投机解码",
+    "MoE",
+    "并行策略",
+    "源码走读"
+  ],
+  "one_liner": "把 DeepInfer 与 SGLang 放进同一条请求里对照：一个开源的是进程内 C++ 调度器加单模型离线内核，一个开源的是 Python 调度器加 ZMQ 三进程全栈服务。异步调度两边都靠「结果延后一步」，但 DeepInfer 把 seqlens 修正搬上 GPU；前缀复用一个靠 radix 树自动命中、一个靠 fork 显式共享加外部 3FS；投机解码一边用 ConfidenceHead 在线预测验证长度，一边用离线 SPS/STS 表。9 节逐项对应到固定版本源码的入口文件。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "/Users/qqtang/Desktop/research/show-me",
+  "sources": [
+    "DeepInfer 公开源码 @ 8b16149（开源首发，2026-10-20 浅克隆）：csrc/engine/scheduler.hpp、csrc/engine/zos.cpp、worker/worker.py、worker/cache_engine.py、models/v4_modules/、models/mtp/dflash.py、csrc/engine/mtp_varlen.hpp、model_executor/eplb/、entrypoints/llm.py、environ.py",
+    "SGLang 公开源码 @ 16eb87c（v0.5.x，PR #44450）：managers/scheduler.py、managers/schedule_policy.py、mem_cache/radix_cache.py、mem_cache/storage/backend_factory.py、layers/attention/（dsa / dsv4）、speculative/dspark_components/、models/deepseek_v4*.py、sgl-model-gateway/",
+    "官方部署说明（生产侧披露，doc/ 中文 PDF）：吞吐、3FS 容量与 TTL、EPLB 参数、DSpark 收益等数字口径；本页标「生产侧披露」处均引自此文",
+    "两仓库 README、docs/cookbook（DeepSeek-V4_1 部署页）与 sglang 的 Rust 路由 / 树缓存实现",
+    "2026-10-20 对两份固定版本源码的逐文件核对；页面图表为内联 SVG，公式为教学抽象，未跑运行时实测"
+  ],
+  "visibility": "internal",
+  "redactions": [
+    "内部文档名称（《DeepSeek V4.1 Flash 推理部署 Q&A》→「官方部署说明」，保留 doc/ 路径口径）",
+    "预览镜像标签（dev-dsv41 → 预览镜像）",
+    "生产系统内部引文表述（「与内部基础设施耦合较深」→「与生产系统耦合较深」，去掉「原文」框）"
+  ],
+  "enriched": "2026-10-21"
+}

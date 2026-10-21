@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>DeepInfer × SGLang 深度对比：同一条请求，两种引擎</title><!-- show-me:shell:begin -->
+<meta name="description" content="把 DeepInfer 与 SGLang 放进同一条请求里对照：一个开源的是进程内 C++ 调度器加单模型离线内核，一个开源的是 Python 调度器加 ZMQ 三进程全栈服务。异步调度两边都靠「结果延后一步」，但 DeepInfer 把 seqlens 修正搬上 GPU；前缀复用一个靠 radix 树自动命中、一个靠 fork 显式共享加外部 3FS；投机解码一边用 ConfidenceHead 在线预测验证长度，一边用离线 SPS/STS 表。9 节逐项对应到固定版本源码的入口文件。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="DeepInfer × SGLang 深度对比：同一条请求，两种引擎">
+<meta property="og:description" content="把 DeepInfer 与 SGLang 放进同一条请求里对照：一个开源的是进程内 C++ 调度器加单模型离线内核，一个开源的是 Python 调度器加 ZMQ 三进程全栈服务。异步调度两边都靠「结果延后一步」，但 DeepInfer 把 seqlens 修正搬上 GPU；前缀复用一个靠 radix 树自动命中、一个靠 fork 显式共享加外部 3FS；投机解码一边用 ConfidenceHead 在线预测验证长度，一边用离线 SPS/STS 表。9 节逐项对应到固定版本源码的入口文件。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/inference-systems/deepinfer-vs-sglang/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/inference-systems/deepinfer-vs-sglang/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px;
+       overflow-wrap:anywhere}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7d8aa3}
+  pre .hl{color:#b23a10;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  tr.hot td{background:#fff7f2}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none}
+    tr.hot td{background:none}
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+
+  /* ---------- 管线示意 ---------- */
+  .pipe{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:18px 0 6px}
+  .stage{flex:1 1 160px;min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;
+         padding:12px 13px 11px;position:relative}
+  .stage .sn{font:600 10.5px var(--mono);color:#94a3b8;letter-spacing:.08em}
+  .stage .st{font-weight:700;font-size:13.5px;color:var(--ink);margin:2px 0 6px;line-height:1.35}
+  .stage .sw{font-size:12.5px;color:var(--dim);line-height:1.6;margin:0;padding-left:0;list-style:none}
+  .stage .sw li{margin:0 0 3px;padding-left:9px;position:relative}
+  .stage .sw li::before{content:'·';position:absolute;left:0;color:#b6c0d0}
+  .stage .tag{display:inline-block;font:10.5px var(--mono);color:#4d5b73;background:#f1f4fa;
+              border:1px solid #e2e8f2;border-radius:999px;padding:1px 7px;margin-top:7px}
+  .stage.hot{border-color:#f0cdb8;background:#fffaf6}
+  .stage.hot .sw li.big{color:#b23a10;font-weight:600}
+  .stage .badge{position:absolute;top:9px;right:10px;font:600 9.5px var(--mono);letter-spacing:.06em;
+                color:#fff;background:#b23a10;border-radius:999px;padding:2px 7px}
+  .pipelinewrap{overflow-x:auto}
+  .arrowline{display:flex;gap:10px;flex-wrap:wrap;margin:2px 0 0;font:11px var(--mono);color:#a8b2c2}
+  @media (max-width:640px){
+    .stage{flex:1 1 100%}
+  }
+
+  /* ---------- 图表卡（lieflat Mono · 作用域化） ---------- */
+  .chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;min-width:0}
+  .chartcard h2{border:0;padding:0;margin:0 0 3px;font-size:16.5px;font-weight:700;letter-spacing:-.02em;color:#1C1C1A}
+  .chartcard .csub{font-size:11.5px;color:#8F8E88;margin:0 0 14px;line-height:1.55}
+  .chartcard .csrc{font-size:9.5px;color:#C6C5BF;margin-top:10px;letter-spacing:.08em;font-weight:500;line-height:1.6}
+  .chartwrap{overflow-x:auto}
+  .chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+  .chartcard svg text{font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+  @media (max-width:640px){
+    .chartcard{padding:22px 20px 16px}
+    .chartcard svg{min-width:400px}
+  }
+  /* MONO.MOTION.css（原样，无 :root/body 规则） */
+  .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+  @keyframes pop{from{transform:scale(0)}to{transform:none}}
+  .fade{animation:fade .9s ease both}
+  @keyframes fade{from{opacity:0}}
+  .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (prefers-reduced-motion:reduce){
+    .pop,.fade{animation:none}
+    .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+  }
+
+  /* 图 + 读法 双栏 */
+  .figrow{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;margin:18px 0 6px}
+  .figrow > .read{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .read h4{margin:0 0 8px;font:600 12.5px var(--mono);color:var(--dim);letter-spacing:.04em}
+  .read ul{margin:0;padding-left:17px}
+  .read li{font-size:13.5px;color:#3b4860;margin:7px 0;line-height:1.62}
+  .read li b{color:var(--ink)}
+  .read .num{font-family:var(--mono);color:#12489c;font-size:12.8px}
+  @media (max-width:860px){ .figrow{grid-template-columns:1fr} }
+
+  .callout{border-left:3px solid var(--accent);background:#fff;border-radius:0 10px 10px 0;
+           padding:12px 16px;margin:16px 0;font-size:14px;color:#3b4860}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout b{color:var(--ink)}
+  .srcline{font:12px var(--mono);color:var(--dim2);background:#fff;border:1px solid var(--line);
+           border-radius:8px;padding:10px 12px;margin:12px 0;overflow-x:auto;white-space:nowrap}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+<style>
+  /* ===== DeepInfer × SGLang 报告组件 · 色系：蓝 = DeepInfer / 橙 = SGLang ===== */
+  .report{
+    --foreground:var(--ink); --background:transparent;
+    --card:#fff; --card-foreground:var(--ink);
+    --muted:#eef2f9; --muted-foreground:var(--dim);
+    --border:var(--line);
+    --primary:var(--accent); --primary-foreground:#fff;
+    --accent:#eef2f9; --accent-foreground:var(--ink);
+    --viz-series-1:#2563eb; --viz-series-2:#ea580c;
+    --green:#0b6b3f; --yellow:#a35a06;
+    color-scheme:light;
+  }
+  .report .duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:14px 0}
+  .report .duo>*{min-width:0}
+  .report p,.report li{overflow-wrap:anywhere}
+  .report td,.report th{overflow-wrap:break-word}
+  .report .table tbody td:first-child,.report .table tbody th{min-width:8.5em}
+  .report .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .report .who{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+  .report .dot{width:10px;height:10px;border-radius:999px;flex:none}
+  .report .dot.di{background:var(--viz-series-1)}
+  .report .dot.sg{background:var(--viz-series-2)}
+  .report .who b{font-weight:600;color:var(--ink)}
+  .report .who .tag{color:var(--dim2);font:11px var(--mono);overflow-wrap:anywhere}
+  .report .facts{margin:8px 0 0;padding:0;list-style:none}
+  .report .facts li{margin:4px 0;font-size:13px;color:var(--dim)}
+  .report .facts li b{color:var(--ink)}
+  .report .num{font-variant-numeric:tabular-nums}
+  .report .fig-scroll{overflow-x:auto;margin:12px 0 2px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px}
+  .report .fig-scroll svg{width:100%;height:auto;min-width:660px;display:block}
+  .report .fig-caption{font-size:12.5px;color:var(--dim2);margin:6px 0 16px}
+  .report h2{margin:44px 0 8px}
+  .report .panel>h2:first-child{margin-top:10px}
+  .report h3{font-size:16px;margin:26px 0 6px}
+  .report p{margin:9px 0}
+  .report ul.tight{margin:8px 0;padding-left:20px}
+  .report ul.tight li{margin:5px 0}
+  .report .ok{color:var(--good);font-weight:600}
+  .report .part{color:var(--warn);font-weight:600}
+  .report .no{color:var(--dim2)}
+  .report .same{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+  .report .viz-row{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 14px}
+  .report .viz-badge{display:inline-block;background:var(--chip);border:1px solid var(--chipb);
+    border-radius:999px;padding:2px 9px;font:11.5px var(--mono);color:#3f4c63}
+  .report .viz-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:12px 0}
+  .report .viz-grid .card{padding:13px 15px}
+  .report .viz-stat-value{font-size:15.5px;font-weight:600;margin:3px 0;color:var(--ink)}
+  .report .text-muted{color:var(--dim2)}
+  .report .text-small{font-size:13px;line-height:1.65}
+  .report .formula{text-align:center;margin:12px 0 4px;font-size:15.5px;color:var(--ink)}
+  .report .table{margin-top:10px}
+  .report .table th,.report .table td{padding:7px 10px}
+  .report .table th{font:600 11px var(--mono);letter-spacing:.04em;color:#4d5b73;background:#f4f7fc;text-transform:none}
+  .report .table td{font-size:13px;color:#2b3a52}
+  .report .table td b{color:var(--ink)}
+  .report code{font-size:12px}
+  .report svg text{font-family:-apple-system,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif !important;
+    letter-spacing:normal !important;word-spacing:normal !important}
+  .report .flow{margin:8px 0}
+  .report .flow-row{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch}
+  .report .flow-row>*{min-width:0}
+  .report .node{border:1.5px solid var(--line);border-radius:10px;padding:8px 11px;background:#fff;margin:0;flex:1 1 150px}
+  .report .node>b{display:block;font-weight:600;margin:0 0 2px;color:var(--ink)}
+  .report .node .sub{color:var(--dim2);font-size:12px;line-height:1.6;display:block}
+  .report .node.di{border-color:var(--viz-series-1)}
+  .report .node.sg{border-color:var(--viz-series-2)}
+  .report .node.ghost{border-style:dashed}
+  .report .flow-row>.lane{flex:1 1 280px}
+  .report .arr{align-self:center;color:var(--dim2);flex:none;padding:0 2px}
+  .report .arr.down{text-align:center;width:100%;margin:2px 0;font-size:12px}
+  .report .lane{border:1.5px dashed var(--line);border-radius:12px;padding:11px}
+  .report .lane.di{border-color:var(--viz-series-1)}
+  .report .lane.sg{border-color:var(--viz-series-2)}
+  .report .lane-title{font-size:12px;color:var(--dim2);margin:0 0 6px}
+  .report .node>b{overflow-wrap:anywhere}
+  .report .verdict{margin-top:10px}
+  .report .lab{margin:10px 0 2px}
+  .report .lab-slots{display:flex;flex-wrap:wrap;gap:10px;margin:8px 0}
+  .report .lab-slot{flex:1 1 150px;min-width:0}
+  .report .lab .bar{height:8px;border-radius:4px;background:var(--muted);margin-top:6px;overflow:hidden}
+  .report .lab .bar>span{display:block;height:100%;background:var(--viz-series-1);border-radius:4px}
+  .report .lab .bar>span.done{background:var(--green)}
+  .report .lab-chiprow{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0;align-items:center}
+  .report .lab-cap{margin:6px 0 0}
+  .report .lab-ctrl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .report .lab .viz-badge.ok-chip{color:var(--good);border-color:var(--good)}
+  .report .lab .viz-badge.rej-chip{color:var(--dim2);border-color:var(--dim2);opacity:.9}
+  .report .btn{border:1px solid var(--chipb);background:#fff;color:var(--ink);border-radius:8px;
+    padding:6px 13px;font-size:13px;cursor:pointer;font-family:inherit}
+  .report .btn:hover:not([disabled]){background:var(--chip);border-color:#bcd0f0;color:var(--accent)}
+  .report .btn[disabled]{opacity:.45;cursor:default}
+  @media (min-width:601px) and (max-width:820px){
+    .report table{display:block;overflow-x:auto;max-width:100%}
+  }
+  @media (max-width:600px){
+    .report .table tbody th{display:block;width:100%;text-align:left;font-size:14px;font-weight:600;line-height:1.6;
+      font-family:inherit;letter-spacing:normal;text-transform:none;color:var(--ink);background:none;
+      border:0;border-bottom:1px solid var(--line);padding:0 0 8px;margin:0 0 6px}
+    .report .table tbody td:first-child{display:block;text-align:left;font-size:14px;font-weight:600;
+      color:var(--ink);border-bottom:1px solid var(--line);padding:0 0 8px;margin:0 0 6px}
+    .report .table tbody td:first-child::before{content:none}
+    .report .table-responsive{overflow:visible}
+    .report .fig-scroll + .fig-caption::before{content:"窄屏可左右滑动查看完整图 · ";color:var(--dim2)}
+    /* 流程图在窄屏改纵向：横排箭头转成向下的箭头，避免节点换行后箭头悬在行尾 */
+    .report .flow-row{flex-direction:column;align-items:stretch}
+    .report .flow-row>.node,.report .flow-row>.lane{flex:1 1 auto;width:100%}
+    .report .flow-row>.arr{transform:rotate(90deg);align-self:center;padding:2px 0}
+  }
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">43 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-21</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 8 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/deepinfer-vs-sglang/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-rail-m">43 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me</a><span class="sep">/</span>
+    <a href="../../index.html#inference-systems">inference-systems</a><span class="sep">/</span>
+    <span>deepinfer-vs-sglang</span>
+  </div>
+
+  <h1>DeepInfer × SGLang 深度对比：同一条请求，两种引擎</h1>
+  <div class="metarow">
+    <span>2026-10-21</span><span>DeepInfer</span><span>SGLang</span><span>DeepSeek-V4.1-Flash</span>
+    <span>调度</span><span>KV Cache</span><span>DSpark</span><span>源码走读</span>
+  </div>
+  <p class="lead">同一套 DeepSeek 算子栈，两个引擎把开源边界画在相反的位置：DeepInfer 只发布离线内核——一款模型、两类硬件、进程内 C++ 调度器；SGLang 发布全栈服务——255 个模型实现、10+ 硬件、Python 调度器加 Rust 路由。下面按 9 个问题把同一条请求拆成两遍，每个论断都对应固定版本源码里的一处入口。</p>
+
+  <div class="nav">
+    <a href="#overview">总览</a>
+    <a href="#scope">01 定位</a>
+    <a href="#arch">02 架构</a>
+    <a href="#sched">03 调度</a>
+    <a href="#kv">04 KV Cache</a>
+    <a href="#model">05 模型与注意力</a>
+    <a href="#spec">06 DSpark</a>
+    <a href="#parallel">07 并行通信</a>
+    <a href="#serving">08 服务生态</a>
+    <a href="#choice">09 选型</a>
+    <a href="#refs">参考来源</a>
+  </div>
+
+  <p class="hint"><b>调研基准</b>：2026-10-20 源码快照 · DeepInfer <code>8b16149</code>（开源首发）· SGLang <code>16eb87c</code>（v0.5.x，PR #44450）· 两者均为 Apache-2.0。图与表说明关系，公式是教学抽象；标「生产侧披露」的内容引自官方部署说明，其余以这两份源码为准。</p>
+  <p class="hint"><b>术语约定</b>：<code>step</code> / <code>prefill</code> / <code>decode</code> / <code>ZOS</code> / <code>DSpark</code> / <code>DFlash</code> / <code>EP</code> / <code>DP</code> / <code>TP</code> / <code>PP</code> / <code>SWA</code> 保留英文原词；文件名、符号名、环境变量名一律保持原样，方便直接 grep。</p>
+
+<div class="report">
+<section class="panel" id="sec-overview" aria-labelledby="overview">
+<h2 id="overview"><span class="n">00</span>总览：三个基本单位与阅读地图</h2>
+<p>先记住三个基本单位，后面所有章节都建立在它们之上：<b>请求</b>是调用方提交的任务；<b>step（轮次）</b>是一次"调度 + 执行"的组合；<b>输出</b>是已经就绪、可以交还调用方的结果。三者不一一对应——请求要等调度准入，执行了也要等回收。再分清两个阶段：<b>prefill</b> 处理已有输入、为后续生成建立状态，<b>decode</b> 利用已有状态继续生成。两个引擎共享这套词汇。</p>
+<p>体例说明：图与表格用于说明关系，公式用于表达概念约束（标注"教学抽象"处不对应具体实现分支）；标有"生产侧披露"的内容引自 DeepSeek 官方部署说明，属官方设计口径而非开源代码；其余结论以 DeepInfer <code>8b16149</code> 与 SGLang <code>16eb87c</code> 两份固定版本源码为准，章末"检查理解"供自测。</p>
+<p class="text-small">每节围绕"读完能回答的问题"组织。可以先在地图里挑出关心的问题，再进入对应章节。</p>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th style="width:22%">章节</th><th>读完能回答的问题</th></tr></thead>
+  <tbody>
+    <tr><td data-label="章节">1 定位与开源范围</td><td data-label="读完能回答的问题">两个项目各自解决什么问题？开源版里有什么、缺什么？为什么 DeepInfer 只有一款模型？</td></tr>
+    <tr><td data-label="章节">2 整体架构</td><td data-label="读完能回答的问题">同一条请求在两边分别怎么走？谁接收、谁调度、谁执行、谁回收？进程边界画在哪里？</td></tr>
+    <tr><td data-label="章节">3 调度与异步执行</td><td data-label="读完能回答的问题">怎么消除 CPU 调度造成的 GPU 空泡？一轮的预算怎么定？为什么同样的输入可能得到不同的输出？</td></tr>
+    <tr><td data-label="章节">4 KV Cache</td><td data-label="读完能回答的问题">"上下文"存在哪里？命中之后还缺什么？显存放不下时怎么办？</td></tr>
+    <tr><td data-label="章节">5 模型与注意力</td><td data-label="读完能回答的问题">V4.1 Flash 的长上下文为什么成本低？indexer 稀疏注意力是什么？SGLang 怎么用通用后端复刻？</td></tr>
+    <tr><td data-label="章节">6 投机解码 DSpark</td><td data-label="读完能回答的问题">为什么固定验证 5 个 draft 是浪费？两边的"置信度"从哪里来？验证长度怎么定？</td></tr>
+    <tr><td data-label="章节">7 并行与通信</td><td data-label="读完能回答的问题">两个引擎各自切分什么、不切分什么？DeepInfer 为什么不用 TP？专家忙闲不均怎么办？</td></tr>
+    <tr><td data-label="章节">8 服务生态与部署</td><td data-label="读完能回答的问题">DeepSeek 生产系统由哪几层组成？开源版缺哪几层？SGLang 开箱有哪几层？</td></tr>
+    <tr><td data-label="章节">9 工程对比与选型</td><td data-label="读完能回答的问题">什么时候选谁？两边的依赖栈与配置哲学差在哪里？</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DeepInfer</b><span class="tag">deepseek-ai/DeepInfer</span></div>
+    <p><b>DeepSeek 生产推理框架的开源核心。</b>支撑 DeepSeek 官方大规模在线服务，开源版只发布<b>离线推理引擎内核</b>，专为 DeepSeek-V4.1-Flash 一款模型深度定制。</p>
+    <ul class="facts">
+      <li><b>模型：</b>仅 DeepSeek-V4.1-Flash（注册表只有一项，<code>_MODELS = {"DeepseekV41ForCausalLM": ...}</code>）</li>
+      <li><b>硬件：</b>NVIDIA SM100（Blackwell）＋ 华为昇腾 950 NPU，CUDA 13 / CANN 9.2</li>
+      <li><b>血统：</b>基于 vLLM 衍生，借鉴 SGLang 与 TensorRT-LLM（README 致谢；文件头 SPDX "Derived from vLLM"）</li>
+      <li><b>未随开源发布：</b>HTTP 服务、负载均衡、PD 分离编排、分布式 KVCache 存储（生产系统组件）</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>SGLang</b><span class="tag">sgl-project/sglang（LMSYS）</span></div>
+    <p><b>LMSYS 系通用推理平台。</b>面向大语言、视觉语言与扩散模型的开源全栈服务框架，优化 agentic 负载、大规模 serving 与 RL rollout。</p>
+    <ul class="facts">
+      <li><b>模型：</b>255 个模型实现文件，覆盖 LLM / VLM / Embedding / OCR / 音频 / 扩散（SGLang Diffusion）</li>
+      <li><b>硬件：</b>NVIDIA 全系、AMD、Google TPU、Intel、Apple Metal/MLX、昇腾、摩尔线程等 10+ 平台</li>
+      <li><b>血统：</b>社区驱动，PR 编号已过 4.4 万；已被 verl / Miles / slime 等 RL 框架选为 rollout 引擎</li>
+      <li><b>也已支持 DeepSeek-V4.1：</b><code>dsv4</code> 注意力后端 + DSpark 投机解码（预览镜像）</li>
+    </ul>
+  </div>
+</div>
+
+<div class="viz-grid">
+  <div class="card viz-stat"><div class="text-muted text-small">DeepSeek 生产吞吐（官方口径）</div><div class="viz-stat-value num">155 万亿 tokens/天</div><div class="text-muted text-small">单集群 · 收入 $38/卡·时（谷价）</div></div>
+  <div class="card viz-stat"><div class="text-muted text-small">DeepInfer 代码规模</div><div class="viz-stat-value num">≈5.5 万行 Py + 0.6 万行 C++</div><div class="text-muted text-small">无 .cu；GPU kernel 走 TileLang JIT 与 vendored 库</div></div>
+  <div class="card viz-stat"><div class="text-muted text-small">SGLang 代码规模</div><div class="viz-stat-value num">174 万行 Py + 20 万 Rust + 17 万 C++</div><div class="text-muted text-small">另含 Rust 路由器 / gRPC / 树缓存内核</div></div>
+  <div class="card viz-stat"><div class="text-muted text-small">支持模型</div><div class="viz-stat-value num">1 ↔ 255 个实现</div><div class="text-muted text-small">专精单模型 ↔ 全家族多模态</div></div>
+  <div class="card viz-stat"><div class="text-muted text-small">硬件平台</div><div class="viz-stat-value num">2 类 ↔ 10+ 类</div><div class="text-muted text-small">SM100/昇腾950 ↔ NVIDIA/AMD/TPU/Intel/Apple/…</div></div>
+  <div class="card viz-stat"><div class="text-muted text-small">共享的 DeepSeek 算子栈</div><div class="viz-stat-value">DeepEP · DeepGEMM · FlashMLA · DeepSelect · TileLang</div><div class="text-muted text-small">两边同源，一个 vendor 进仓库，一个走 PyPI fork</div></div>
+</div>
+
+<h2 id="conclusions">核心结论</h2>
+<ul class="tight">
+  <li><b>同源、不同定位。</b>两者都是 DeepSeek 系深度优化的推理引擎：DeepInfer 是 DeepSeek 生产系统的官方底座；而 SGLang 已反向移植了 V4.1 的关键能力（<code>dsv4</code> 压缩注意力后端、mHC、SWA replay tail、DSpark 变长验证），在 DeepSeek 模型栈上两者高度趋同。</li>
+  <li><b>开源完整度是最大分野。</b>DeepInfer 开源的是"引擎内核"——调度、算子、模型、显存管理；KV 分布式存储（3FS）、四级负载均衡、E/P/D 分离编排等生产组件未开源，接口已预留。SGLang 从 HTTP API、Rust 路由到 PD 分离、分层 KV 存储、RL 训推一体全栈可用。</li>
+  <li><b>工程路线泾渭分明。</b>DeepInfer 用 C++ 写调度器（nanobind 绑定、进程内运行）、用 TileLang JIT 写全部自研 kernel、把算子库 vendor 进仓库，围绕"一块超节点跑满一款模型"做极致优化；SGLang 用 Python 调度器 + ZMQ 多进程模型、用 Rust 写外围（路由 / gRPC / tokenizer / 树缓存内核）、算子库走 pip 依赖，追求"一套代码跑所有模型与硬件"。</li>
+</ul>
+
+<h2 id="diff">十大关键差异速览</h2>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th style="width:15%">维度</th><th style="width:42.5%"><span class="dot di" style="display:inline-block"></span> DeepInfer 怎么做</th><th style="width:42.5%"><span class="dot sg" style="display:inline-block"></span> SGLang 怎么做</th></tr></thead>
+  <tbody>
+    <tr><td data-label="维度">定位</td><td data-label="DeepInfer 怎么做">DeepSeek 生产框架开源核心，单模型单场景极致优化</td><td data-label="SGLang 怎么做">通用多模态推理平台，广度优先</td></tr>
+    <tr><td data-label="维度">开源范围</td><td data-label="DeepInfer 怎么做">离线引擎；HTTP/LB/PD 编排/KV 存储未开源</td><td data-label="SGLang 怎么做">全栈：API、路由、PD 分离、分层缓存、RL 生态</td></tr>
+    <tr><td data-label="维度">调度器</td><td data-label="DeepInfer 怎么做">C++ 头文件实现，进程内运行（<code>csrc/engine/scheduler.hpp</code>，1329 行）</td><td data-label="SGLang 怎么做">Python 子进程（<code>srt/managers/scheduler.py</code>，6278 行）+ ZMQ IPC</td></tr>
+    <tr><td data-label="维度">异步调度</td><td data-label="DeepInfer 怎么做">ZOS 零开销三段流水；元数据延迟一步、GPU 端 TileLang kernel 修正</td><td data-label="SGLang 怎么做">overlap 循环：结果延后一步 + FutureMap 直喂 token（ZOS 官方注明参考 SGLang）</td></tr>
+    <tr><td data-label="维度">前缀缓存</td><td data-label="DeepInfer 怎么做">无自动 radix；fork 显式共享（pin/ref_count）；生产走 3FS 共享存储（未开源）</td><td data-label="SGLang 怎么做">RadixAttention 自动前缀树 + HiCache 分层（host / 3FS / Mooncake 等 15+ 后端）</td></tr>
+    <tr><td data-label="维度">DSpark 置信度</td><td data-label="DeepInfer 怎么做">ConfidenceHead 在线预测接受率 + 实测 decode 性能曲线在线调度</td><td data-label="SGLang 怎么做">SPS/STS 离线校准表 + GPU planner kernel + ragged verify 三模式</td></tr>
+    <tr><td data-label="维度">并行策略</td><td data-label="DeepInfer 怎么做">Attention DP（#DP=#EP）+ Wide-EP 64~128 + NVL 域 MegaMoE 融合；生产不用 TP/PP</td><td data-label="SGLang 怎么做">TP/PP/EP/attn-DP/CP/DCP 全家桶 + TBO/SBO + DeepEP v2 + 弹性 EP</td></tr>
+    <tr><td data-label="维度">模型面</td><td data-label="DeepInfer 怎么做">仅 V4.1-Flash：YOCO + mHC + SWA + FP4 DSA indexer + Engram</td><td data-label="SGLang 怎么做">255 个模型；V4.1 走 <code>dsv4</code> 通用稀疏后端 + 专属模块</td></tr>
+    <tr><td data-label="维度">硬件门槛</td><td data-label="DeepInfer 怎么做">硬性要求：SM100 / 昇腾 950（<code>is_sm_major_10()</code> 检查）</td><td data-label="SGLang 怎么做">消费级到数据中心全覆盖；V4.1 预览镜像支持 H200/B200/B300/GB300/MI355X</td></tr>
+    <tr><td data-label="维度">配置哲学</td><td data-label="DeepInfer 怎么做">约 60 个 <code>DEEPINFER_*</code> 环境变量为主</td><td data-label="SGLang 怎么做">数百个 ServerArgs CLI 参数 + <code>SGLANG_*</code> 环境变量</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="gene">相同点（共同基因）</h2>
+<div class="same">
+  <span class="viz-badge">continuous batching + paged KV</span>
+  <span class="viz-badge">chunked prefill</span>
+  <span class="viz-badge">decode CUDA graph</span>
+  <span class="viz-badge">CPU-GPU overlap 调度</span>
+  <span class="viz-badge">DSpark 式变长投机验证</span>
+  <span class="viz-badge">xgrammar 结构化输出</span>
+  <span class="viz-badge">Attention DP + MoE EP + EPLB</span>
+  <span class="viz-badge">DeepEP/DeepGEMM/FlashMLA/DeepSelect 算子栈</span>
+  <span class="viz-badge">FP8/FP4 低精度 KV 与权重</span>
+  <span class="viz-badge">批不变 / 确定性推理选项</span>
+  <span class="viz-badge">昇腾 NPU 支持</span>
+  <span class="viz-badge">Apache-2.0</span>
+</div>
+</section>
+
+<section class="panel" id="sec-scope" aria-labelledby="scope">
+<h2 id="scope"><span class="n">01</span>定位与开源范围</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>两个项目各自解决什么问题？开源版本里有什么、缺什么？为什么 DeepInfer 只有一款模型？</p>
+<p>两个项目都在解决"把 DeepSeek 级别的 MoE 大模型以最低成本跑进生产"这一个问题，但一个开源的是<b>生产系统的内核</b>，另一个是<b>完整的社区产品</b>。README 的自我描述最能说明定位差异：</p>
+<ul class="tight">
+  <li><b>DeepInfer：</b>"DeepInfer is the high-performance inference framework that powers DeepSeek's large-scale production services. This open-source release provides <b>offline inference</b> with the core features needed for serving at scale."（README）——开源的只是"规模化服务所需的核心能力"，且明确列出三大件<b>不在本次发布中</b>：KV cache 系统、VE/Prefill/Decode 分离、跨数据并行副本的负载均衡。</li>
+  <li><b>SGLang：</b>"SGLang is an open-source inference framework for large language, vision-language, and diffusion models, optimized for <b>agentic workloads, large-scale serving, and RL rollouts</b>."——从推理引擎到图像/视频生成（SGLang Diffusion）、音频（sglang-omni）、draft 模型训练（SpecForge）构成完整生态。</li>
+</ul>
+
+<h3>开源组件覆盖对照</h3>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>组件</th><th style="width:38%"><span class="dot di" style="display:inline-block"></span> DeepInfer 开源版</th><th style="width:38%"><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="组件">离线推理入口（LLM API）</td><td data-label="DeepInfer 开源版"><span class="ok">✓</span> <code>entrypoints/llm.py</code>（固定 offline 模式）</td><td data-label="SGLang"><span class="ok">✓</span> <code>Engine</code> + offline <code>LLM</code></td></tr>
+    <tr><td data-label="组件">HTTP 在线服务</td><td data-label="DeepInfer 开源版"><span class="no">✗</span>（仅 profiling 用端口 6070）</td><td data-label="SGLang"><span class="ok">✓</span> FastAPI 全 API 面 + uvicorn 多 worker</td></tr>
+    <tr><td data-label="组件">OpenAI / Anthropic / Ollama 兼容</td><td data-label="DeepInfer 开源版"><span class="no">✗</span>（生产由独立的 deepseek-recipe 承担）</td><td data-label="SGLang"><span class="ok">✓</span> <code>/v1/chat</code>、<code>/v1/responses</code>、<code>/v1/messages</code>、<code>/api/*</code></td></tr>
+    <tr><td data-label="组件">请求路由 / 负载均衡</td><td data-label="DeepInfer 开源版"><span class="no">✗</span>（生产有 4 个 LB，未开源；引擎留 <code>engine_rank</code> 编号）</td><td data-label="SGLang"><span class="ok">✓</span> Rust sgl-model-gateway：cache-aware、PD 路由、限流熔断</td></tr>
+    <tr><td data-label="组件">PD / EPD 分离</td><td data-label="DeepInfer 开源版"><span class="part">◐</span> 引擎三态 <code>NORMAL/PROMPT/COMPLETION</code> 与落盘钩子已实现，编排层缺失</td><td data-label="SGLang"><span class="ok">✓</span> prefill/decode 分离 + bootstrap server + 5 种传输后端；VLM 有 EPD 三级分离</td></tr>
+    <tr><td data-label="组件">分布式 KVCache 存储</td><td data-label="DeepInfer 开源版"><span class="no">✗</span>（生产为 3FS 集群，约 100 PiB，官方口径；仓库只留 128-token 落盘粒度约定）</td><td data-label="SGLang"><span class="ok">✓</span> HiCache：host 内存 + 3FS/Mooncake/LMCache/Nixl 等 15+ 后端</td></tr>
+    <tr><td data-label="组件">投机解码</td><td data-label="DeepInfer 开源版"><span class="ok">✓</span> DSpark（DFlash + ConfidenceHead + 变长验证）</td><td data-label="SGLang"><span class="ok">✓</span> EAGLE/EAGLE3/NEXTN/STANDALONE/NGRAM/DFLASH/DSPARK/UNO/FROZEN_KV_MTP + 插件注册</td></tr>
+    <tr><td data-label="组件">结构化输出</td><td data-label="DeepInfer 开源版"><span class="ok">✓</span> xgrammar（异步编译 + KMP 触发词）</td><td data-label="SGLang"><span class="ok">✓</span> xgrammar / outlines / llguidance + jump-forward</td></tr>
+    <tr><td data-label="组件">多模态</td><td data-label="DeepInfer 开源版"><span class="part">◐</span> V4.1-Flash 自带 ViT，同进程执行；VE 独立服务未开源</td><td data-label="SGLang"><span class="ok">✓</span> 数十个 VLM；GPU 图像预处理；ViT CUDA graph</td></tr>
+    <tr><td data-label="组件">多 LoRA / RL rollout / Diffusion</td><td data-label="DeepInfer 开源版"><span class="no">✗</span> 均未见</td><td data-label="SGLang"><span class="ok">✓</span> LoRA 内存池；memory-saver、R-Fork、verl/Miles/slime 集成；SGLang Diffusion 内置</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><span class="viz-badge">易混淆</span> "引擎钩子已预留"不等于"能力已开源"：DeepInfer 仓库里 <code>init_pd_split / do_save_kvcache</code> 等钩子与 SWA 落盘布局确实存在（README 也写明 "most required engine functionality is already implemented"），缺的是把 VE/P/D 三种引擎角色组织成服务的编排层。读生产相关内容时，始终分开记录："开源代码里的"与"官方文档披露的"。</p>
+
+<h3>项目档案</h3>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>项目</th><th>DeepInfer</th><th>SGLang</th></tr></thead>
+<tbody>
+    <tr><th>治理与许可</th><td data-label="DeepInfer">DeepSeek-AI 官方仓库，Apache-2.0</td><td data-label="SGLang">LMSYS（非营利组织）托管，Apache-2.0</td></tr>
+    <tr><th>发布形态</th><td data-label="DeepInfer">源码构建（build.sh，GCC≥13、Python 3.12）；单 commit 快照，引用格式标注 2026</td><td data-label="SGLang">PyPI 周期发版（v0.5.x 系列）+ Docker 镜像 + 预览镜像</td></tr>
+    <tr><th>基座关系</th><td data-label="DeepInfer">"originally built primarily on vLLM, with additional inspiration from SGLang and TensorRT-LLM"（README 致谢；代码内仍可见 <code>VLLM_*</code> 环境变量残留）</td><td data-label="SGLang">致谢 Guidance/vLLM/LightLLM/FlashInfer/Outlines/LMQL；自身即 overlap 调度、RadixAttention 的原创者</td></tr>
+    <tr><th>文档</th><td data-label="DeepInfer">README + 官方部署说明（中文 PDF，讲生产系统设计）</td><td data-label="SGLang">docs.sglang.io + cookbook + 高校课程 + Mini-SGLang 教学项目</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="text-muted text-small">注：DeepInfer 生产系统的 KVCache 管理与负载均衡"因与生产系统耦合较深，代码尚未完整开源"（官方口径），本页生产侧细节均引自该说明 与引擎内预留接口，并明确标注；SGLang 的能力均可在仓库中直接验证。</p>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>用自己的话区分"引擎内核"与"服务编排"，各举两个组件说明这条分界如何决定两边的开源范围。</li>
+  <li>DeepInfer README 列出的三件"不在本次发布中"是什么？分别对应第 8 章生产架构的哪一层？</li>
+  <li>为什么"注册表只有一款模型"反而让加载器能做更深的校验？提示：逐参数物化与格式日志。</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-arch" aria-labelledby="arch">
+<h2 id="arch"><span class="n">02</span>整体架构：同一条请求，两边各走一遍</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>谁接收请求、谁决定下一轮执行什么、谁执行、谁把 token 变成文本？两个引擎的进程边界分别画在哪里？</p>
+<p>这是两者最直观的分野：<b>SGLang 是"多个平等进程 + 消息总线"的服务架构</b>，<b>DeepInfer 是"单进程引擎 + 从属 worker 守护进程"的内核架构</b>。先沿一条请求把两边的路径并排列出——左边走 DeepInfer 的离线 LLM API，右边走 SGLang 的在线 HTTP 服务：</p>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th style="width:14%">阶段</th><th style="width:43%"><span class="dot di" style="display:inline-block"></span> DeepInfer（谁、在哪）</th><th style="width:43%"><span class="dot sg" style="display:inline-block"></span> SGLang（谁、在哪）</th></tr></thead>
+  <tbody>
+    <tr><td data-label="阶段">① 进入与身份</td><td data-label="DeepInfer（谁、在哪）"><code>LLM.generate</code> → <code>_add_request</code> 复制采样参数、分配 request ID、规范化输入 → <code>LLMEngine.add_request</code> 建立 C++ <code>Sequence</code>（<code>entrypoints/llm.py</code>、<code>csrc/engine/sequence.hpp</code>）</td><td data-label="SGLang（谁、在哪）">HTTP <code>/v1/chat/completions</code> → TokenizerManager 编码为 <code>TokenizedGenerateReqInput</code>、分配 request ID → ZMQ 推给 Scheduler 子进程（<code>managers/tokenizer_manager.py</code>、<code>io_struct.py</code>）</td></tr>
+    <tr><td data-label="阶段">② 排队</td><td data-label="DeepInfer（谁、在哪）">C++ Scheduler 的 waiting 队列（与引擎同地址空间）</td><td data-label="SGLang（谁、在哪）">Scheduler 子进程的 waiting 队列（跨进程，经 ZMQ）</td></tr>
+    <tr><td data-label="阶段">③ 准入与组批</td><td data-label="DeepInfer（谁、在哪）"><code>_schedule_prefill / _schedule_decode</code>：FCFS + DP 组投票 + KV 水位（<code>csrc/engine/scheduler.hpp</code>）</td><td data-label="SGLang（谁、在哪）"><code>get_new_batch_prefill</code>：策略排序 + <code>PrefillAdder</code> 预算 + retraction（<code>managers/scheduler.py</code>、<code>schedule_policy.py</code>）</td></tr>
+    <tr><td data-label="阶段">④ 执行一轮</td><td data-label="DeepInfer（谁、在哪）"><code>Worker.execute_model_step</code>：forward 当前步 → post-process 上一步 → sample 当前步（<code>worker/worker.py</code>）</td><td data-label="SGLang（谁、在哪）"><code>run_batch</code> 发射 forward；结果进 result_queue 延后一步（<code>event_loop_overlap</code>）</td></tr>
+    <tr><td data-label="阶段">⑤ 采样</td><td data-label="DeepInfer（谁、在哪）">TileLang fused 采样 kernel（含 draft 验证与结构化输出 mask，<code>layers/sampler.py</code>）</td><td data-label="SGLang（谁、在哪）">model_runner 采样 + <code>FutureMap</code> 把 token 直喂下一轮（<code>managers/overlap_utils.py</code>）</td></tr>
+    <tr><td data-label="阶段">⑥ 后处理与回收</td><td data-label="DeepInfer（谁、在哪）"><code>build_request_outputs</code> + <code>DeferredRelease</code> 延迟释放对象池</td><td data-label="SGLang（谁、在哪）"><code>process_batch_result</code>（延后一步）→ detokenizer 进程增量解码</td></tr>
+    <tr><td data-label="阶段">⑦ 输出可读</td><td data-label="DeepInfer（谁、在哪）"><code>LLM._run_engine</code> 按 request ID 收集；保留前先 <code>RequestOutput.clone</code>（对象池存储会被后续 step 复用）</td><td data-label="SGLang（谁、在哪）">DetokenizerManager → ZMQ 回 TokenizerManager → SSE 流式返回</td></tr>
+  </tbody>
+</table>
+</div>
+<p><span class="viz-badge">易混淆</span> "请求已加入引擎"≠"本轮会执行"，"本轮已执行"≠"结果本轮可读"——入队、准入、提交、可读、释放是五个独立事件，两个引擎都允许其中若干件延后一步发生。读后面章节时随时问一句：这条请求现在处于哪两个事件之间？</p>
+<p>把两条路径各自展开，就是两份架构图：</p>
+
+<div class="card">
+  <div class="who"><span class="dot sg"></span><b>SGLang · 三进程服务架构</b><span class="tag">每个 TP rank 一个 Scheduler 子进程 · ZMQ 互联</span></div>
+  <div class="flow">
+    <div class="flow-row">
+      <div class="node sg"><b>客户端</b><span class="sub">OpenAI SDK · HTTP · gRPC</span></div>
+      <div class="arr">→</div>
+      <div class="node sg ghost"><b>sgl-model-gateway（Rust · 可选前置）</b><span class="sub">cache-aware 前缀路由 · PD 路由 · 限流 / 熔断 / 重试</span></div>
+    </div>
+    <div class="arr down">↓</div>
+    <div class="node sg"><b>主进程 · FastAPI HTTP Server（uvloop · 多 tokenizer worker）</b><span class="sub">路由面 <code>/v1/chat/completions</code> · <code>/v1/responses</code> · <code>/v1/embeddings</code> · <code>/v1/rerank</code> · <code>/v1/audio</code> · <code>/v1/messages</code>（Anthropic）· <code>/api/*</code>（Ollama）· gRPC → TokenizerManager / MultiTokenizerRouter（请求编码 · 流式状态机 · abort / metrics）</span></div>
+    <div class="arr down">↓ ZMQ（单机 ipc://；DP attention 时切 TCP）</div>
+    <div class="node sg ghost"><b>DataParallelController（dp_size &gt; 1 时）</b><span class="sub">round_robin / total_requests / total_tokens 分发</span></div>
+    <div class="arr down">↓</div>
+    <div class="node sg"><b>Scheduler 子进程 × N</b><span class="sub">Python 调度器（6278 行）· RadixCache 前缀树（lru / lfu / priority / tlru）· PrefillAdder 组批（chunked prefill · mixed chunking）· overlap 循环 · FutureMap（结果延后一步处理）→ 内嵌 TP Worker → GPU：attention 后端 20+ 种 · CUDA graph（decode / prefill / piecewise）· MoE EP</span></div>
+    <div class="arr down">↓ token 流</div>
+    <div class="node sg"><b>DetokenizerManager 子进程</b><span class="sub">增量解码 → 回传主进程（支持多 worker + 前置 router）</span></div>
+  </div>
+  <hr>
+  <p class="text-small" style="margin:4px 0 2px"><b>可选：PD 分离（开箱可用）</b> Prefill 实例 ⇄ KV 传输（mooncake / nixl / ascend / mori）⇄ Decode 实例 · bootstrap server · PDMux 角色切换</p>
+</div>
+<p class="fig-caption">图 2-1 · SGLang 架构：主进程（HTTP + TokenizerManager）、Scheduler 子进程 ×N、Detokenizer 子进程三者经 ZMQ 通信（<code>entrypoints/engine.py::_launch_subprocesses</code> 编排；端口规划在 <code>server_args.py::PortArgs</code>）。</p>
+
+<div class="card">
+  <div class="who"><span class="dot di"></span><b>DeepInfer · 进程内 C++ 引擎内核</b><span class="tag">开源版为离线推理形态</span></div>
+  <div class="flow">
+    <div class="flow-row">
+      <div class="lane di">
+        <div class="lane-title">引擎进程（与调用方同进程 · 每 DP rank 一个）</div>
+        <div class="node di"><b>① 入口 → LLMEngine</b><span class="sub"><code>examples/offline_inference.py</code> → LLM(offline) · generate() → <code>engine/llm_engine.py</code>；EngineType：NORMAL / PROMPT / COMPLETION 三态（为 E/P/D 分离预留）</span></div>
+        <div class="arr down">↓</div>
+        <div class="node di"><b>② C++ Scheduler（进程内）</b><span class="sub"><code>csrc/engine/scheduler.hpp</code>（1329 行，nanobind 绑定为 <code>deepinfer._C.engine.Scheduler</code>）：BlockManager × 2（KV 块 + state 槽 · pin/ref_count）｜MTPVarlen 变长验证调度（confidence 累乘 · N-2/N-1 轮）｜prepare_tensor_input_v4（655 行 C++ 元数据组装）｜ZOS 输入修正（<code>zos.cpp</code>：remap / seqlens_qk · pinned）</span></div>
+        <div class="arr down">↓ DP 组间用 gloo CPU 组投票</div>
+        <div class="node di"><b>③ Driver Worker（cp_rank 0，同进程）</b><span class="sub">ModelRunner → DeepseekVLForCausalLM（唯一注册模型）· CacheEngine（Block KV 128 tok/块 + SWA ring）· CudaGraphRunner + DFlash CUDA graph（共享显存池）· EPLB 重排 · TileLang JIT kernels · NUMA/CPU 亲和绑定</span></div>
+      </div>
+      <div class="lane di">
+        <div class="lane-title">附属进程</div>
+        <div class="node di"><b>④ Worker 守护进程 ×（cp_size−1）</b><span class="sub">SpawnProcessWithCrashHeader 拉起、常驻循环；shm MessageQueue 广播 (method, kwargs) 反射调用；NCCL / HCCL 子组懒建链 · PDL · NVLS/PXN 预设</span></div>
+        <div class="arr down">↓</div>
+        <div class="node di"><b>⑤ MultimodalProcessor fork × k</b><span class="sub">共享 pinned 内存池（8GB/rank）· 图片哨兵 token 展开 · 坏图 / 超时自动 abort</span></div>
+      </div>
+    </div>
+    <div class="arr down">↓ ④ 经 shm 广播驱动、⑤ 经 fork 管道驱动</div>
+    <div class="node di"><b>每 rank 绑一张加速卡</b><span class="sub">NVIDIA SM100（CUDA 13）或 昇腾 950（CANN 9.2）</span></div>
+  </div>
+  <hr>
+  <p class="text-muted text-small" style="margin:4px 0 2px">开源版未含：HTTP 服务 · 路由 / LB · PD 编排 · 3FS 存储（引擎侧 <code>init_pd_split / do_save_kvcache</code> 等钩子已预留、为空实现）。</p>
+</div>
+<p class="fig-caption">图 2-2 · DeepInfer 架构：没有独立调度进程——C++ Scheduler 直接运行在引擎进程内（<code>llm_engine.py:_create_scheduler</code>），worker 经共享内存队列广播驱动（<code>distributed/shm_broadcast.py</code>）。</p>
+
+<h3>逐项对照</h3>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>要回答的问题</th><th><span class="dot di" style="display:inline-block"></span> DeepInfer</th><th><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="要回答的问题">请求从哪里进来？</td><td data-label="DeepInfer">离线 <code>LLM.generate()</code>；无 serving CLI</td><td data-label="SGLang"><code>launch_server.py</code> / <code>sglang serve</code>，一键起服务</td></tr>
+    <tr><td data-label="要回答的问题">谁决定下一轮执行什么？在哪运行、什么语言？</td><td data-label="DeepInfer">引擎进程内，C++（pybind11/nanobind 导出 26 个类 + 20 个函数）</td><td data-label="SGLang">独立子进程，Python（每个 TP rank 一个）</td></tr>
+    <tr><td data-label="要回答的问题">进程之间怎么传消息？</td><td data-label="DeepInfer">shm MessageQueue 对象广播 + gloo CPU 组（DP 投票零 GPU 干扰）</td><td data-label="SGLang">ZMQ（单机 ipc://，DP attention 时切 TCP）；Engine↔Scheduler 用 DEALER RPC</td></tr>
+    <tr><td data-label="要回答的问题">GPU worker 怎么被驱动？</td><td data-label="DeepInfer">cp_rank 0 与引擎同进程；其余为守护进程，反射调用；每 rank 绑一张卡</td><td data-label="SGLang">Scheduler 子进程内嵌 TPWorker（model_runner），多节点时非 0 节点只跑 scheduler</td></tr>
+    <tr><td data-label="要回答的问题">token 变成可读文本归谁管？</td><td data-label="DeepInfer">引擎内完成；生产由独立 deepseek-recipe（Rust）承担协议与流式解析</td><td data-label="SGLang">独立 DetokenizerManager 进程，支持多 worker + 前置 router</td></tr>
+    <tr><td data-label="要回答的问题">多个数据并行副本怎么分请求？</td><td data-label="DeepInfer">每 DP rank 独立 LLMEngine，组内 allreduce-MIN 对齐预算；跨副本 LB 未开源</td><td data-label="SGLang">DataParallelController（round_robin 等 3 法）+ /dev/shm 负载快照；生产建议外挂 Rust router</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>沿第 ①~⑦ 步给两条请求各记一行"账本"：每一步持有它的模块是谁、向下一步传出了什么。</li>
+  <li>为什么 DeepInfer 的 DP 组间投票用 gloo CPU 组而不是 NCCL？投票发生在什么时机、会阻塞谁？</li>
+  <li>SGLang 为什么把 detokenizer 做成独立进程，而 DeepInfer 留在引擎内？提示：流式服务 vs 离线内核。</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-sched" aria-labelledby="sched">
+<h2 id="sched"><span class="n">03</span>调度与异步执行</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>两个引擎如何消除 CPU 调度造成的 GPU 空泡？一轮的预算怎么定？为什么同样的输入可能得到不同的输出？</p>
+<p>两者都把"消除 CPU 调度造成的 GPU 空泡"作为 decode 性能的关键，思想同源——DeepInfer 官方部署说明 明确写道"参考已有实现（<b>SGLang</b>, Nanoflow）"。但两者的实现深度不同：<b>SGLang 把"结果的批处理"延后一步</b>，<b>DeepInfer 把整个调度流水线重排成三段，并把部分调度决策本身搬上 GPU</b>。</p>
+
+<p>一轮安排多少工作，两个引擎都设有预算。教学抽象写成一道装箱不等式：</p>
+<p class="formula"><i>∑<sub>i ∈ A<sub>t</sub></sub> q<sub>i</sub> ≤ B<sub>t</sub></i></p>
+<p class="text-small">A<sub>t</sub> 是第 t 轮准入的请求集合，q<sub>i</sub> 是本轮为请求 i 安排的位置数，B<sub>t</sub> 是 token 预算——SGLang 的 <code>PrefillAdder</code> 与 DeepInfer 的 <code>_schedule_prefill</code> 都在解这道题；q<sub>i</sub> 不是该请求的最终输出长度（chunk 与 draft 验证轮不满足"每请求一个 token"）。DeepInfer 生产版进一步把 token 预算换成<b>时间预算</b>（生产侧披露）：<i>∑ cost(q<sub>i</sub>, c<sub>i</sub>) ≤ T</i>——cost 是对（新增 token 数, 已算前缀）拟合的二次代价模型，T 经 DP 组 allreduce-MIN 收紧，按"时间"而非"token 数"切批。两式均为教学抽象，具体分支以源码为准。</p>
+
+<div class="fig-scroll">
+<svg viewBox="0 0 780 372" role="img" aria-label="两种异步调度流水线对比">
+  <defs>
+    <marker id="d3-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--muted-foreground)"/></marker>
+  </defs>
+  <text x="20" y="20" style="fill:var(--viz-series-2);font-size:13px;font-weight:500">SGLang · overlap scheduler（event_loop_overlap）</text>
+  <text x="30" y="52" style="fill:var(--muted-foreground);font-size:11px">GPU</text>
+  <rect x="80" y="38" width="150" height="26" rx="4" style="fill:var(--viz-series-2);fill-opacity:.55"/>
+  <text x="155" y="55" text-anchor="middle" style="fill:var(--foreground);font-size:11px">forward N−1</text>
+  <rect x="236" y="38" width="110" height="26" rx="4" style="fill:var(--viz-series-2);fill-opacity:.35"/>
+  <text x="291" y="55" text-anchor="middle" style="fill:var(--foreground);font-size:11px">sample N−1</text>
+  <rect x="352" y="38" width="150" height="26" rx="4" style="fill:var(--viz-series-2);fill-opacity:.55"/>
+  <text x="427" y="55" text-anchor="middle" style="fill:var(--foreground);font-size:11px">forward N</text>
+  <rect x="508" y="38" width="110" height="26" rx="4" style="fill:var(--viz-series-2);fill-opacity:.35"/>
+  <text x="563" y="55" text-anchor="middle" style="fill:var(--foreground);font-size:11px">sample N</text>
+  <rect x="664" y="38" width="96" height="26" rx="4" style="fill:var(--viz-series-2);fill-opacity:.55"/>
+  <text x="712" y="55" text-anchor="middle" style="fill:var(--foreground);font-size:11px">forward N+1</text>
+  <text x="30" y="98" style="fill:var(--muted-foreground);font-size:11px">CPU</text>
+  <rect x="80" y="84" width="180" height="26" rx="4" style="fill:var(--muted);fill-opacity:.5"/>
+  <text x="170" y="101" text-anchor="middle" style="fill:var(--foreground);font-size:11px">process_batch_result(N−2)</text>
+  <rect x="352" y="84" width="150" height="26" rx="4" style="fill:var(--muted);fill-opacity:.5"/>
+  <text x="427" y="101" text-anchor="middle" style="fill:var(--foreground);font-size:11px">schedule N+1 → launch</text>
+  <text x="80" y="130" style="fill:var(--muted-foreground);font-size:11px">机制：结果延后一步（result_queue）· copy_done 对齐 · FutureMap 直喂 token · 三流并行 · 异步 D2H</text>
+
+  <path d="M20,150 H760" style="stroke:var(--border);stroke-width:1"/>
+
+  <text x="20" y="176" style="fill:var(--viz-series-1);font-size:13px;font-weight:500">DeepInfer · ZOS 零开销调度（Asynchronous Scheduling，默认开启）</text>
+  <text x="30" y="208" style="fill:var(--muted-foreground);font-size:11px">GPU</text>
+  <rect x="80" y="194" width="150" height="26" rx="4" style="fill:var(--viz-series-1);fill-opacity:.55"/>
+  <text x="155" y="211" text-anchor="middle" style="fill:var(--foreground);font-size:11px">forward N</text>
+  <rect x="236" y="194" width="110" height="26" rx="4" style="fill:var(--viz-series-1);fill-opacity:.35"/>
+  <text x="291" y="211" text-anchor="middle" style="fill:var(--foreground);font-size:11px">sample N</text>
+  <rect x="352" y="194" width="150" height="26" rx="4" style="fill:var(--viz-series-1);fill-opacity:.55"/>
+  <text x="427" y="211" text-anchor="middle" style="fill:var(--foreground);font-size:11px">forward N+1</text>
+  <rect x="508" y="194" width="110" height="26" rx="4" style="fill:var(--viz-series-1);fill-opacity:.35"/>
+  <text x="563" y="211" text-anchor="middle" style="fill:var(--foreground);font-size:11px">sample N+1</text>
+  <rect x="664" y="194" width="96" height="26" rx="4" style="fill:var(--viz-series-1);fill-opacity:.55"/>
+  <text x="712" y="211" text-anchor="middle" style="fill:var(--foreground);font-size:11px">forward N+2</text>
+  <text x="30" y="248" style="fill:var(--muted-foreground);font-size:11px">CPU</text>
+  <rect x="80" y="234" width="200" height="26" rx="4" style="fill:var(--muted);fill-opacity:.5"/>
+  <text x="180" y="251" text-anchor="middle" style="fill:var(--foreground);font-size:11px">post-process(N−1) 滞后一步</text>
+  <rect x="288" y="234" width="200" height="26" rx="4" style="fill:var(--muted);fill-opacity:.5"/>
+  <text x="388" y="251" text-anchor="middle" style="fill:var(--foreground);font-size:11px">schedule(N+1) → launch</text>
+  <text x="80" y="280" style="fill:var(--muted-foreground);font-size:11px">机制：发射段 forbid_cuda_sync 禁止同步 · CUDA graph 输入常驻显存 · 新旧 batch 用 remap 数组对齐</text>
+  <text x="80" y="297" style="fill:var(--muted-foreground);font-size:11px">seqlens_q/k 修正搬上 GPU（TileLang kernel 重算 → 回写 pinned buffer）· DeferredRelease 延迟回收</text>
+
+  <rect x="20" y="314" width="740" height="44" rx="6" style="fill:var(--muted);fill-opacity:.2;stroke:var(--border)"/>
+  <text x="390" y="332" text-anchor="middle" style="fill:var(--foreground);font-size:11px">共同目标：第 N 步 schedule + post-process 纯 CPU 逻辑原本让 GPU 空转；两者都靠"结果晚一步处理"换 GPU 连续执行。</text>
+  <text x="390" y="348" text-anchor="middle" style="fill:var(--muted-foreground);font-size:11px">差别：SGLang 保持 Python 调度完整逻辑；DeepInfer 调度器在 C++、元数据可 GPU 重算，空泡消除更彻底。</text>
+</svg>
+</div>
+<p class="fig-caption">图 3-1 · 异步调度流水线对比。SGLang：schedule(N+1) 与 forward(N) 重叠、结果 N−1 延后处理；DeepInfer ZOS：每步严格"forward 当前步 → post-process 上一步 → launch 下一步"，元数据滞后一步由 GPU kernel 修正（<code>worker/worker.py::execute_model_step</code>、<code>csrc/engine/zos.cpp</code>）。</p>
+
+<h3>机制演示：连续批处理（预设状态）</h3>
+<div class="card lab" id="divs-labA">
+  <div class="who"><b>Lab · 连续批处理</b><span class="tag">预设状态教学演示 · 进度数字为示意，不代表任一引擎的完整调度分支</span></div>
+  <div data-lab-body aria-live="polite"></div>
+  <div class="lab-ctrl">
+    <button type="button" class="btn" data-lab-prev>上一步</button>
+    <button type="button" class="btn" data-lab-next>下一步</button>
+    <span class="text-muted text-small" data-lab-pos></span>
+  </div>
+</div>
+<p class="fig-caption">观察要点：固定批处理要等整批成员全部完成；连续批处理在每个轮次边界重新考虑准入，让等待请求进入空出的容量。两个引擎的调度器（<code>_schedule_decode</code> / <code>update_running_batch</code>）做的就是右边这件事——真实准入条件还包括预算、KV 水位与抢占/回退。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DeepInfer 的调度器怎么做</b></div>
+    <ul class="tight">
+      <li><b>C++ 单体调度器：</b>FCFS waiting 队列组 prefill 批，容量约束依次为 max_num_prompts → prefill 总 seqlen_k 预算（默认 2^30）→ max_num_batched_tokens；超长 prompt 自动 chunk 切分（开源版 <code>chunked_prefill</code> 默认关），切点避开图片 token 边界。</li>
+      <li><b>prefill/decode 步型投票：</b>混合引擎下 DP 组内两轮 allreduce 表决——每 70 个 decode 步全员有 prefill 才插（ALL 点）、每 100 步任一 rank 有活就插（ANY 点），且 KV 使用率 ≤ 0.9 水位才允许 prefill，兼顾防饿死与防陪跑。</li>
+      <li><b>decode 批与抢占：</b>running 按输出长度降序，从队尾（最新请求）准入；块不足时从队首（最长请求）抢占——直接结束或 <code>reset_for_recompute</code> 回队首重算；结构化输出请求不可重算。</li>
+      <li><b>生产级调度（未开源，官方口径披露）：</b>Prefill 按 4 个长度分桶（&lt;16K / 16–64K / 64–256K / ≥256K）动态分配引擎；chunk 大小由<b>时间预算反解二次代价模型 cost(q, c)</b>（q=token 数， c=已完成前缀），预算再经 DP 组 allreduce-MIN 收紧——按"时间"而非"token 数"切批。</li>
+      <li><b>批不变推理：</b><code>DEEPINFER_BATCH_INVARIANT=1</code> 切换 DeepGEMM/TileKernels 确定性算法 + FlashMLA batch_invariant 路径；确定性采样用 <code>seq_seed</code> 经 SplitMix64 按 (seed, position) 生成随机数，输出与 batch 组成、行序完全无关。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>SGLang 的调度器怎么做</b></div>
+    <ul class="tight">
+      <li><b>Python 调度器（6278 行）+ 策略插件：</b>cache-aware 组（lpm 最长前缀优先 / dfs-weight / hrrn / shortest-prefill-first）与 cache-agnostic 组（fcfs 默认 / lof / random / routing-key），另有优先级调度与抢占阈值。</li>
+      <li><b>chunked prefill 自适应：</b>预算按显存分档（&lt;20GB→2048 … H100→8192）；<code>PrefillAdder</code> 同时约束 chunk token、输入 token 与总 token（decode 请求按 new_token_ratio 估算占用，schedule_conservativeness 可调）；可开 mixed chunking 把 decode 请求混进 prefill 批。</li>
+      <li><b>decode 批收缩（retraction）：</b>KV 不足时按 length / priority 策略回退请求，与 DeepInfer 的 preemption 同类但独立调参。</li>
+      <li><b>overlap 工程化：</b>结果延后一步 + FutureMap/ConfidenceRelay（采样 token 不落 CPU 直接进下一步 forward）+ 连续 prefill 批可临时禁用 overlap 保 TTFT；DP attention 下全局同步决策避免死锁。</li>
+      <li><b>确定性推理：</b>独立的 deterministic attention 后端集合与文档（deterministic_inference.mdx），但未像 DeepInfer 那样与投机解码互斥地保证端到端逐 token 一致。</li>
+    </ul>
+  </div>
+</div>
+
+<p><span class="viz-badge">易混淆</span> "异步/重叠"不等于"这些阶段不再耗时"，也不等于"少做了工作"——它只是把 CPU 逻辑挪进 GPU 忙碌的时间窗。开启投机解码或 chunked 轮次后，"一次 step"与"每条请求加一个 token"也没有对应关系；而 DeepInfer 的确定性输出与置信度驱动的变长验证是互斥选项（第 6 章展开）。</p>
+
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>要回答的问题</th><th><span class="dot di" style="display:inline-block"></span> DeepInfer</th><th><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="要回答的问题">调度器跑在哪里、什么语言？</td><td data-label="DeepInfer">C++（scheduler.hpp 1329 行），进程内</td><td data-label="SGLang">Python（scheduler.py 6278 行），子进程</td></tr>
+    <tr><td data-label="要回答的问题">等待中的请求按什么顺序被选中？</td><td data-label="DeepInfer">FCFS + 输出长度排序 + 抢占</td><td data-label="SGLang">9 种策略可选，默认 fcfs，支持优先级</td></tr>
+    <tr><td data-label="要回答的问题">超长输入怎么切、默认行为？</td><td data-label="DeepInfer">支持（默认关）；生产版按时间预算反解 chunk</td><td data-label="SGLang">默认开启，显存自适应 + mixed chunking</td></tr>
+    <tr><td data-label="要回答的问题">prefill 多久打断一次 decode 流？</td><td data-label="DeepInfer">DP 组投票（70/100 步间隔 + KV 水位 0.9）</td><td data-label="SGLang">prefill_decode_interval 可调 + prefill_delayer</td></tr>
+    <tr><td data-label="要回答的问题">CPU 逻辑重叠到什么程度？</td><td data-label="DeepInfer">调度决策部分上 GPU（TileLang kernel 重算 seqlens）</td><td data-label="SGLang">纯 CPU 重叠；D2H 可交给独立 worker</td></tr>
+    <tr><td data-label="要回答的问题">同样输入一定得到同样输出吗？</td><td data-label="DeepInfer">一等公民（DeepGEMM/FlashMLA 确定性路径 + SplitMix64 采样），README 承诺逐 token 一致</td><td data-label="SGLang">提供确定性注意力后端选项；无端到端"批不变"承诺</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>分别指出两个引擎里"结果延后一步"的具体对象与消费者：DeepInfer 的 post-process(N−1) 与 SGLang 的 result_queue。</li>
+  <li>用预算不等式解释：为什么生产版按"时间"而非"token 数"切 chunk？提示：cost(q, c) 中 c 的含义。</li>
+  <li>在 <code>_schedule_decode</code> 与 <code>update_running_batch</code> 里各找一个"请求继续等待"的分支，写出它缺失的条件。</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-kv" aria-labelledby="kv">
+<h2 id="kv"><span class="n">04</span>KV Cache 与显存管理</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>两边各自把"上下文"存在哪里？命中之后还缺什么？显存放不下时怎么办？</p>
+<p>这是设计哲学差异最大的地方。<b>SGLang 的招牌是 RadixAttention 自动前缀复用 + 多层存储</b>；<b>DeepInfer 的招牌是"为 V4.1 Flash 量身定制的双 KV 结构 + SWA Bounded Replay"</b>，而跨请求的自动前缀复用在开源版中并不存在——生产系统把这件事交给了外部 3FS 存储集群。</p>
+
+<p>两边都用"分页"组织 KV（SGLang 页大小可配，DeepInfer 固定 128 token/块）。分页把逻辑位置与物理位置分开，教学抽象是一条寻址公式：</p>
+<p class="formula"><i>u = ⌊t / P⌋，　o = t mod P，　p = BlockTable[r, u]</i></p>
+<p class="text-small">读法：请求 r 的第 t 个 token 逻辑上位于第 u 块内偏移 o，物理块号由块表查得。命中、驱逐、共享都发生在"块"这一层；本章所有差异都在这条公式的两端——块里存什么精度、谁管理块表、块之外还有没有一层存储。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>RadixCache 前缀树</b><span class="tag">mem_cache/radix_cache.py</span></div>
+    <div class="flow">
+      <div class="node sg"><b>根 ∅</b></div>
+      <div class="arr down">↓</div>
+      <div class="node sg"><b>系统提示词</b><span class="sub">lock_ref 锁定 · 不驱逐</span></div>
+      <div class="arr down">↓ 分叉</div>
+      <div class="flow-row">
+        <div class="node sg ghost"><b>对话 A 分支</b><span class="sub">→ A 的续写 A1</span></div>
+        <div class="node sg ghost"><b>对话 B 分支</b><span class="sub">→ B1 · B2</span></div>
+      </div>
+    </div>
+    <p class="text-small">match_prefix：新请求按 page 对齐命中公共前缀，命中部分免重算；页大小可配（<code>--page-size</code>）；extra_key 让 LoRA / 多模态哈希进独立命名空间。</p>
+    <p class="text-muted text-small">驱逐策略 lru / lfu / priority / tlru（尾优化）只驱逐叶子；被锁（在用）节点不驱逐。虚线节点 = 可驱逐。</p>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>HiCache 分层</b><span class="tag">--enable-hicache</span></div>
+    <div class="flow">
+      <div class="node sg"><b>Tier 0 · GPU HBM</b><span class="sub">KV Pool（MHA / MLA / DSA 专用池）</span></div>
+      <div class="arr down">↓ 写入下沉（write-through 默认）｜ ↑ prefetch 预取</div>
+      <div class="node sg"><b>Tier 1 · Host 内存</b><span class="sub">cache 模式 2.0× / buffer_only 1.2×</span></div>
+      <div class="arr down">↓ 显存超额下沉</div>
+      <div class="node sg"><b>Tier 2 · 远端 / SSD 存储（15+ 后端注册表）</b><span class="sub">hf3fs（DeepSeek 3FS）· Mooncake · LMCache · Nixl · UMBP(mori) · NVMe file · seaweedfs · aibrix · eic · shm · tensorcast …（支持插件注入）</span></div>
+    </div>
+    <hr>
+    <p class="text-small" style="margin:4px 0 2px">Unified Radix Cache：树核心已移到 Rust（<code>rust/sglang-radix-tree</code>）。</p>
+    <p class="text-muted text-small" style="margin:2px 0">HiSparse：DSA 类稀疏模型 decode 只在 GPU 留 top-k 热 KV，全量 KV 放 host pinned 内存按需换入 · KV events / kv_canary 一致性巡检。</p>
+  </div>
+</div>
+<p class="fig-caption">图 4-1 · SGLang：自动前缀复用（树节点持有 KV page 索引，LRU 驱逐叶子）+ 三层存储金字塔，解码请求命中即免重算 prefill。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>Block KV（分页）</b><span class="tag">128 tokens/块 · BlockManager pin/ref_count</span></div>
+    <div class="flow">
+      <div class="flow-row">
+        <div class="node di"><b>块 b21</b><span class="sub">token 0–127</span></div>
+        <div class="arr">→</div>
+        <div class="node di"><b>块 b7</b><span class="sub">token 128–255</span></div>
+        <div class="arr">→</div>
+        <div class="node di"><b>块 b93</b><span class="sub">token 256–…</span></div>
+      </div>
+      <div class="arr down">序列 token 流按 block_table = [b21][b7][b93]… 寻址（块内 token 数为压缩前口径）</div>
+    </div>
+    <p><span class="viz-badge">Main KV / token</span> MXFP8：512B e4m3 + 16B UE8M0 = <b>528 B</b>；稀疏层可选 FP4：256B e2m1 + 32B scale = <b>288 B</b></p>
+    <p><span class="viz-badge">Indexer K / token</span> 恒为 FP4：128 元素 + 4B UE8M0 = <b>68 B</b>，供 top-k 选块</p>
+    <p class="text-muted text-small">显存分配绕过 torch caching allocator：cuMemAlloc 一次性大块（<code>csrc/cuda_utils</code>）；块按 128B 对齐（DeepGEMM 约束）。</p>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>SWA StateBlock</b><span class="tag">每序列一个定长 slot · 不进分页块</span></div>
+    <svg viewBox="0 0 120 120" aria-hidden="true" style="width:104px;height:104px;display:block;margin:6px auto 2px">
+      <circle cx="60" cy="60" r="44" style="fill:none;stroke:var(--viz-series-1);stroke-opacity:.5;stroke-width:1.4"/>
+      <circle cx="60" cy="16" r="6" style="fill:var(--viz-series-1);fill-opacity:.85"/>
+      <circle cx="98" cy="38" r="6" style="fill:var(--viz-series-1);fill-opacity:.4"/>
+      <circle cx="98" cy="82" r="6" style="fill:var(--viz-series-1);fill-opacity:.4"/>
+      <circle cx="60" cy="104" r="6" style="fill:var(--viz-series-1);fill-opacity:.4"/>
+      <circle cx="22" cy="82" r="6" style="fill:var(--viz-series-1);fill-opacity:.4"/>
+      <circle cx="22" cy="38" r="6" style="fill:var(--viz-series-1);fill-opacity:.4"/>
+    </svg>
+    <p style="text-align:center;margin:0 0 4px">ring <b>134</b> = 窗口 128 + 投机回退 6</p>
+    <p class="text-small">slot 分段：[stored: SWA 20 层 × 528B（需落盘）][dropped: consumer SWA + ca_state]。</p>
+    <p class="text-muted text-small">TileLang kernel 按取模 gather/scatter 读写；落盘 ≈1.4 MB/seq · 仅在 128 整数倍位置导出（KVSTORE_GRAIN）。</p>
+  </div>
+</div>
+<div class="card" style="margin-top:12px">
+  <div class="who"><span class="dot di"></span><b>生产 KVCache 存储（3FS 独立集群，未开源）</b><span class="tag">命中与重算规则 · 官方 Q&amp;A</span></div>
+  <ul class="tight text-small">
+    <li>容量约 <b>100 PiB SSD</b>；agent 流量 TTL 3 天 / chatbot 7 天；纠删码 10+2（容忍 2 节点并发故障）；GC Worker 按页 LRU 淘汰到水位线。</li>
+    <li>存算解耦：任何 Prefill 机器可命中任何前缀 → 路由无需前缀亲和，缓存也不受计算节点故障影响；单存储节点 20×30.73TB SSD · 40GB/s 读 / 5GB/s 写。</li>
+    <li>开销掩盖：entrypoint 本机 CHECK 角色做哈希前缀匹配（只查元数据）；KV 异步搬入 shm；换入用 GDR（RDMA 网卡打满 PCIe、不占 SM），逐层 H2D 与前向计算重叠。</li>
+    <li>命中规则：Block KV 决定命中长度 L1（128 的倍数），再查 SWA KV 是否覆盖 [L1−128, L1)；未命中退一块重算 128 tok（SWA Bounded Replay）。</li>
+    <li>Replay 两处应用：Encoder 侧只重算命中前缀末 128 tok（Block KV 原样复用）；Decoder 侧 CED 架构下只算 prompt 末 128 tok，prefill 计算量近乎减半。</li>
+  </ul>
+</div>
+<p class="fig-caption">图 4-2 · DeepInfer：V4.1 Flash 的 KV 被"压缩到极致"——主 KV FP4/MXFP8、索引 FP4、SWA 定长 ring，全部围绕 128 token 粒度组织（<code>worker/cache_engine.py</code>、<code>tilelang_ops/cache_common.py</code>）。</p>
+
+<p><span class="viz-badge">易混淆</span> "Block KV 命中"不等于"状态齐全"：命中长度 L1 只能是 128 的整数倍，但 SWA 窗口还要求 [L1−128, L1) 内的滑窗 KV 存在，缺口要退一块重算 128 tok（Bounded Replay）。另外，DeepInfer 开源版的 fork 共享是<b>显式</b>的父子关系，不要与 SGLang 自动命中任意历史请求的 radix 树混为一谈。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DeepInfer 怎么做</b></div>
+    <ul class="tight">
+      <li><b>开源版没有 radix / 自动 prefix cache。</b>跨请求共享前缀只有显式 <b>fork</b> 机制：父请求 pin 住块与 state，子请求（branch_id 以 <code>_</code> 开头）通过 ref_count 共享、只补尾部块——用于评测造共享前缀与 agent 分支，不是自动命中。</li>
+      <li><b>分页 + 双结构：</b>Block KV 按 128 token 分页（C++ BlockManager 双向链表 + 引用计数）；SWA 不进分页块，每序列占一个定长 StateBlock ring（窗口 128 + 投机回退 6 = 134），读写由 TileLang kernel 按取模 gather/scatter。</li>
+      <li><b>极低精度 KV：</b>主 KV MXFP8 528B/tok（SWA 恒为 MXFP8），稀疏层主 KV 可选 FP4 288B/tok，indexer 恒为 FP4 68B/tok——相比传统 BF16 MLA（~576B/tok/层×全部层），把长上下文成本压到可跨机房部署。</li>
+      <li><b>生产系统靠"外置存储"而非"GPU 显存树"：</b>3FS 集群让任意机器命中任意前缀，代价是必须配 CHECK/换入流水线；换来的是容量（100 PiB）、寿命（TTL 3–7 天）与算存解耦。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>SGLang 怎么做</b></div>
+    <ul class="tight">
+      <li><b>RadixAttention 自动前缀复用：</b>每个完成请求的 KV 挂进 radix 树，新请求 match_prefix 命中即免算；页面化树（page_size 可配）+ 锁引用 + 多种驱逐策略，是 SGLang 的立身之本，也是 router 做 cache-aware 路由的依据。</li>
+      <li><b>HiCache 分层：</b>GPU 显存放不下的下沉到 host 内存（write-through 默认），再下沉到 15+ 注册后端——包括 DeepSeek 自家的 <b>3FS（hf3fs）</b>与 Mooncake、LMCache 等；统一树抽象 UnifiedRadixCache 的核心已用 Rust 重写。</li>
+      <li><b>稀疏模型专用池：</b>DSATokenToKVPool 把 MLA KV 与 indexer FP8 索引分层管理；HiSparse 专门服务 DSA 类模型——decode 只在 GPU 保留 top-k 热 KV，全量 KV 放 host pinned 内存按需换入（与 DeepInfer 的思路异曲同工，但由开源框架直接提供）。</li>
+      <li><b>KV 精度可选：</b>fp8_e4m3/e5m2、NVFP4、MXFP8 多档；MLA / MHA / hybrid-SWA / Mamba 各有专用 pool 与 allocator。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>要回答的问题</th><th><span class="dot di" style="display:inline-block"></span> DeepInfer</th><th><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="要回答的问题">上下文状态按多大粒度组织？</td><td data-label="DeepInfer">固定 128 tokens（压缩前口径）</td><td data-label="SGLang">可配 page size，radix 匹配按页对齐</td></tr>
+    <tr><td data-label="要回答的问题">新请求能自动复用旧前缀吗？</td><td data-label="DeepInfer"><span class="no">✗</span>（开源版）；生产由 3FS 共享存储承担</td><td data-label="SGLang"><span class="ok">✓</span> RadixAttention，默认开启</td></tr>
+    <tr><td data-label="要回答的问题">显存之外的 KV 放哪里？</td><td data-label="DeepInfer">生产 3FS（未开源）；仓库仅预留落盘布局</td><td data-label="SGLang"><span class="ok">✓</span> HiCache 全栈开源，3FS 是其中一种后端</td></tr>
+    <tr><td data-label="要回答的问题">KV 用什么精度存？</td><td data-label="DeepInfer">跟随模型：MXFP8 / FP4 / FP4 索引，不可选</td><td data-label="SGLang">fp8 / nvfp4 / mxfp8 多档可配（含 V4.1 路径）</td></tr>
+    <tr><td data-label="要回答的问题">滑动窗口状态怎么管理？</td><td data-label="DeepInfer">定长 StateBlock ring + Bounded Replay 重算</td><td data-label="SGLang">hybrid SWA pool / allocator + V4.1 replay tail 模块</td></tr>
+    <tr><td data-label="要回答的问题">显存分配器由谁实现？</td><td data-label="DeepInfer">C++（block_manager.hpp 242 行）+ cuMemAlloc</td><td data-label="SGLang">Python allocator 家族（paged/token/swa/mamba/hisparse…）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>一条 300 token 的请求在 DeepInfer 中占几个 Block KV 块？它的 SWA StateBlock 里存了什么、不存什么？</li>
+  <li>用寻址公式解释：为什么 DeepInfer 的命中长度 L1 只能是 128 的整数倍？</li>
+  <li>对比 fork 显式共享与 radix 自动命中：各自适用什么场景？哪一种需要调用方配合？</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-model" aria-labelledby="model">
+<h2 id="model"><span class="n">05</span>模型与稀疏注意力</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>V4.1 Flash 的长上下文为什么成本低？indexer 稀疏注意力是什么？SGLang 怎么用通用后端复刻同款能力？</p>
+<p>DeepInfer 只服务一款模型，因此可以把 V4.1 Flash 的每个结构特性都写成专属算子；SGLang 要服务 255 个模型实现，做法是把 V4.1 的特性抽象成<b>通用稀疏注意力后端（dsv4）+ 专属模型模块</b>。理解差异前先看这款模型本身长什么样：</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>主干前向</b><span class="tag">models/v4_modules/</span></div>
+    <div class="flow">
+      <div class="node di"><b>输入 tokens</b><span class="sub">图片 → ViT + Aligner 展开（同进程多模态）；YOCO compact 截断：只保留末尾 140 tok 进 consumer 层（窗口 128 + 回退 6 + 余量）</span></div>
+      <div class="arr down">↓</div>
+      <div class="node di"><b>Prefill / Source 层 × n_prefill（写 Block KV）</b><span class="sub">MLA（吸收式 · FlashMLA · FP8 paged）｜Indexer（DSA 式 · FP4 MQA · relu(q·k) 选 top-k）｜MoE（MXFP4 · noaux_tc）；mHC 残差干：hc_mult 路 trunk 并行、HCHead 末尾折回；indexer 候选块粒度 8/16</span></div>
+      <div class="arr down">↓ 跨层共享 source 层 KV / indexer（cross_layer.py）</div>
+      <div class="node di"><b>YOCO Consumer 层 ×（num_layers − n_prefill）</b><span class="sub">KV 不自写，由首个 consumer 层 shared hidden 投影（You Only Cache Once）；注意力仅在 SWA 窗口 128 内，SWA KV 同从 shared hidden 投影；CED：decoder Block KV 由 encoder 末层投影 → 只算末 128 tok（Replay）</span></div>
+      <div class="arr down">↓</div>
+      <div class="flow-row">
+        <div class="node di ghost"><b>Engram</b><span class="sub">n-gram 哈希记忆（engram_hash + EngramBuffer 跨卡 gather）· 门控融合进 hidden · 压缩词表 · 查找表灌给 C++ 调度器</span></div>
+        <div class="node di"><b>输出</b><span class="sub">HCHead → LM Head → logits → fused 采样；压缩率只支持 C1/C2（C4、C128、APE 已移除）；压缩 state ring：ratio + 回退余量</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DFlash Draft（MTP/NextN）</b><span class="tag">投机解码 · mtp/dflash.py</span></div>
+    <div class="flow">
+      <div class="node di"><b>完整 decoder 层 × num_nextn（HF 权重 DFlashNextPredictHeadHC）</b><span class="sub">输入取主模型若干层 hidden 投影 · noise token 起始 · 每步 5 个 draft</span></div>
+      <div class="arr down">↓</div>
+      <div class="flow-row">
+        <div class="node di"><b>Markov 头（dspark_markov_rank）</b><span class="sub">vocab 嵌入叠加进 logits，提升短程依赖预测</span></div>
+        <div class="node di"><b>Confidence Head</b><span class="sub">sigmoid([hidden ‖ markov_emb] @ w / T) → 每个 draft 的预测接受率（在线 · 逐 step 温度可调）</span></div>
+      </div>
+    </div>
+    <p class="text-muted text-small">draft KV 复用主 CacheEngine（layer id 续接主模型）；整段 draft decode 捕获为独立 CUDA graph、与主图共享显存池；golden token 采样后立即喂 draft 预测下一轮（同 stream 顺序依赖）。</p>
+  </div>
+</div>
+<p class="fig-caption">图 5-1 · V4.1 Flash 的四件套：<b>YOCO</b>（只缓存一次，后半段层不写 KV）、<b>SWA + Bounded Replay</b>（窗口注意力 + 128 token 有界重算）、<b>FP4 DSA indexer</b>（稀疏 top-k 注意力）、<b>DFlash + Confidence Head</b>（自带置信度的投机解码）。全部实现位于 <code>deepinfer/model_executor/models/v4_modules/</code> 与 <code>mtp/dflash.py</code>。</p>
+
+<p>V4.1 的稀疏注意力（indexer）可以用一个教学抽象概括——注意力只算被索引选中的块：</p>
+<p class="formula"><i>A<sub>i</sub> = attn( q<sub>i</sub>, KV[ topk<sub>k</sub>( relu(q<sub>i</sub> · K<sup>idx</sup>) ) ] )</i></p>
+<p class="text-small">K<sup>idx</sup> 是 FP4 压缩的索引键，top-k 按块粒度（8/16）选出。这条式子描述概念，不对应具体 kernel 的实现分支。</p>
+<p><span class="viz-badge">易混淆</span> YOCO compact 截断不是"把前缀重算一遍"：source 层 KV 原样复用，consumer 层只回放保留的尾部片段（默认 140 tok）。截断改变的是"哪些层需要看到什么"，而不是"已算好的 KV 是否仍然有效"。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DeepInfer 怎么做</b></div>
+    <ul class="tight">
+      <li><b>模型注册表只有一项：</b><code>_MODELS = {"DeepseekV41ForCausalLM": ("deepseek_vl", "DeepseekVLForCausalLM")}</code>——加载器可以按这一款模型的权重格式（FP4 packed MoE、FP8 块、双 KV）做逐参数物化与日志校验（"Main KV: FP4|MXFP8; Indexer QK: FP4"）。</li>
+      <li><b>算子全部 TileLang JIT + vendor 库：</b>35 个 TileLang 模块（fused_transform 一次完成 norm+RoPE+Hadamard+量化+写 KV；fused_sample 832 行采样主 kernel），NVIDIA 与昇腾各一套实现（<code>tilelang_ops/cuda/</code> 与 <code>asc/</code>）；仓库内 0 个自研 .cu 文件。</li>
+      <li><b>注意力路径单一且深绑：</b>prefill 用 FlashMLA sparse（indices 按 indexer top-k 生成）+ fused_norm_rope_attn_rope_cast；decode 用 FlashMLA paged FP8（<code>is_fp8_kvcache=True</code>）；ViT 在昇腾上走 flash-attn-4 NPU 补丁。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>SGLang 怎么做</b></div>
+    <ul class="tight">
+      <li><b>把 V4.1 能力抽象成通用后端：</b><code>dsv4</code>（原名 compressed）注意力后端实现压缩 KV、unified_kv_gate、v41 indexer、MegaMoE 变体；<code>dsa</code> 后端服务 V3.2 式 NSA（indexer topk、KPool 把 top-k KV 物化成小池、fp8 索引、prefill CUDA graph、昇腾/gfx950 变体）。</li>
+      <li><b>V4.1 专属模块齐全：</b><code>deepseek_v4_mhc.py</code>（mHC 残差干）、<code>deepseek_v4_replay_tail.py</code>（decoder SWA bounded replay，走 row-bucket graph）、<code>deepseek_v4_dspark.py</code>、<code>deepseek_v41_vit.py</code>、<code>deepseek_v4_nextn.py</code>——即 SGLang 用通用框架复刻了 DeepInfer 的全部模型侧特性。</li>
+      <li><b>广度即策略：</b>255 个模型文件覆盖 Llama/Qwen/GLM/Kimi/MiniMax/Gemma/GPT-OSS 等数十家族，另有线性注意力（mamba2/dots3/lfm2/sdar）、OCR、音频、扩散模型实现；注意力后端 20+ 种，prefill/decode/verify 可分别指定。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>要回答的问题</th><th><span class="dot di" style="display:inline-block"></span> DeepInfer</th><th><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="要回答的问题">分别支持多少种模型？</td><td data-label="DeepInfer">DeepSeek-V4.1-Flash（含 ViT 多模态）一款</td><td data-label="SGLang">255 个实现；DeepSeek V2/V3/V4/V4.1/NextN/OCR/VL2 全系</td></tr>
+    <tr><td data-label="要回答的问题">注意力 kernel 从哪里来？</td><td data-label="DeepInfer">FlashMLA（vendor）+ TileLang 自研 + flash-attn-4（NPU ViT）</td><td data-label="SGLang">fa3/fa4/flashinfer/flashmla/trtllm_mla/cutedsl_mla/tokenspeed_mla/triton/aiter/wave/intel_amx/ascend… 20+</td></tr>
+    <tr><td data-label="要回答的问题">稀疏注意力怎么落地？</td><td data-label="DeepInfer">内生于 V4.1：FP4 indexer top-k（候选块 8/16）+ 稀疏 FlashMLA</td><td data-label="SGLang"><code>dsa</code> / <code>dsv4</code> 通用后端 + HiSparse decode 热池 + kpool fp8</td></tr>
+    <tr><td data-label="要回答的问题">V4.1 在两边分别是什么状态？</td><td data-label="DeepInfer">原生（该仓库就是它的参考实现）</td><td data-label="SGLang">预览镜像（"has not shipped in a release yet"，官方 cookbook 原文）；硬件面更宽（H200/B200/B300/GB300/MI355X）</td></tr>
+    <tr><td data-label="要回答的问题">图像输入谁来处理？</td><td data-label="DeepInfer">仅 V4.1 自带 ViT；预处理 fork 进程 + pinned 池</td><td data-label="SGLang">数十个 VLM 家族 + GPU 图像预处理 + ViT CUDA graph + EPD 分离</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>用三个基本单位（请求/step/输出）描述一次"带图多轮对话"在 V4.1 中的 prefill 与 decode：哪些工作只做一次、哪些每轮都做？</li>
+  <li>YOCO compact 截断下，"已算好的 source 层 KV"与"consumer 层实际看到的输入"分别是什么？</li>
+  <li>把 SGLang 的 <code>deepseek_v4_mhc.py</code>、<code>deepseek_v4_replay_tail.py</code>、<code>dsv4</code> 后端与 DeepInfer 的对应专属模块一一配对。</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-spec" aria-labelledby="spec">
+<h2 id="spec"><span class="n">06</span>投机解码：DSpark 的两种实现</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>为什么固定验证 5 个 draft 是浪费？两边的"置信度"从哪里来？每条请求的验证长度怎么定？</p>
+<p>DSpark（DeepSeek 的变长投机验证方案）在两个框架里都有，但实现哲学不同：<b>DeepInfer 让模型自带的 Confidence Head 在线预测接受率，并用实测性能曲线在线求解最优验证长度</b>；<b>SGLang 把接受率与代价做成离线校准表（SPS/STS），在 GPU 上用 planner kernel 排布 ragged 验证</b>。共同的动机：固定验证 5 个 draft 会把算力浪费在低概率 token 上。</p>
+
+<p>两边都要回答"验证多长最划算"。第一步是把每条请求的接受概率估计成前缀累乘（教学抽象）：</p>
+<p class="formula"><i>acc<sub>r</sub>(k) = ∏<sub>j=1..k</sub> c<sub>r,j</sub></i></p>
+<p class="text-small">c<sub>r,j</sub> 是请求 r 第 j 个 draft 的接受率估计——DeepInfer 由模型自带的 Confidence Head 在线预测，SGLang 来自离线校准的 SPS/STS 表。有了 acc(k)，再用"验证 k 个的耗时 vs 期望多收约 k·acc(k) 个 token"权衡验证长度；固定 5 个的做法因此被两边淘汰。</p>
+
+<div class="card">
+  <div class="who"><span class="dot di"></span><b>DeepInfer · 在线自适应</b><span class="tag">csrc/engine/mtp_varlen.hpp + mtp/dflash.py</span></div>
+  <div class="flow">
+    <div class="node di"><b>① DFlash 每步固定出 5 个 draft</b><span class="sub">noise token 起始 · Markov 头 · 随主模型 CUDA graph 同步重放</span></div>
+    <div class="arr down">↓</div>
+    <div class="node di"><b>② Confidence Head 在线预测接受率</b><span class="sub">C++ <code>process_MTPInfo</code> 前缀累乘得 accept_rate</span></div>
+    <div class="arr down">↓</div>
+    <div class="node di"><b>③ MTPVarlen 调度选验证长度</b><span class="sub">启动时 <code>profile_decode_perf</code> 实测各 batch size 耗时（DecodePerfCache 落盘）+ 运行时前向/采样耗时估计器；N-2 轮扫描 accept_rate + token 预算选吞吐最大的 best_bsz，N-1 轮把额外验证位按 rate 分配到各请求 → seqlens_q ∈ [1, 1+nextn]</span></div>
+    <div class="arr down">↓</div>
+    <div class="node di"><b>④ fused 验证采样</b><span class="sub">一次 kernel 算出全部行 logprobs，与 draft 分布做接受/拒绝，拒绝位用残差概率重采样（EOS 后 confidence 置 0）</span></div>
+  </div>
+  <p class="text-muted text-small">ZOS 模式下 ③ 由 GPU TileLang kernel 重算：confidence 累乘 → 排序取 top-k → remap scatter → 回写 pinned buffer（CPU 只给乐观估计）。</p>
+</div>
+<div class="card" style="margin-top:12px">
+  <div class="who"><span class="dot sg"></span><b>SGLang · 离线校准 + 工程化编排</b><span class="tag">speculative/dspark_components/</span></div>
+  <div class="flow">
+    <div class="node sg"><b>① DSPARK 为注册算法</b><span class="sub">与 EAGLE / EAGLE3 / NEXTN / NGRAM / UNO 并列，可插拔注册；draft 同为 DFlash / MTP</span></div>
+    <div class="arr down">↓</div>
+    <div class="node sg"><b>② 查 SPS 代价表 + STS 校准</b><span class="sub">离线 profile 文件按路径加载，换模型 / 硬件需重新校准</span></div>
+    <div class="arr down">↓</div>
+    <div class="node sg"><b>③ dspark_planner 在 GPU 排定验证长度</b><span class="sub">ScheduleVerifyLensTopk kernel（与 FutureMap / confidence relay 对齐）</span></div>
+    <div class="arr down">↓</div>
+    <div class="node sg"><b>④ ragged verify</b><span class="sub">static / cap-accept / compact 三种布局（按 CUDA graph 分桶取整）· 块接受估计器 · KV inject · spec disagg / decoupled（draft 可独立进程）</span></div>
+  </div>
+</div>
+<p class="fig-caption">图 6-1 · DSpark 两种实现路径。官方生产数据（官方口径）：动态验证把每步验证 draft 从 5.00 降到 3.2–4.4（约 −30%），平均接受长度基本不变（3.29 vs 3.20），在 EP64/DP64、每 rank 约 60 并发的生产运行点折合 <b>+4~7% 吞吐</b>。</p>
+
+<h3>机制演示：DSpark 变长验证（预设状态）</h3>
+<div class="card lab" id="divs-labB">
+  <div class="who"><b>Lab · 变长验证</b><span class="tag">预设数字教学演示 · 真实接受率由 ConfidenceHead 在线预测 / 查校准表</span></div>
+  <div data-lab-body aria-live="polite"></div>
+  <div class="lab-ctrl">
+    <button type="button" class="btn" data-lab-prev>上一步</button>
+    <button type="button" class="btn" data-lab-next>下一步</button>
+    <span class="text-muted text-small" data-lab-pos></span>
+  </div>
+</div>
+<p class="fig-caption">观察要点：低概率的尾部不值得算——累乘掉到门槛以下的 draft 直接不进验证批；两条请求在同一轮里拿到不同的验证长度，正是"变长"的含义。</p>
+<p><span class="viz-badge">易混淆</span> "DFlash 每步生成 5 个 draft"不等于"每步验证 5 个"——变长验证可能只安排 1 个；反过来"接受了 3 个"也不意味着下一轮从第 4 个继续：被拒即断尾，替代 token 用残差概率重采样。另外，DeepInfer 的端到端确定性输出要求 <code>DEEPINFER_ENABLE_MTP_VARLEN=0</code>——置信度驱动的变长验证与逐 token 一致性互斥。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DeepInfer 怎么做</b></div>
+    <ul class="tight">
+      <li><b>置信度来源 = 模型自带头：</b>ConfidenceHead 是 checkpoint 的一部分（<code>confidence_head.proj.weight</code>），前向融合成单个 TileLang kernel：sigmoid(cat([hidden, markov_emb]) @ w / 温度)，温度可按 draft 步分别设置。</li>
+      <li><b>调度在 C++，闭环在线学习：</b>每步把实测 device_forward / device_sample 耗时喂回 <code>Scheduler.update_mtp_runtime</code>，配合启动时跑出的 decode 性能曲线（各 CUDA graph 尺寸实测毫秒数，带 TTL 缓存）在线求 best_bsz——调度器直接"认识"当前硬件当前负载。</li>
+      <li><b>信息流三分离：</b>sequence 存满额 draft 供调度裁剪；sampler inputs 存实际 seqlens_q；modeling 只看 input metadata（<code>sampler.py</code> 注释明示），MTPInfoPool 跨步读写靠同 stream 顺序保证。</li>
+      <li><b>独有约束：</b>端到端确定性输出要求关闭变长验证（MTP_VARLEN=0）——置信度调度与逐 token 一致性互斥。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>SGLang 怎么做</b></div>
+    <ul class="tight">
+      <li><b>置信度来源 = 离线校准：</b>SPS（Softmax Position Statistics）代价表与 STS 校准表由离线 profile 生成、按路径加载（<code>load_sps_table_from_path</code> / <code>load_sts_calibration_from_path</code>），换模型/硬件需重新校准。</li>
+      <li><b>编排走 overlap 主干：</b>planner 的调度与 FutureMap/confidence relay 对齐（GPU buffer + future index 传递），DFlash/DSPARK 均有 disagg 适配（draft 与 verify 分离部署时也可用）。</li>
+      <li><b>ragged verify 三模式：</b>static（固定长度）、cap-accept（上限截断）、compact（紧凑排布），按 CUDA graph 分桶取整；另有 block accept estimator 评估块级接受率。</li>
+      <li><b>生态位：</b>投机解码是一等公民——9 种内置算法 + 自定义注册（<code>SpeculativeAlgorithm.register</code>），decoupled spec 可把 drafter 放独立 scheduler 进程；draft 侧也有专属 CUDA graph runner。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>要回答的问题</th><th><span class="dot di" style="display:inline-block"></span> DeepInfer</th><th><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="要回答的问题">draft 由谁生成？</td><td data-label="DeepInfer">DFlash（checkpoint 内置 MTP 层 + Markov 头）</td><td data-label="SGLang">DFlash / EAGLE / EAGLE-3 / NEXTN / STANDALONE / NGRAM / UNO…</td></tr>
+    <tr><td data-label="要回答的问题">接受概率从哪里估计？</td><td data-label="DeepInfer">ConfidenceHead 在线预测（逐 step 温度）</td><td data-label="SGLang">SPS/STS 离线校准表 + 运行时 estimator</td></tr>
+    <tr><td data-label="要回答的问题">验证长度在哪里决定？</td><td data-label="DeepInfer">C++ 调度器（N-2/N-1 轮）；ZOS 下 GPU kernel</td><td data-label="SGLang">GPU planner kernel（ScheduleVerifyLensTopk）+ graph 分桶</td></tr>
+    <tr><td data-label="要回答的问题">验证步怎么排布？</td><td data-label="DeepInfer">变长 seqlens_q 直接进 fused 采样 kernel</td><td data-label="SGLang">ragged verify 三模式（static / cap-accept / compact）</td></tr>
+    <tr><td data-label="要回答的问题">怎么与异步调度共存？</td><td data-label="DeepInfer">ZOS 原生（调度修正即 ZOS 的一部分）</td><td data-label="SGLang">V2 worker 按 overlap + FutureMap schema 编写</td></tr>
+    <tr><td data-label="要回答的问题">收益有什么证据？</td><td data-label="DeepInfer">官方生产数据：+4~7% 吞吐（−30% 验证算力）</td><td data-label="SGLang">有 dspark_observability 组件；公开基准未随仓库给出</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>手算：若置信度 c = [.9, .8, .5]，acc(1..3) 各是多少？"验证 3 个"的期望接受长度约是多少？</li>
+  <li>两边"接受率估计"的数据来源差在哪？换一块 GPU 或换一个 checkpoint，各自的校准动作是什么？</li>
+  <li>为什么 DeepInfer 的端到端确定性输出必须关闭变长验证？从"输出依赖 batch 组成与调度决策"的角度解释。</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-parallel" aria-labelledby="parallel">
+<h2 id="parallel"><span class="n">07</span>并行与通信</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>两个引擎各自切分什么、不切分什么？DeepInfer 生产为什么不用 TP/PP？专家忙闲不均怎么办？</p>
+<p>两者的并行设计都源自 DeepSeek V3 系"attention 数据并行 + MoE 专家并行"的配方，但取向相反：<b>DeepInfer 做减法</b>——生产上直接不用 TP/PP，把 Wide-EP 和 NVL 域内融合做到极致；<b>SGLang 做加法</b>——把每种并行维度都做成可组合的参数，覆盖从单卡到超节点的所有拓扑。</p>
+
+<p>MoE 层的教学抽象，两边语义一致：</p>
+<p class="formula"><i>y<sub>i</sub> = ∑<sub>e ∈ S<sub>i</sub></sub> α<sub>i,e</sub> · E<sub>e</sub>(x<sub>i</sub>)</i></p>
+<p class="text-small">S<sub>i</sub> 是 token i 逻辑上选中的专家集合，α 是路由权重。关键区分：token 只知道"逻辑专家"；它被送往哪张卡上的哪个副本，由<b>物理放置</b>（EP 分组 + EPLB 副本布局）决定。本章所有机制改动的都是后半段。</p>
+<p><span class="viz-badge">易混淆</span> EPLB 改的是物理放置（专家副本放哪张卡、放几个），不改逻辑路由（选中哪些专家、权重多少）；重排时物理上移动的是权重，不是 token。另外，Wide-EP"减少访存"不等于"通信消失"——dispatch/combine 依然存在，只是每卡需要驻留的专家权重变少。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DeepInfer 怎么做</b></div>
+    <ul class="tight">
+      <li><b>Attention DP（#DP = #EP）：</b>注意力完全不切分——每个 DP rank 持有完整模型跑自己的请求子集（每 rank 一个 LLMEngine），MoE 部分则全组 EP。官方部署说明 明言"暂未用 TP、CP"。</li>
+      <li><b>Wide-EP：</b>decode 用 EP64~128（超节点全域），显著减少 per-step MoE 专家权重访存量；prefill 用 EP2~8（显存够就小 EP）。README 基准即"4 卡 prefill / 64 卡 decode，各在一个 scale-up domain 内"。</li>
+      <li><b>MegaMoE（NVL 域融合）：</b>当 EP 组在单个 NVLink 域内时，dispatch→GEMM1→SwiGLU→GEMM2→combine 整块融成 DeepGEMM 的 <code>fp8_fp4_mega_moe</code> / <code>bf16_mega_moe</code> 单核调用，激活在 NVLink symmetric memory（SymmBuffer）就位；官方结论"无论 EP/batch 大小都显著快于 unfused MoE"。</li>
+      <li><b>balanced CP（镜像式）：</b>开源版支持的序列维切分：prompt 沿 token 维镜像均分到 CP ranks（chunk 对齐 cp_size×2），层内 DeepEP BucketBuffer all-gather 拼接、层末还原；decode 广播。生产暂未启用。</li>
+      <li><b>EPLB（开源）：</b>冗余专家（每卡 ≥1 起，向上凑到 ep_size 倍数）+ 滑动窗负载统计 + 周期重排；权重搬运用 <b>NVLink symm_mem IPC 原地 shuffle</b>（NPU 不支持则退化跨网版本）。生产参数：prefill 每卡 4 个冗余专家、窗 100 步、1000 步重排，实测 moe_lb（最慢/均值）= 1.045~1.074；decode 每卡 1 个（EP64 下每卡 7 专家）、窗 1000、10000 步重排，moe_lb = 1.090。</li>
+      <li><b>通信栈：</b>DeepEP（vendor 固定 SHA：dispatch/combine + EngramBuffer + CP BucketBuffer）、NCCL（SM 数固定 32）、gloo（CPU 控制面）；PDL 开、NVLS/PXN 关等 worker 环境预设。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>SGLang 怎么做</b></div>
+    <ul class="tight">
+      <li><b>全维度可组合：</b><code>tp_size / pp_size / ep_size / attn_dp_size / attn_cp_size / dcp_size / moe_dp_size</code>——attention DP 在 TP 组内切（FFN 仍 TP），与 DeepInfer 的"整模型 DP"是同思想不同粒度；DCP 专门解决 decode 长序列（MLA KV 按 p mod c 条带切分，partial attention + LSE 精确合并）。</li>
+      <li><b>微批通信-计算重叠：</b>TBO（two-batch overlap）/ SBO（single-batch overlap），token 分布阈值自动判定做 TBO 还是双块；配合 DeepEP 的 normal/low_latency 双模式自动切换（prefill 用 normal、decode 用 low-latency）。</li>
+      <li><b>MoE 分发后端 11 种：</b>deepep / deepep_v2（ElasticBuffer，direct=单机 NVL / hybrid=多机）/ mooncake / nixl / moriep / pplx / flashinfer / megamoe / ascend_tp…；DeepEP/DeepGEMM 走 sgl-deep-ep / sgl-deep-gemm PyPI fork，另有 FlashInfer TRT-LLM / CUTLASS / cutedsl GEMM 后端可选。</li>
+      <li><b>EPLB + 弹性：</b>enable_eplb + ep_num_redundant_experts + 重排迭代数 + 利用率阈值触发；专家分布记录器带 HTTP 端点可观测；lplb_solver 做逐层求解；<b>弹性 EP</b>（Elastic EP）用 Mooncake/Nixl 做备份专家，支持节点动态加入。</li>
+      <li><b>PP 完整：</b>异步微批（pp_async_batch_depth）+ 动态 chunk（dynamic_chunk_sizer）；Blackwell 上 MNNVL 域自动启用 fi_a2a。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>要回答的问题</th><th><span class="dot di" style="display:inline-block"></span> DeepInfer</th><th><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="要回答的问题">注意力与 dense 部分切不切？（TP）</td><td data-label="DeepInfer"><span class="no">✗</span>（注意力与 dense 部分不切分）</td><td data-label="SGLang"><span class="ok">✓</span> tp_size，全模型可 TP</td></tr>
+    <tr><td data-label="要回答的问题">层要分段放到不同卡吗？（PP）</td><td data-label="DeepInfer"><span class="no">✗</span></td><td data-label="SGLang"><span class="ok">✓</span> 异步微批 + 动态 chunk</td></tr>
+    <tr><td data-label="要回答的问题">注意力怎么并行？</td><td data-label="DeepInfer"><span class="ok">✓</span> 每 rank 完整模型（#DP=#EP）</td><td data-label="SGLang"><span class="ok">✓</span> attn_dp_size（TP 组内 DP）</td></tr>
+    <tr><td data-label="要回答的问题">单条长序列的 prefill 怎么切？（CP）</td><td data-label="DeepInfer"><span class="part">◐</span> balanced mirror CP（开源提供，生产未用）</td><td data-label="SGLang"><span class="ok">✓</span> attn CP + prefill CP</td></tr>
+    <tr><td data-label="要回答的问题">decode 阶段的长序列怎么切？（DCP）</td><td data-label="DeepInfer"><span class="no">✗</span>（用 Wide-EP 承载规模）</td><td data-label="SGLang"><span class="ok">✓</span> dcp_size，LSE 精确合并</td></tr>
+    <tr><td data-label="要回答的问题">专家怎么分布到卡上？（EP）</td><td data-label="DeepInfer"><span class="ok">✓</span> EP 2~128，DeepEP（vendor）</td><td data-label="SGLang"><span class="ok">✓</span> ep_size + 11 种 a2a 后端</td></tr>
+    <tr><td data-label="要回答的问题">通信与计算怎么重叠？</td><td data-label="DeepInfer"><span class="no">✗</span>（用 MegaMoE 消除域内通信）</td><td data-label="SGLang"><span class="ok">✓</span> TBO / SBO / 双块</td></tr>
+    <tr><td data-label="要回答的问题">专家忙闲不均怎么办？</td><td data-label="DeepInfer"><span class="ok">✓</span> symm_mem 原地搬运，生产 moe_lb ≈ 1.05~1.09</td><td data-label="SGLang"><span class="ok">✓</span> 算法可选 + 阈值触发 + 弹性 EP</td></tr>
+    <tr><td data-label="要回答的问题">单机 NVLink 域内 MoE 怎么提速？</td><td data-label="DeepInfer"><span class="ok">✓</span> MegaMoE 单核融合（FP8×FP4 / BF16）</td><td data-label="SGLang"><span class="ok">✓</span> megamoe 后端 + DeepEP v2 direct 模式</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="text-muted text-small">补充（官方部署说明）：Wide-EP 的收益来自"显著减少 per-step MoE 专家部分访存量"，配合 EPLB 有效提升 TPS；扩缩容按 prefill 未命中 token 数与 decode 在跑请求数调整；大 EP 实例故障时按健康卡数重组 EP 规模继续服务。</p>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>DeepInfer 生产为什么不用 TP/PP？把 Attention DP、Wide-EP、MegaMoE 与 TP/PP 各自解决的问题一一对应。</li>
+  <li>EPLB 重排时，什么在物理上移动、什么保持不变？为什么搬权重用 NVLink symm_mem 原地 shuffle？</li>
+  <li>官方实测 moe_lb（最慢/均值）收敛到 1.045~1.09 意味着什么？对整体 TPS 与最慢 rank 的利用率分别有何影响？</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-serving" aria-labelledby="serving">
+<h2 id="serving"><span class="n">08</span>服务生态与生产部署</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>DeepSeek 生产系统由哪几层组成？开源版缺哪几层？SGLang 开箱对应有哪些能力？</p>
+<p>DeepInfer 仓库里没有服务层，但官方部署说明 把生产系统的全貌讲清楚了；SGLang 则把对应能力全部做进了开源仓库。这一章左边是"DeepSeek 生产系统怎么部署"，右边是"SGLang 开箱能部署成什么样"。</p>
+
+<div class="card">
+  <div class="who"><span class="dot di"></span><b>DeepSeek 生产系统 · E/P/D 分离 + 独立存储</b><span class="tag">官方 Q&amp;A 披露 · 编排层未随 DeepInfer 开源</span></div>
+  <div class="flow">
+    <div class="flow-row">
+      <div class="node di"><b>API 请求（多协议）</b><span class="sub">Chat / Responses / Messages</span></div>
+      <div class="arr">→</div>
+      <div class="node di"><b>DeepSeek Recipe（Rust，独立开源项目）</b><span class="sub">统一转译 · special-token 分段并行编码 · KMP 流式增量解析</span></div>
+    </div>
+    <div class="arr down">↓</div>
+    <div class="node di"><b>负载均衡层（四个专用 LB）</b><span class="sub">Prefill LB（4 长度分桶 + compute-quota）· Decode LB（请求数 + KV 总长双维）· VE LB（最少 image patch 优先）· EPLB（专家级重排，见第 7 章）</span></div>
+    <div class="arr down">↓</div>
+    <div class="flow-row">
+      <div class="node di"><b>VE 集群（Vision Encoder）</b><span class="sub">单卡部署（建议用低成本卡）· 图片路由按机器、再选 patch 最少的卡 · embedding 回传 prefill · 多模态即 EPD 三段分离</span></div>
+      <div class="node di"><b>Prefill 集群（PE）</b><span class="sub">EP2~8 / DP2~8（8 卡机，显存够就小 EP）· 任何 PE 可命中任何前缀（无亲和路由）· chunk 由时间预算反解（≤32,768 tok）· 组内按 quota 最低 rank 派发</span></div>
+      <div class="node di"><b>Decode 集群（CE）</b><span class="sub">EP64~128 / DP64~128（Wide-EP 超节点）· 短请求→并发小 KV 长的卡、长请求反之 · 下线宽限 1min、未完请求+KV 整体迁移 · P : D ≈ 1:1（高效最小单元 64P+64D）</span></div>
+    </div>
+    <div class="arr down">↓ Block KV + SWA KV 统一 PD 传输链路</div>
+    <div class="node di"><b>3FS KVCache 存储集群</b><span class="sub">≈100 PiB SSD · TTL 3 天（agent）/ 7 天（chatbot）· 纠删码 10+2 · 跨机房可行（V4.1 压缩 KV，约 400Gbps / 8 卡）；SWA KV 留在产生它的机器内存（逻辑统一目录 + 跨机回拉），Block KV 全集群共享</span></div>
+  </div>
+  <hr>
+  <p class="text-small" style="margin:4px 0 2px">规模：单集群 <b>155 万亿 tokens/天</b> · 收入 $38/卡·时（谷价）；负载均衡后可达"完全均衡离线基准"的约 80%。<span class="text-muted">对照：SGLang 同等能力均开源——router（cache-aware / PD）· PD 分离（mooncake/nixl/ascend）· HiCache（含 3FS 后端）· PDMux。</span></p>
+</div>
+<p class="fig-caption">图 8-1 · DeepSeek V4.1 Flash 生产推理系统（依据官方部署说明 文档整理）。开源的 DeepInfer 是其中 PE/CE 引擎内核；Recipe、四个 LB、3FS 编排为独立组件/未开源。</p>
+
+<p><span class="viz-badge">易混淆</span> "P : D ≈ 1:1"是官方在自家负载下给出的经验配比（高效最小单元 64P+64D），不是普适定律——它随命中率、平均上下文长度与模型版本变化；扩缩容的依据是 prefill 未命中 token 数与 decode 在跑请求数这两个观测量，而不是固定比例。</p>
+
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>DeepInfer（生产形态）</b></div>
+    <ul class="tight">
+      <li><b>协议层独立成项目：</b>deepseek-recipe 用 Rust 实现 API 协议转译与 tokenization（special-token 分段并行编码、KMP 增量流式解析、防 token 注入），与引擎解耦。</li>
+      <li><b>三段分离：</b>VE / Prefill / Decode 各自独立扩缩容（prefill 看未命中 token 数、decode 看在跑请求数），TTFT 与 TBT 独立控制。</li>
+      <li><b>容错靠"配额冗余 + 请求级重路由"</b>而非快速重启：重启是分钟级；大 EP 实例任一卡故障即整实例不可用，恢复时按健康卡重组 EP 规模。</li>
+      <li><b>开源版预留了接入点：</b>EngineType 三态、<code>init_pd_split / do_save_kvcache / copy_state</code> 等钩子、SWA 落盘布局都已实现——"most required engine functionality is already implemented"（README）。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>SGLang（开箱形态）</b></div>
+    <ul class="tight">
+      <li><b>API 面最宽：</b>OpenAI 全家（chat/completions/responses/embeddings/rerank/classify/score/audio/realtime WS）+ Anthropic Messages + Ollama 兼容 + 原生 gRPC（Rust 内嵌 server）+ LoRA 热加载端点 + 权重热更新端点。</li>
+      <li><b>Rust 路由器：</b>sgl-model-gateway 提供 cache-aware（前缀命中率路由）、prefix_hash、power_of_two 等策略，PD 专用 gRPC 路由，多 router 间缓存树 mesh 同步，带熔断/限流/重试。</li>
+      <li><b>PD 分离与复用：</b>prefill/decode 分离（bootstrap server + mooncake/nixl/ascend/mori 传输）+ PDMux 同实例角色切换 + VLM 的 EPD 三级分离。</li>
+      <li><b>RL / Agent 专项：</b>memory-saver 睡眠唤醒（保 CUDA graph 地址）、R-Fork GPU→GPU 快速起新实例、partial rollout、verl/Miles/slime/AReaL 官方集成；会话式 radix cache、请求 dumper、调度模拟器。</li>
+      <li><b>观测与运营：</b>Prometheus 指标（优先级维度）、请求级时间统计、OTel tracing、专家分布 HTTP 端点、KV 一致性巡检（kv_canary）。</li>
+    </ul>
+  </div>
+</div>
+
+<h3>检查理解</h3>
+<ol class="tight text-small">
+  <li>画出一条带图请求在生产系统里的完整路径（Recipe → … → 3FS），在每一层标注"它看什么指标做决策"。</li>
+  <li>3FS 为什么能同时解决"容量"与"路由无需前缀亲和"两个问题？为此付出的代价（CHECK、换入流水线）由谁承担？</li>
+  <li>对照开源 SGLang 栈，把生产四层（Recipe / 四个 LB / VE-P-D / 3FS）逐一映射到 SGLang 的对应组件，指出哪一层在开源世界没有现成对应物。</li>
+</ol>
+</section>
+
+<section class="panel" id="sec-choice" aria-labelledby="choice">
+<h2 id="choice"><span class="n">09</span>工程对比与选型</h2>
+<p class="text-small"><b>读完这节，你能回答：</b>什么时候选谁？两边的依赖栈与配置哲学差在哪？如何用固定版本源码复核本页的每个结论？</p>
+<p>最后从工程视角收拢：代码体量、硬件面、量化栈、配置哲学、依赖策略，以及"什么时候选谁"。</p>
+
+<div class="fig-scroll">
+<svg viewBox="0 0 780 268" role="img" aria-label="代码规模对比">
+  <text x="20" y="20" style="fill:var(--foreground);font-size:13px;font-weight:500">代码规模对比（横轴为对数刻度）</text>
+  <text x="20" y="258" style="fill:var(--muted-foreground);font-size:11px">DeepInfer 合计约 6.1 万行（另有 vendored 算子库按 submodule 引入）；SGLang 合计约 210 万行。</text>
+
+  <rect x="140" y="40" width="202" height="18" rx="3" style="fill:var(--viz-series-1);fill-opacity:.7"/>
+  <text x="348" y="53" style="fill:var(--foreground);font-size:11px" class="num">5.5 万行</text>
+  <text x="132" y="53" text-anchor="end" style="fill:var(--muted-foreground);font-size:11px">Python</text>
+
+  <rect x="140" y="64" width="558" height="18" rx="3" style="fill:var(--viz-series-2);fill-opacity:.7"/>
+  <text x="700" y="77" style="fill:var(--foreground);font-size:11px" class="num">174 万行</text>
+
+  <rect x="140" y="96" width="50" height="18" rx="3" style="fill:var(--viz-series-1);fill-opacity:.7"/>
+  <text x="196" y="109" style="fill:var(--foreground);font-size:11px" class="num">0.59 万行（无 .cu）</text>
+  <text x="132" y="109" text-anchor="end" style="fill:var(--muted-foreground);font-size:11px">C++/CUDA</text>
+
+  <rect x="140" y="120" width="314" height="18" rx="3" style="fill:var(--viz-series-2);fill-opacity:.7"/>
+  <text x="460" y="133" style="fill:var(--foreground);font-size:11px" class="num">17.2 万行</text>
+
+  <text x="132" y="165" text-anchor="end" style="fill:var(--muted-foreground);font-size:11px">Rust</text>
+  <text x="144" y="165" style="fill:var(--muted-foreground);font-size:11px">—（外围由 deepseek-recipe 独立项目承担）</text>
+  <rect x="140" y="172" width="330" height="18" rx="3" style="fill:var(--viz-series-2);fill-opacity:.7"/>
+  <text x="476" y="185" style="fill:var(--foreground);font-size:11px" class="num">20.2 万行（router / gRPC / tokenizer / 树缓存）</text>
+
+  <rect x="140" y="204" width="75" height="18" rx="3" style="fill:var(--viz-series-1);fill-opacity:.7"/>
+  <text x="221" y="217" style="fill:var(--foreground);font-size:11px" class="num">1 个（V4.1-Flash 全家）</text>
+  <text x="132" y="217" text-anchor="end" style="fill:var(--muted-foreground);font-size:11px">模型实现</text>
+
+  <rect x="140" y="228" width="600" height="18" rx="3" style="fill:var(--viz-series-2);fill-opacity:.7"/>
+  <text x="735" y="241" text-anchor="end" style="fill:var(--foreground);font-size:11px" class="num">255 个</text>
+</svg>
+</div>
+<p class="fig-caption">图 9-1 · 代码规模（本地实测 cloc 口径，SGLang Python 中 srt 推理核心占 90.6 万行）。DeepInfer 的 GPU 算子不在 C++ 里：2.33 万行 TileLang JIT（Python）+ vendored 五库（DeepEP/DeepGEMM/FlashMLA/DeepSelect + TileKernels pip 包）；SGLang 走 sglang-kernel 包 + JIT + C++/CUDA 混合。</p>
+
+<p><span class="viz-badge">易混淆</span> 代码行数不等于工程价值：DeepInfer 的"小"来自范围收窄（一款模型、离线内核、kernel 走 TileLang JIT 与 vendored 库），SGLang 的"大"来自覆盖面（255 个模型、多硬件、服务生态）。对比行数时始终问一句：这些行数里包含哪些职责。</p>
+
+<h3>硬件支持</h3>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th></th><th><span class="dot di" style="display:inline-block"></span> DeepInfer</th><th><span class="dot sg" style="display:inline-block"></span> SGLang</th></tr></thead>
+  <tbody>
+    <tr><td data-label="维度">NVIDIA</td><td data-label="DeepInfer">仅 SM100（B200/B300/GB200 级；<code>is_sm_major_10()</code> 硬校验）；CUDA 13.2 + torch 2.13.0+cu132</td><td data-label="SGLang">B200/B300/GB200/GB300、H100/H200/H800/H20、A100、RTX 30/40/50、DGX Spark、Jetson；V4.1 预览镜像明确支持 H200（SM90）</td></tr>
+    <tr><td data-label="维度">昇腾</td><td data-label="DeepInfer">950 NPU（CANN 9.2 + torch-npu），NPU 与 GPU 双后端代码全对称（tilelang asc/、DeepEP/DeepGEMM-Ascend、HCCL）</td><td data-label="SGLang">A2/A3/950PR/DT；attention 有 ascend 后端、量化有 modelslim/npu_mxfp4_w4a4</td></tr>
+    <tr><td data-label="维度">其他</td><td data-label="DeepInfer"><span class="no">✗</span></td><td data-label="SGLang">AMD MI300X/325X/350X/355X（aiter/wave）、Google TPU（外挂 TorchTPU/SGL-JAX）、Intel XPU/CPU、Apple Metal/MLX、摩尔线程 MTT S5000；Trainium/MLU/PPU 等进行中</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>量化与精度策略</h3>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th></th><th><span class="dot di" style="display:inline-block"></span> DeepInfer（跟随 V4.1 权重格式，不可选）</th><th><span class="dot sg" style="display:inline-block"></span> SGLang（30+ 格式可选）</th></tr></thead>
+  <tbody>
+    <tr><td data-label="维度">主体权重</td><td data-label="DeepInfer（跟随 V4.1 权重格式，不可选）">FP8 块状（block size 32）+ MoE 路由专家 MXFP4（per-32 UE8M0）</td><td data-label="SGLang（30+ 格式可选）">fp8 / w8a8 / modelopt / mxfp8 / mxfp4 / nvfp4 / awq / gptq / gguf / bnb / quark / mlx_q4q8 …</td></tr>
+    <tr><td data-label="维度">Main KV</td><td data-label="DeepInfer（跟随 V4.1 权重格式，不可选）">FP4：per-16 e4m3，无 global scale（较 NVFP4 更简）；或 MXFP8 528B/tok</td><td data-label="SGLang（30+ 格式可选）">KV dtype 可配：fp8_e4m3/e5m2、NVFP4、MXFP8（含 V4.1 路径 prefill 反量化档）</td></tr>
+    <tr><td data-label="维度">Indexer KV</td><td data-label="DeepInfer（跟随 V4.1 权重格式，不可选）">恒 FP4：per-32 UE8M0（68B/tok）</td><td data-label="SGLang（30+ 格式可选）">DSA 池：fp8 index cache 分层管理（dsa_cache_layer_split）</td></tr>
+    <tr><td data-label="维度">MoE 计算</td><td data-label="DeepInfer（跟随 V4.1 权重格式，不可选）">MegaMoE / grouped GEMM FP8×FP4 contiguous 布局（DeepGEMM）</td><td data-label="SGLang（30+ 格式可选）">FP8 GEMM 后端可切（deep_gemm 默认 / flashinfer trtllm / cutlass / cutedsl）；FP4 后端含 flashinfer_cudnn（CUDA13）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>依赖与配置哲学</h3>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th>维度</th><th>DeepInfer</th><th>SGLang</th></tr></thead>
+<tbody>
+    <tr><th>Python / torch</th><td data-label="DeepInfer">3.12 · torch 2.13.0+cu132 · transformers 4.50.0</td><td data-label="SGLang">≥3.11 · torch 2.14.1 · transformers 5.19.0</td></tr>
+    <tr><th>结构化输出</th><td data-label="DeepInfer">xgrammar 0.2.2（异步编译线程池 · KMP 触发词 · 逐 draft step 掩码 · 独立 stream H2D）</td><td data-label="SGLang">xgrammar 0.2.7 / outlines / llguidance 三后端 + jump-forward 跨 token 跳写 + 编译缓存</td></tr>
+    <tr><th>算子库引入方式</th><td data-label="DeepInfer">vendor submodule 固定 SHA（可复现生产版本）；tilelang 0.1.15 / tile-kernels 2.1.0</td><td data-label="SGLang">PyPI 依赖（sgl-deep-ep 0.1.2.post1、sgl-deep-gemm 0.2.3、sglang-kernel 0.4.10、flashinfer 0.7.2、tilelang 0.1.12）</td></tr>
+    <tr><th>配置入口</th><td data-label="DeepInfer">约 60 个 <code>DEEPINFER_*</code> 环境变量为主（environ.py 集中定义），EngineArgs 仅少量参数；离线脚本自带 CLI</td><td data-label="SGLang">数百个 ServerArgs CLI 参数分组管理（arg_groups/fields），另有 <code>SGLANG_*</code> 环境变量；<code>sglang serve</code> 一键启动</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="advice">选型建议</h2>
+<div class="duo">
+  <div class="card">
+    <div class="who"><span class="dot di"></span><b>选 DeepInfer，当：</b></div>
+    <ul class="tight">
+      <li>你的硬件就是 SM100 或昇腾 950，且主力模型就是 DeepSeek-V4.1-Flash——它是这款模型的官方参考实现，FP4 KV、MegaMoE、ZOS、DSpark、Bounded Replay 都是为它调到极限的；</li>
+      <li>你想要 DeepSeek 生产同款内核（单集群 155 万亿 tokens/天的架构底座），并且自己有（或愿意建）服务层：HTTP/路由/PD 编排/KV 存储需要按 官方部署说明补齐或对接生产设施；</li>
+      <li>你的场景是离线批量推理、评测复算、确定性输出（batch-invariant + seq_seed）——这些是 DeepInfer 的一等能力。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="who"><span class="dot sg"></span><b>选 SGLang，当：</b></div>
+    <ul class="tight">
+      <li>你需要在线服务：完整 OpenAI/Anthropic/Ollama API、多 LoRA、会话缓存、观测体系、cache-aware 路由、PD 分离——全部开箱即用；</li>
+      <li>你的模型谱系或硬件谱系不止一款：255 个模型实现 × 10+ 硬件平台，V4.1 也有预览支持（预览镜像，硬件面比 DeepInfer 宽，含 H200/MI355X）；</li>
+      <li>你在做 RL 训推一体（verl/Miles/slime 生态）、agent 负载、多模态或扩散模型服务——这些方向 SGLang 的工程化深度无可替代。</li>
+    </ul>
+  </div>
+</div>
+<p class="verdict"><b>一句话：</b>DeepInfer 是"一款模型 + 一种超节点拓扑"的官方最优解，SGLang 是"所有模型 + 所有硬件"的通用最优解；在 DeepSeek V4.1 这个交集上，前者代表生产权威，后者代表社区可得的最近似实现——两者互为参照系，且互相借鉴（ZOS 源自 SGLang overlap，SGLang 的 dsv4/DSpark/mhc/replay_tail 则源自 DeepSeek 的设计）。</p>
+
+<h3>源码地图：按问题索引（固定版本）</h3>
+<p class="text-small">想复核本页任一结论，按问题找到两边的入口文件，追踪表中提示的状态。</p>
+<div class="table-responsive">
+<table class="table table-sm">
+  <thead><tr><th style="width:26%">要回答的问题</th><th style="width:37%"><span class="dot di" style="display:inline-block"></span> DeepInfer 入口（@8b16149）</th><th style="width:37%"><span class="dot sg" style="display:inline-block"></span> SGLang 入口（@16eb87c）</th></tr></thead>
+  <tbody>
+    <tr><td data-label="要回答的问题">一条请求怎么进来、身份是什么？</td><td data-label="DeepInfer 入口（@8b16149）"><code>entrypoints/llm.py</code> → <code>csrc/engine/sequence.hpp</code>｜追踪 request_id 与 Sequence 状态字段</td><td data-label="SGLang 入口（@16eb87c）"><code>managers/tokenizer_manager.py</code> · <code>io_struct.py</code>｜追踪 TokenizedGenerateReqInput 的 rid</td></tr>
+    <tr><td data-label="要回答的问题">谁决定下一轮执行什么？</td><td data-label="DeepInfer 入口（@8b16149）"><code>csrc/engine/scheduler.hpp</code>｜追踪 waiting/running 队列与 _schedule_* 组出的批</td><td data-label="SGLang 入口（@16eb87c）"><code>managers/scheduler.py</code> + <code>schedule_policy.py</code>｜追踪 PrefillAdder 的预算扣减</td></tr>
+    <tr><td data-label="要回答的问题">一轮怎么与 GPU 重叠？</td><td data-label="DeepInfer 入口（@8b16149）"><code>worker/worker.py::execute_model_step</code> · <code>csrc/engine/zos.cpp</code>｜追踪 prev_step_state 与 remap 数组</td><td data-label="SGLang 入口（@16eb87c）"><code>managers/scheduler.py::event_loop_overlap</code>｜追踪 result_queue 与 FutureMap</td></tr>
+    <tr><td data-label="要回答的问题">KV 存在哪里、怎么寻址？</td><td data-label="DeepInfer 入口（@8b16149）"><code>worker/cache_engine.py</code> · <code>csrc/…/block_manager.hpp</code>｜追踪 block_table 与 ref_count</td><td data-label="SGLang 入口（@16eb87c）"><code>srt/mem_cache/</code>（radix_cache.py + allocator 家族）｜追踪 lock_ref 与 page 索引</td></tr>
+    <tr><td data-label="要回答的问题">前缀复用从哪里来？</td><td data-label="DeepInfer 入口（@8b16149）">开源版 fork（<code>sequence.hpp</code> 分支计数）；生产 3FS（未开源）</td><td data-label="SGLang 入口（@16eb87c）"><code>radix_cache.py::match_prefix</code> + <code>storage/backend_factory.py</code>｜追踪命中长度与后端句柄</td></tr>
+    <tr><td data-label="要回答的问题">稀疏注意力怎么算？</td><td data-label="DeepInfer 入口（@8b16149）"><code>models/v4_modules/</code> + <code>tilelang_ops/cuda/</code>｜追踪 indexer top-k 的 indices</td><td data-label="SGLang 入口（@16eb87c）"><code>srt/layers/attention/</code>（dsa / dsv4）｜追踪 KPool 与 fp8 索引</td></tr>
+    <tr><td data-label="要回答的问题">draft 验证长度谁定？</td><td data-label="DeepInfer 入口（@8b16149）"><code>csrc/engine/mtp_varlen.hpp</code> + <code>mtp/dflash.py</code>｜追踪 accept_rate 累乘与 best_bsz</td><td data-label="SGLang 入口（@16eb87c）"><code>srt/speculative/dspark_components/</code>｜追踪 SPS 表与 ScheduleVerifyLensTopk 输出</td></tr>
+    <tr><td data-label="要回答的问题">专家放在哪张卡？</td><td data-label="DeepInfer 入口（@8b16149）"><code>model_executor/eplb/</code>｜追踪冗余专家数与重排窗</td><td data-label="SGLang 入口（@16eb87c）"><code>srt/eplb/</code> + 专家分布记录器｜追踪 physical_to_logical_map</td></tr>
+    <tr><td data-label="要回答的问题">PD 分离预留/实现了什么？</td><td data-label="DeepInfer 入口（@8b16149）"><code>init_pd_split / do_save_kvcache</code>（钩子、空实现）</td><td data-label="SGLang 入口（@16eb87c）"><code>srt/disaggregation/</code>（完整实现：bootstrap + 5 种传输后端）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="refs">参考来源</h2>
+<ul class="tight text-small">
+  <li>仓库：<a href="https://github.com/deepseek-ai/DeepInfer">github.com/deepseek-ai/DeepInfer</a> @ 8b16149 · <a href="https://github.com/sgl-project/sglang">github.com/sgl-project/sglang</a> @ 16eb87c（2026-10-20 浅克隆实测）</li>
+  <li>DeepInfer：官方部署说明（doc/，生产架构/负载均衡/3FS/DSpark 数据来源）；README（功能与环境变量）；关键代码：<code>csrc/engine/scheduler.hpp</code> · <code>worker/cache_engine.py</code> · <code>models/v4_modules/</code> · <code>models/mtp/dflash.py</code> · <code>csrc/engine/mtp_varlen.hpp</code> · <code>model_executor/eplb/</code> · <code>environ.py</code></li>
+  <li>SGLang：README · docs/cookbook（DeepSeek-V4_1 部署页）；关键代码：<code>srt/managers/scheduler.py</code> · <code>srt/mem_cache/radix_cache.py</code> · <code>srt/mem_cache/storage/backend_factory.py</code> · <code>srt/layers/attention/</code>（dsa/dsv4）· <code>srt/speculative/dspark_components/</code> · <code>srt/models/deepseek_v4*.py</code> · <code>sgl-model-gateway/</code></li>
+</ul>
+<p class="text-muted text-small">本页全部技术结论可在上述文件中复核；生产系统数据（吞吐、TTL、EPLB 参数、DSpark 收益等）引自 DeepSeek 官方部署说明 文档，属官方口径而非本页实测。</p>
+
+<h3>检查理解 · 收尾练习</h3>
+<ol class="tight text-small">
+  <li>选型练习：场景 A（SM100 × 64 卡、只跑 V4.1-Flash、离线评测复算、要求逐 token 确定性）与场景 B（H200 × 8 卡、多模型在线服务、agentic 高并发），分别给出引擎选择与 3 个关键开关。</li>
+  <li>依赖追踪：两边各如何引入 DeepEP / DeepGEMM？这对"复现 DeepSeek 生产版本"意味着什么？</li>
+  <li>复盘三个基本单位：全文哪几处机制改变了"step 与 token 的对应关系"？提示：chunked prefill、变长验证、mixed chunking。</li>
+</ol>
+</section>
+</div>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-next" href="../../inference-systems/kv-pool-parallel-strategies/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html"><span class="sm-more-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-more-m">14 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/sglang-stream-interval/index.html"><span class="sm-more-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-24</span></a><a class="sm-more-a" href="../../inference-systems/moe-a2a-megamoe/index.html"><span class="sm-more-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-09-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-prefetch-prediction/index.html"><span class="sm-more-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/sglang-request-lifecycle/index.html"><span class="sm-more-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-more-m">19 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/hicache-mooncake/index.html"><span class="sm-more-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-18</span></a><a class="sm-more-a" href="../../inference-systems/dflash-pp-adaptation/index.html"><span class="sm-more-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-16</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p><b>源码基准</b>：DeepInfer <a href="https://github.com/deepseek-ai/DeepInfer">deepseek-ai/DeepInfer</a> @ <code>8b16149</code>（开源首发）与 SGLang <a href="https://github.com/sgl-project/sglang">sgl-project/sglang</a> @ <code>16eb87c</code>（v0.5.x，PR #44450）的 2026-10-20 快照；两者均为 Apache-2.0。正文里的「文件: 符号」按这两份源码逐条核对。</p>
+    <p><b>口径区分</b>：标「生产侧披露」的数字（吞吐、3FS 容量与 TTL、EPLB 参数、DSpark 收益等）引自官方部署说明，属设计口径而非本页实测；其余结论取自源码字面内容。本页<b>没有跑运行时实测</b>，没有在新硬件上复跑两边的 benchmark。</p>
+    <p>全页两色编码：<b>蓝 = DeepInfer</b>，<b>橙 = SGLang</b>；外壳强调色沿用本站蓝，与 DeepInfer 同色系。图表为页面内联 SVG，不联网、离线可读；正文里的公式为教学抽象，标注处不对应具体实现分支。</p>
+    <p class="lic">内容 CC BY 4.0 · 脚本 MIT ·
+      <a href="../../index.html">返回 show-me 知识库</a></p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  function chip(t, cls) { return '<span class="viz-badge ' + (cls || '') + '">' + t + '</span>'; }
+  function slot(label, pct, cls) {
+    return '<div class="lab-slot">' + chip(label) +
+      '<div class="bar" role="progressbar" aria-label="' + label + '" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100">' +
+      '<span class="' + (cls || '') + '" style="width:' + pct + '%"></span></div></div>';
+  }
+  function row(name, chips) { return '<div class="lab-chiprow">' + chip(name) + ' ' + chips.join(' ') + '</div>'; }
+
+  var labA = [
+    { h: slot('R1', 40) + slot('R2', 15) + slot('R3', 90) + slot('（空位）', 0),
+      w: '等待队列：R4 · R5',
+      c: '轮次 t：R1/R2/R3 在跑，R3 只差一点完成；R4、R5 在等待。固定批处理必须等最慢成员，连续批处理在每个轮次边界重新决策。' },
+    { h: slot('R1', 60) + slot('R2', 30) + slot('R4', 5) + slot('（R3 完成，让位）', 0),
+      w: '等待队列：R5',
+      c: '轮次 t+1：R3 完成、让出容量。调度器在 GPU 仍忙碌时已经做好决定——R4 准入补位。' },
+    { h: slot('R1 · 完成', 100, 'done') + slot('R2', 45) + slot('R4', 25) + slot('R5', 5),
+      w: '等待队列：（空）',
+      c: '轮次 t+2：R1 完成，R5 准入。任何时刻批都接近满员——这就是 continuous batching 的收益。' },
+    { h: slot('R2', 70) + slot('R4', 55) + slot('R5', 30) + slot('（空位）', 0),
+      w: '等待队列：新请求可随时进入',
+      c: '稳态：真实准入条件远比演示复杂（预算、KV 水位、抢占/回退），但"轮次之间重新组批"这个节奏是两个引擎共通的。' }
+  ];
+  var labB = [
+    { h: row('R1 draft', [chip('d1 .92'), chip('d2 .81'), chip('d3 .55'), chip('d4 .30'), chip('d5 .12')]) +
+           row('R2 draft', [chip('d1 .95'), chip('d2 .88'), chip('d3 .62'), chip('d4 .35'), chip('d5 .08')]),
+      c: '每步 DFlash 生成 5 个 draft，Confidence Head 在线给出每个 draft 的接受率估计（演示为预设数字）。' },
+    { h: row('R1 累乘', [chip('k=1 · .92'), chip('k=2 · .75'), chip('k=3 · .41'), chip('k=4 · .12'), chip('k=5 · .04')]) +
+           row('R2 累乘', [chip('k=1 · .95'), chip('k=2 · .84'), chip('k=3 · .52'), chip('k=4 · .18'), chip('k=5 · .01')]),
+      c: 'acc(k) = c1×…×ck 是"前 k 个全被接受"的概率估计。调度器据此给 R1 分配 3 个验证位、R2 分配 4 个——低概率的尾部不值得算。' },
+    { h: row('R1 验证', [chip('d1 ✓', 'ok-chip'), chip('d2 ✓', 'ok-chip'), chip('d3 ✓', 'ok-chip'), chip('+3 token', 'ok-chip')]) +
+           row('R2 验证', [chip('d1 ✓', 'ok-chip'), chip('d2 ✓', 'ok-chip'), chip('d3 ✓', 'ok-chip'), chip('d4 ✗ 残差重采样', 'rej-chip')]),
+      c: '一次 forward 并行验证所有行；被拒位置之后的 draft 全部丢弃，替代 token 用残差概率重采样。' }
+  ];
+
+  function initLab(rootId, states) {
+    var root = document.getElementById(rootId);
+    if (!root) return;
+    var body = root.querySelector('[data-lab-body]');
+    var posEl = root.querySelector('[data-lab-pos]');
+    var prev = root.querySelector('[data-lab-prev]');
+    var next = root.querySelector('[data-lab-next]');
+    if (!body || !posEl || !prev || !next) return;
+    var i = 0;
+    function render() {
+      var st = states[i];
+      var html = '<div class="lab-slots">' + st.h + '</div>';
+      if (st.w) { html += '<p class="text-small" style="margin:2px 0">' + st.w + '</p>'; }
+      html += '<p class="lab-cap text-small">' + st.c + '</p>';
+      body.innerHTML = html;
+      posEl.textContent = (i + 1) + ' / ' + states.length;
+      prev.disabled = (i === 0);
+      next.disabled = (i === states.length - 1);
+    }
+    prev.addEventListener('click', function () { if (i > 0) { i--; render(); } });
+    next.addEventListener('click', function () { if (i < states.length - 1) { i++; render(); } });
+    render();
+  }
+  initLab('divs-labA', labA);
+  initLab('divs-labB', labB);
+})();
+</script>
+</body>
+</html>
