@@ -1,0 +1,1732 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</title><!-- show-me:shell:begin -->
+<meta name="description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码：allreduce 有 6 级后端优先级、all2all 根本不在 communication_op 里而是一对 dispatch/combine 语义、GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward">
+<meta property="og:description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码：allreduce 有 6 级后端优先级、all2all 根本不在 communication_op 里而是一对 dispatch/combine 语义、GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/comm-parallel/a2a-ar-ag-sglang/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/comm-parallel/a2a-ar-ag-sglang/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px;
+       overflow-wrap:anywhere}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7d8aa3}
+  pre .hl{color:#b23a10;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  tr.hot td{background:#fff7f2}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none}
+    tr.hot td{background:none}
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+
+  /* ---------- 管线示意 ---------- */
+  .pipe{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:18px 0 6px}
+  .stage{flex:1 1 160px;min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;
+         padding:12px 13px 11px;position:relative}
+  .stage .sn{font:600 10.5px var(--mono);color:#94a3b8;letter-spacing:.08em}
+  .stage .st{font-weight:700;font-size:13.5px;color:var(--ink);margin:2px 0 6px;line-height:1.35}
+  .stage .sw{font-size:12.5px;color:var(--dim);line-height:1.6;margin:0;padding-left:0;list-style:none}
+  .stage .sw li{margin:0 0 3px;padding-left:9px;position:relative}
+  .stage .sw li::before{content:'·';position:absolute;left:0;color:#b6c0d0}
+  .stage .tag{display:inline-block;font:10.5px var(--mono);color:#4d5b73;background:#f1f4fa;
+              border:1px solid #e2e8f2;border-radius:999px;padding:1px 7px;margin-top:7px}
+  .stage.hot{border-color:#f0cdb8;background:#fffaf6}
+  .stage.hot .sw li.big{color:#b23a10;font-weight:600}
+  .stage .badge{position:absolute;top:9px;right:10px;font:600 9.5px var(--mono);letter-spacing:.06em;
+                color:#fff;background:#b23a10;border-radius:999px;padding:2px 7px}
+  .pipelinewrap{overflow-x:auto}
+  .arrowline{display:flex;gap:10px;flex-wrap:wrap;margin:2px 0 0;font:11px var(--mono);color:#a8b2c2}
+  @media (max-width:640px){
+    .stage{flex:1 1 100%}
+  }
+
+  /* ---------- 图表卡（lieflat Mono · 作用域化） ---------- */
+  .chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;min-width:0}
+  .chartcard h2{border:0;padding:0;margin:0 0 3px;font-size:16.5px;font-weight:700;letter-spacing:-.02em;color:#1C1C1A}
+  .chartcard .csub{font-size:11.5px;color:#8F8E88;margin:0 0 14px;line-height:1.55}
+  .chartcard .csrc{font-size:9.5px;color:#C6C5BF;margin-top:10px;letter-spacing:.08em;font-weight:500;line-height:1.6}
+  .chartwrap{overflow-x:auto}
+  .chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+  .chartcard svg text{font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+  @media (max-width:640px){
+    .chartcard{padding:22px 20px 16px}
+    .chartcard svg{min-width:400px}
+  }
+  /* MONO.MOTION.css（原样，无 :root/body 规则） */
+  .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+  @keyframes pop{from{transform:scale(0)}to{transform:none}}
+  .fade{animation:fade .9s ease both}
+  @keyframes fade{from{opacity:0}}
+  .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (prefers-reduced-motion:reduce){
+    .pop,.fade{animation:none}
+    .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+  }
+
+  /* 图 + 读法 双栏 */
+  .figrow{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;margin:18px 0 6px}
+  .figrow > .read{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .read h4{margin:0 0 8px;font:600 12.5px var(--mono);color:var(--dim);letter-spacing:.04em}
+  .read ul{margin:0;padding-left:17px}
+  .read li{font-size:13.5px;color:#3b4860;margin:7px 0;line-height:1.62}
+  .read li b{color:var(--ink)}
+  .read .num{font-family:var(--mono);color:#12489c;font-size:12.8px}
+  @media (max-width:860px){ .figrow{grid-template-columns:1fr} }
+
+  .callout{border-left:3px solid var(--accent);background:#fff;border-radius:0 10px 10px 0;
+           padding:12px 16px;margin:16px 0;font-size:14px;color:#3b4860}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout b{color:var(--ink)}
+  .srcline{font:12px var(--mono);color:var(--dim2);background:#fff;border:1px solid var(--line);
+           border-radius:8px;padding:10px 12px;margin:12px 0;overflow-x:auto;white-space:nowrap}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+
+  /* ---------- 本页新增组件 ---------- */
+  .note-terms{border:1px solid var(--line);background:#fff;border-radius:10px;padding:12px 16px;
+              font-size:13.5px;color:var(--dim);margin:0 0 18px}
+  .note-terms b{color:var(--ink)}
+  .note-terms code{font-size:12.5px}
+
+  /* 四维卡片 */
+  .scope{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:14px 0 4px}
+  .scope > div{background:#fff;border:1px solid var(--line);border-radius:10px;padding:11px 13px;min-width:0}
+  .scope h5{margin:0 0 4px;font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase}
+  .scope p{margin:0;font-size:13.2px;line-height:1.6;color:#3b4860}
+  .scope p b{color:var(--ink)}
+
+  /* 时序条 */
+  .seq{margin:16px 0 6px;border-left:2px solid var(--line);padding-left:0}
+  .sitem{position:relative;padding:0 0 16px 20px}
+  .sitem:last-child{padding-bottom:2px}
+  .sitem::before{content:'';position:absolute;left:-7px;top:6px;width:12px;height:12px;border-radius:50%;
+                 background:#fff;border:2px solid var(--line)}
+  .sitem.ar::before{border-color:var(--accent)}
+  .sitem.ag::before{border-color:var(--good)}
+  .sitem.a2a::before{border-color:var(--waste)}
+  .sitem.pp::before{border-color:#6d28d9}
+  .sitem.loc::before{border-color:#b6c0d0}
+  .sitem .sh{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;margin:0 0 2px}
+  .sitem .sh b{font-size:14.5px}
+  .sitem p{margin:3px 0;font-size:13.6px;color:#3b4860;line-height:1.62}
+  .sbadge{font:600 10px var(--mono);letter-spacing:.05em;border-radius:999px;padding:2px 8px;flex:none;
+          border:1px solid transparent}
+  .sbadge.ar{background:#eef2ff;color:#1d4ed8;border-color:#cfd9f6}
+  .sbadge.ag{background:#eafaf1;color:#0b6b3f;border-color:#c6e9d6}
+  .sbadge.a2a{background:#fff2ea;color:#b23a10;border-color:#f5d6c3}
+  .sbadge.pp{background:#f3eefe;color:#6d28d9;border-color:#ded2f8}
+  .sbadge.loc{background:#f2f5fa;color:#5a6880;border-color:#dde3ee}
+  .sitem code{font-size:12.2px}
+
+  /* 代码块行号引用 */
+  .at{font:11.5px var(--mono);color:var(--dim2);background:#f2f5fa;border:1px solid #e3e9f2;border-radius:6px;
+      padding:1px 6px;white-space:nowrap}
+  .srcline .at{background:#fff}
+
+  /* 误解卡 */
+  .myth{border:1px solid var(--line);border-radius:12px;background:#fff;padding:14px 16px;margin:12px 0}
+  .myth .wrong{font-size:14px;color:#b23a10;margin:0 0 6px}
+  .myth .wrong::before{content:'✗ ';font-weight:700}
+  .myth .right{font-size:14px;color:#0b6b3f;margin:0}
+  .myth .right::before{content:'✓ ';font-weight:700}
+  .myth p.why{font-size:13.4px;color:var(--dim);margin:8px 0 0}
+
+  /* 自测 */
+  details.q{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 16px;margin:10px 0}
+  details.q summary{cursor:pointer;font-weight:600;font-size:14px;color:var(--ink);list-style:none}
+  details.q summary::-webkit-details-marker{display:none}
+  details.q summary::before{content:'Q ';font:700 12px var(--mono);color:var(--accent)}
+  details.q[open] summary{margin-bottom:8px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  details.q p{font-size:13.6px;color:#3b4860;margin:8px 0}
+  details.q .a::before{content:'A ';font:700 12px var(--mono);color:var(--good)}
+
+  /* 图 */
+  .fig{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 16px 10px;margin:16px 0 6px}
+  .fig svg{width:100%;height:auto;display:block}
+  .figcap{font-size:12.5px;color:var(--dim2);margin:6px 0 0;line-height:1.6}
+  .figwrap{overflow-x:auto}
+  @media (max-width:700px){ .figwrap svg{min-width:700px} }
+
+  /* 层级表 */
+  .layers{display:flex;flex-direction:column;gap:0;margin:16px 0}
+  .layerow{display:grid;grid-template-columns:78px 1fr;gap:12px;padding:10px 0;border-top:1px solid var(--line);min-width:0}
+  .layerow:last-child{border-bottom:1px solid var(--line)}
+  .layerow .ln{font:600 11px var(--mono);color:var(--dim2);letter-spacing:.05em;padding-top:2px}
+  .layerow .lb{min-width:0}
+  .layerow .lb b{font-size:14px}
+  .layerow .lb p{margin:2px 0 0;font-size:13.2px;color:#3b4860}
+  .layerow .lb code{font-size:12.2px}
+  @media (max-width:560px){ .layerow{grid-template-columns:1fr;gap:4px} }
+
+  .tagmini{display:inline-block;font:10.5px var(--mono);color:#4d5b73;background:#f1f4fa;
+           border:1px solid #e2e8f2;border-radius:999px;padding:1px 7px;margin:2px 4px 2px 0}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">32 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-21</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 5 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>comm-parallel<span class="sep">/</span>a2a-ar-ag-sglang
+  </div>
+
+  <h1>三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</h1>
+  <p class="sub">先把三者在「目标 / 参与方数据变化 / 典型输出 / 使用场景」四个维度上分开，
+  再沿着 SGLang 的 <code>communication_op.py</code> → <code>GroupCoordinator</code> → <code>layer_boundary</code>
+  → <code>token_dispatcher</code> 一路走下去，标出它们在 GLM-5.3 的一份 TP8 部署里究竟在哪一行被触发。</p>
+
+  <div class="metarow">
+    <span>2026-10-21</span><span>SGLang</span><span>集合通信</span><span>all2all</span><span>allreduce</span>
+    <span>allgather</span><span>GLM-5.3</span><span>TP / EP</span><span>源码走读</span>
+  </div>
+
+  <div class="nav">
+    <a href="#tldr">结论</a>
+    <a href="#three">三个原语</a>
+    <a href="#matrix">四维对照</a>
+    <a href="#others">与其余五种的区别</a>
+    <a href="#identity">两条恒等式</a>
+    <a href="#map">五层地图</a>
+    <a href="#ar">allreduce</a>
+    <a href="#boundary">边界层：AR 还是 RS</a>
+    <a href="#ag">allgather</a>
+    <a href="#a2a">all2all</a>
+    <a href="#glm">GLM-5.3 的一条 forward</a>
+    <a href="#parallel">并行配置速查</a>
+    <a href="#myths">常见误解</a>
+    <a href="#quiz">自测</a>
+  </div>
+
+  <div class="note-terms">
+    <b>术语约定</b>：<code>rank</code>、<code>group</code>、<code>dispatch</code> / <code>combine</code>、
+    <code>partial</code>、<code>slice</code>、<code>boundary</code> 保留英文原词 —— 它们是 SGLang 源码里的变量名、
+    函数名或日志片段，译过去就无法与代码对上。所有函数名、参数名、文件路径一律原样保留。
+    本页的符号与行号取自 <code>sgl-project/sglang</code> <b>main@16eb87c</b>（2026-10-20）的本地检出，
+    逐条 <code>read</code> 核对过，未做运行时实测。
+  </div>
+
+  <div class="tldr" id="tldr">
+    <h4>结论</h4>
+    <ul>
+      <li><b>1 · 三者不是并列关系。</b> <code>allreduce</code> 在数学上等于 <code>reduce_scatter</code> 接
+        <code>allgather</code> —— 这条恒等式在 SGLang 里是字面成立的：<code>layer_boundary/ops.py</code> 的
+        <code>tp_reduce_scatter()</code> 把层尾的求和切成 <code>reduce_scatter_tensor</code>，下一层入口的
+        <code>attn_tp_gather_input()</code> 再用 <code>attn_tp_all_gather_into_tensor</code> 把行拼回去。
+        <code>all2all</code> 与这条恒等式无关，它是另一类操作。</li>
+      <li><b>2 · 区分三者的判据是输出布局，不是「走哪张网」。</b>
+        <code>allreduce</code> 和 <code>allgather</code> 的输出在<b>每个 rank 上完全相同</b>（冗余复制），
+        <code>all2all</code> 的输出<b>每个 rank 都不同</b>（置换）。而且只有 <code>allreduce</code> 做算术：
+        输入必须是 partial，输出是这些 partial 的和。</li>
+      <li><b>3 · SGLang 里三者落在完全不同的层。</b>
+        <code>allreduce</code> 走「模型层 → <code>layer_boundary</code> 的契约 → <code>communication_op</code> →
+        <code>GroupCoordinator.all_reduce</code>」这条稠密路径；
+        <code>allgather</code> 除了同一条路径，还有一条只在词表并行处出现的专用路径
+        （<code>vocab_gather.py</code>）；
+        <code>all2all</code> 在 MoE 里根本不经过 <code>communication_op.py</code> ——
+        它是 <code>token_dispatcher</code> 的 <code>dispatch()</code> / <code>combine()</code> 这<em>一对语义</em>，
+        而 <code>dispatch()</code> 底下可能是 DeepEP、FlashInfer、Mooncake、NIXL、pplx 中的任意一个。</li>
+      <li><b>4 · GLM-5.3 在 H200 上那份配方里，一条 forward 看不到 all2all。</b>
+        官方用例 <code>test/glm53_flash_common.py</code> 只给了 <code>--tp-size 8</code>，没有给
+        <code>--moe-a2a-backend</code>；<code>none</code> 之下 MoE 走 TP，层尾是一次
+        <code>all_reduce</code>，而不是 dispatch/combine。按源码调用点数下来，一次 text forward 是
+        <b>91 次 all-reduce + 1 次 all-gather + 0 次 all2all</b>（45 层 × 2 次边界求和 + 1 次 embedding；
+        末尾一次 logits 拼接）。</li>
+      <li><b>5 · 但 all2all 一开，allgather 会回来。</b> <code>glm5_next.py:1191</code> 里，只有当
+        <code>--moe-a2a-backend</code> 取 <code>deepep</code> / <code>deepep_v2</code> / <code>mooncake</code> 时
+        <code>enable_a2a_moe</code> 才为真，随后 <code>capture_output()</code> 对 aux hidden state 做一次
+        <code>attn_tp_group.all_gather(..., dim=0)</code> —— 因为 A2A 把 token 打散到了 EP rank 上，
+        要还原一条完整序列只能 all-gather。</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="three"><span class="n">01</span>三个原语：四个维度逐一拆</h2>
+  <p class="lead">下面三张图用同一个约定：<b>行 = rank，列 = 数据块，颜色 = 这块数据由哪个 rank 产出</b>，N = 4。
+  三张图的输入格子数不同，输出格子数也不同 —— 差异全在布局里，不在"带宽"这种模糊说法里。</p>
+
+  <div class="fig">
+    <div class="figwrap"><svg viewBox="0 0 980 400" role="img" aria-label="N=4 时 allreduce、allgather、all2all 的输入与输出布局对比" style="width:100%;height:auto;display:block"><text x="14" y="22" font-size="12.5" font-weight="700" fill="#0d1526" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">allreduce</text><text x="14" y="38" font-size="10" fill="#657389">每 rank 持有同 shape 的 partial，求和</text><text x="229" y="60" font-size="9.5" fill="#657389">输入</text><text x="73.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b0</text><text x="116.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b1</text><text x="159.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b2</text><text x="202.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b3</text><text x="46" y="80.4" text-anchor="end" font-size="9.5" fill="#657389">r0</text><rect x="54" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="73.0" y="80.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">p0</text><rect x="97" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="116.0" y="80.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">p0</text><rect x="140" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="159.0" y="80.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">p0</text><rect x="183" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="202.0" y="80.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">p0</text><text x="46" y="107.4" text-anchor="end" font-size="9.5" fill="#657389">r1</text><rect x="54" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="73.0" y="107.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">p1</text><rect x="97" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="116.0" y="107.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">p1</text><rect x="140" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="159.0" y="107.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">p1</text><rect x="183" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="202.0" y="107.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">p1</text><text x="46" y="134.4" text-anchor="end" font-size="9.5" fill="#657389">r2</text><rect x="54" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="73.0" y="134.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">p2</text><rect x="97" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="116.0" y="134.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">p2</text><rect x="140" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="159.0" y="134.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">p2</text><rect x="183" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="202.0" y="134.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">p2</text><text x="46" y="161.4" text-anchor="end" font-size="9.5" fill="#657389">r3</text><rect x="54" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="73.0" y="161.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">p3</text><rect x="97" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="116.0" y="161.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">p3</text><rect x="140" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="159.0" y="161.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">p3</text><rect x="183" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="202.0" y="161.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">p3</text><path d="M137.5 177 V194" stroke="#c9d3e4" stroke-width="1.4" fill="none"/><path d="M133.5 189 l4 5 l4 -5" stroke="#c9d3e4" stroke-width="1.4" fill="none"/><text x="146.5" y="195" font-size="9.5" fill="#657389">2·(N−1)/N·n</text><text x="229" y="210" font-size="9.5" fill="#657389">输出</text><text x="73.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b0</text><text x="116.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b1</text><text x="159.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b2</text><text x="202.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b3</text><text x="46" y="230.4" text-anchor="end" font-size="9.5" fill="#657389">r0</text><rect x="54" y="216" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="54.00" y="233" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="63.50" y="233" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="73.00" y="233" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="82.50" y="233" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="73.0" y="230.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="97" y="216" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="97.00" y="233" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="106.50" y="233" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="116.00" y="233" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="125.50" y="233" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="116.0" y="230.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="140" y="216" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="140.00" y="233" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="149.50" y="233" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="159.00" y="233" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="168.50" y="233" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="159.0" y="230.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="183" y="216" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="183.00" y="233" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="192.50" y="233" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="202.00" y="233" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="211.50" y="233" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="202.0" y="230.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><text x="46" y="257.4" text-anchor="end" font-size="9.5" fill="#657389">r1</text><rect x="54" y="243" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="54.00" y="260" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="63.50" y="260" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="73.00" y="260" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="82.50" y="260" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="73.0" y="257.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="97" y="243" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="97.00" y="260" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="106.50" y="260" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="116.00" y="260" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="125.50" y="260" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="116.0" y="257.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="140" y="243" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="140.00" y="260" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="149.50" y="260" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="159.00" y="260" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="168.50" y="260" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="159.0" y="257.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="183" y="243" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="183.00" y="260" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="192.50" y="260" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="202.00" y="260" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="211.50" y="260" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="202.0" y="257.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><text x="46" y="284.4" text-anchor="end" font-size="9.5" fill="#657389">r2</text><rect x="54" y="270" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="54.00" y="287" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="63.50" y="287" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="73.00" y="287" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="82.50" y="287" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="73.0" y="284.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="97" y="270" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="97.00" y="287" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="106.50" y="287" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="116.00" y="287" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="125.50" y="287" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="116.0" y="284.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="140" y="270" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="140.00" y="287" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="149.50" y="287" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="159.00" y="287" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="168.50" y="287" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="159.0" y="284.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="183" y="270" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="183.00" y="287" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="192.50" y="287" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="202.00" y="287" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="211.50" y="287" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="202.0" y="284.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><text x="46" y="311.4" text-anchor="end" font-size="9.5" fill="#657389">r3</text><rect x="54" y="297" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="54.00" y="314" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="63.50" y="314" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="73.00" y="314" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="82.50" y="314" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="73.0" y="311.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="97" y="297" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="97.00" y="314" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="106.50" y="314" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="116.00" y="314" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="125.50" y="314" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="116.0" y="311.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="140" y="297" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="140.00" y="314" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="149.50" y="314" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="159.00" y="314" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="168.50" y="314" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="159.0" y="311.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><rect x="183" y="297" width="38" height="22" rx="3" fill="#eef2f9" stroke="#0d1526" stroke-width="1"/><rect x="183.00" y="314" width="9.50" height="4" fill="#1d4ed8" opacity=".9"/><rect x="192.50" y="314" width="9.50" height="4" fill="#0b6b3f" opacity=".9"/><rect x="202.00" y="314" width="9.50" height="4" fill="#a35a06" opacity=".9"/><rect x="211.50" y="314" width="9.50" height="4" fill="#6d28d9" opacity=".9"/><text x="202.0" y="311.6" text-anchor="middle" font-size="11" font-weight="700" fill="#0d1526">Σ</text><text x="14" y="341" font-size="10" fill="#657389">每 rank 都得到同一份完整结果</text><text x="339" y="22" font-size="12.5" font-weight="700" fill="#0d1526" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">allgather</text><text x="339" y="38" font-size="10" fill="#657389">每 rank 只持有 n/N 的切片</text><text x="554" y="60" font-size="9.5" fill="#657389">输入</text><text x="398.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b0</text><text x="441.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b1</text><text x="484.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b2</text><text x="527.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b3</text><text x="371" y="80.4" text-anchor="end" font-size="9.5" fill="#657389">r0</text><rect x="379" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="398.0" y="80.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">s0</text><rect x="422" y="66" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="465" y="66" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="508" y="66" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><text x="371" y="107.4" text-anchor="end" font-size="9.5" fill="#657389">r1</text><rect x="379" y="93" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="422" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="441.0" y="107.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">s1</text><rect x="465" y="93" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="508" y="93" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><text x="371" y="134.4" text-anchor="end" font-size="9.5" fill="#657389">r2</text><rect x="379" y="120" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="422" y="120" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="465" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="484.0" y="134.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">s2</text><rect x="508" y="120" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><text x="371" y="161.4" text-anchor="end" font-size="9.5" fill="#657389">r3</text><rect x="379" y="147" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="422" y="147" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="465" y="147" width="38" height="22" rx="3" fill="none" stroke="#c9d3e4" stroke-width="1" stroke-dasharray="2 3"/><rect x="508" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="527.0" y="161.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">s3</text><path d="M462.5 177 V194" stroke="#c9d3e4" stroke-width="1.4" fill="none"/><path d="M458.5 189 l4 5 l4 -5" stroke="#c9d3e4" stroke-width="1.4" fill="none"/><text x="471.5" y="195" font-size="9.5" fill="#657389">(N−1)/N·n</text><text x="554" y="210" font-size="9.5" fill="#657389">输出</text><text x="398.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b0</text><text x="441.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b1</text><text x="484.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b2</text><text x="527.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b3</text><text x="371" y="230.4" text-anchor="end" font-size="9.5" fill="#657389">r0</text><rect x="379" y="216" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="398.0" y="230.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">s0</text><rect x="422" y="216" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="441.0" y="230.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">s1</text><rect x="465" y="216" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="484.0" y="230.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">s2</text><rect x="508" y="216" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="527.0" y="230.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">s3</text><text x="371" y="257.4" text-anchor="end" font-size="9.5" fill="#657389">r1</text><rect x="379" y="243" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="398.0" y="257.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">s0</text><rect x="422" y="243" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="441.0" y="257.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">s1</text><rect x="465" y="243" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="484.0" y="257.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">s2</text><rect x="508" y="243" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="527.0" y="257.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">s3</text><text x="371" y="284.4" text-anchor="end" font-size="9.5" fill="#657389">r2</text><rect x="379" y="270" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="398.0" y="284.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">s0</text><rect x="422" y="270" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="441.0" y="284.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">s1</text><rect x="465" y="270" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="484.0" y="284.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">s2</text><rect x="508" y="270" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="527.0" y="284.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">s3</text><text x="371" y="311.4" text-anchor="end" font-size="9.5" fill="#657389">r3</text><rect x="379" y="297" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="398.0" y="311.4" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">s0</text><rect x="422" y="297" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="441.0" y="311.4" text-anchor="middle" font-size="10" font-weight="600" fill="#0b6b3f">s1</text><rect x="465" y="297" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="484.0" y="311.4" text-anchor="middle" font-size="10" font-weight="600" fill="#a35a06">s2</text><rect x="508" y="297" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="527.0" y="311.4" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">s3</text><text x="339" y="341" font-size="10" fill="#657389">每 rank 都拼出完整张量，各自相同</text><text x="664" y="22" font-size="12.5" font-weight="700" fill="#0d1526" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">all2all</text><text x="664" y="38" font-size="10" fill="#657389">每 rank 持有发往各 rank 的不同块</text><text x="879" y="60" font-size="9.5" fill="#657389">输入</text><text x="723.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b0</text><text x="766.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b1</text><text x="809.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b2</text><text x="852.0" y="60" text-anchor="middle" font-size="9.5" fill="#657389">b3</text><text x="696" y="80.4" text-anchor="end" font-size="9.5" fill="#657389">r0</text><rect x="704" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="723.0" y="80.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→0</text><rect x="747" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="766.0" y="80.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→1</text><rect x="790" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="809.0" y="80.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→2</text><rect x="833" y="66" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="852.0" y="80.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→3</text><text x="696" y="107.4" text-anchor="end" font-size="9.5" fill="#657389">r1</text><rect x="704" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="723.0" y="107.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→0</text><rect x="747" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="766.0" y="107.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→1</text><rect x="790" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="809.0" y="107.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→2</text><rect x="833" y="93" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="852.0" y="107.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→3</text><text x="696" y="134.4" text-anchor="end" font-size="9.5" fill="#657389">r2</text><rect x="704" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="723.0" y="134.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→0</text><rect x="747" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="766.0" y="134.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→1</text><rect x="790" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="809.0" y="134.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→2</text><rect x="833" y="120" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="852.0" y="134.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→3</text><text x="696" y="161.4" text-anchor="end" font-size="9.5" fill="#657389">r3</text><rect x="704" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="723.0" y="161.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→0</text><rect x="747" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="766.0" y="161.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→1</text><rect x="790" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="809.0" y="161.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→2</text><rect x="833" y="147" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="852.0" y="161.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→3</text><path d="M787.5 177 V194" stroke="#c9d3e4" stroke-width="1.4" fill="none"/><path d="M783.5 189 l4 5 l4 -5" stroke="#c9d3e4" stroke-width="1.4" fill="none"/><text x="796.5" y="195" font-size="9.5" fill="#657389">(N−1)/N·n</text><text x="879" y="210" font-size="9.5" fill="#657389">输出</text><text x="723.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b0</text><text x="766.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b1</text><text x="809.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b2</text><text x="852.0" y="210" text-anchor="middle" font-size="9.5" fill="#657389">b3</text><text x="696" y="230.4" text-anchor="end" font-size="9.5" fill="#657389">r0</text><rect x="704" y="216" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="723.0" y="230.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→0</text><rect x="747" y="216" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="766.0" y="230.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→0</text><rect x="790" y="216" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="809.0" y="230.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→0</text><rect x="833" y="216" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="852.0" y="230.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→0</text><text x="696" y="257.4" text-anchor="end" font-size="9.5" fill="#657389">r1</text><rect x="704" y="243" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="723.0" y="257.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→1</text><rect x="747" y="243" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="766.0" y="257.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→1</text><rect x="790" y="243" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="809.0" y="257.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→1</text><rect x="833" y="243" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="852.0" y="257.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→1</text><text x="696" y="284.4" text-anchor="end" font-size="9.5" fill="#657389">r2</text><rect x="704" y="270" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="723.0" y="284.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→2</text><rect x="747" y="270" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="766.0" y="284.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→2</text><rect x="790" y="270" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="809.0" y="284.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→2</text><rect x="833" y="270" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="852.0" y="284.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→2</text><text x="696" y="311.4" text-anchor="end" font-size="9.5" fill="#657389">r3</text><rect x="704" y="297" width="38" height="22" rx="3" fill="#cfdcf9" stroke="#1d4ed8" stroke-width="1"/><text x="723.0" y="311.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">0→3</text><rect x="747" y="297" width="38" height="22" rx="3" fill="#cfeade" stroke="#0b6b3f" stroke-width="1"/><text x="766.0" y="311.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#0b6b3f">1→3</text><rect x="790" y="297" width="38" height="22" rx="3" fill="#f7e3c6" stroke="#a35a06" stroke-width="1"/><text x="809.0" y="311.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#a35a06">2→3</text><rect x="833" y="297" width="38" height="22" rx="3" fill="#e2d8f8" stroke="#6d28d9" stroke-width="1"/><text x="852.0" y="311.4" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d28d9">3→3</text><text x="664" y="341" font-size="10" fill="#657389">每 rank 收齐别人发给它的块，各自不同</text><text x="10" y="380" font-size="10" fill="#657389">行 = rank，列 = 数据块；颜色 = 数据由哪个 rank 产出；Σ = 四个 rank 的值已相加。</text></svg></div>
+    <p class="figcap">同一个 N = 4 的 group。左：每个 rank 交一份 partial，输出处处相同。
+    中：每个 rank 只交一格，输出拼成整行。右：每格都要发出去，输出是输入矩阵的转置。
+    右图的字节数和中图相同 —— 都是 (N−1)/N·n，区别只在"发给谁"。
+    窄屏上这张图可横向滑动。</p>
+  </div>
+
+  <h3 class="mini">allreduce —— 求和后人人有份</h3>
+  <div class="scope">
+    <div><h5>通信目标</h5><p>把 N 个 rank 上<b>同 shape</b> 的 N 份 partial 逐元素相加，
+      再把<b>完整的和</b>放回每一个 rank。它的目标里同时包含"归约"和"广播"两件事。</p></div>
+    <div><h5>参与方数据变化</h5><p>每份输入都覆盖<b>全部元素</b>，但只是部分和（例如
+      <code>o_proj</code> 在本 rank 那 1/8 个 head 上算出的贡献）。输出仍是全部元素，
+      数值变成 Σ，且 <b>N 份完全相同</b>。</p></div>
+    <div><h5>典型输出</h5><p>所有 rank 上的张量逐字节相同。冗余是它的<b>定义</b>，不是副作用 ——
+      下游每个 rank 都要独立继续算，所以必须人手一份。</p></div>
+    <div><h5>常见场景</h5><p>TP 的 <code>RowParallelLinear</code>（<code>o_proj</code>、
+      <code>down_proj</code>）之后；词表并行 embedding 之后；DP attention 上 attention 的 partial 求和；
+      层尾那次"把 FFN 的 partial 收拢"。</p></div>
+  </div>
+
+  <h3 class="mini">allgather —— 拼起来后人人有份</h3>
+  <div class="scope">
+    <div><h5>通信目标</h5><p>每个 rank 持有一个<b>互不重叠的切片</b>，把它们按顺序<b>拼接</b>成完整张量，
+      让每个 rank 都拿到这份拼接结果。<b>不做任何算术</b>。</p></div>
+    <div><h5>参与方数据变化</h5><p>输入只有 n/N（列切则宽度是 1/N，行切则行数是 1/N）。输出是 n：
+      每个 rank 从"我这一片"变成"所有人那几片都在我这"。<b>数据被复制，而不是被求和</b>。</p></div>
+    <div><h5>典型输出</h5><p>所有 rank 上相同，且等于 <code>[s0 | s1 | … | sN-1]</code>。
+      SGLang 里这一步是显式写出来的：先 <code>all_gather_into_tensor</code>，
+      再 <code>reshape((world_size,) + input_size)</code> + <code>movedim(0, dim)</code> + <code>reshape</code>，
+      拼的语义就落在 <code>movedim</code> 这一行。</p></div>
+    <div><h5>常见场景</h5><p>词表并行的 <code>lm_head</code> 之后拼 logits；A2A 打散 token 之后还原完整行；
+      TP 切分的 KV 需要凑齐时；MTP / aux hidden state 需要全序列时。</p></div>
+  </div>
+
+  <h3 class="mini">all2all —— 每对之间交换的块都不一样</h3>
+  <div class="scope">
+    <div><h5>通信目标</h5><p>每个 rank 把自己的 buffer 切成 N 段，<b>第 j 段只发给 rank j</b>，
+      同时从每个 rank 收一段。它是 N 个"点对点、且每对内容不同"的交换，
+      而不是 N 次广播。</p></div>
+    <div><h5>参与方数据变化</h5><p>输入是"按目的 rank 切好的块"，输出是"按来源 rank 排好的块"。
+      <b>总字节基本不变</b>（balanced 时严格不变），每 rank 仍是 n，但<b>内容被重排</b>：
+      rank r 的输出恰好是输入矩阵的第 r 列。</p></div>
+    <div><h5>典型输出</h5><p><b>每个 rank 都不一样</b>。这正是它与前两者的分界：
+      allreduce / allgather 的产物在 rank 之间可以互换，all2all 的产物不能 —— 换过去就是错的。</p></div>
+    <div><h5>常见场景</h5><p>MoE 的 <code>dispatch</code>（token 按路由结果搬到专家所在 rank）与
+      <code>combine</code>（算完搬回原 token 所在 rank）；以及 SGLang 里 TP <code>lm_head</code>
+      把"all-gather + DP scatter"合并成一次 <code>all_to_all_single</code> 的那条路。</p></div>
+  </div>
+
+  <h2 id="matrix"><span class="n">02</span>四维对照，以及一句话判据</h2>
+
+  <table>
+    <thead>
+      <tr><th style="width:118px">维度</th><th>allreduce</th><th>allgather</th><th>all2all</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="k" data-label="维度">通信目标</td>
+        <td data-label="allreduce">逐元素求和，把和放回所有 rank</td>
+        <td data-label="allgather">拼接切片，把整条放回所有 rank</td>
+        <td data-label="all2all">按目的地重新分发，各 rank 各拿一份</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="维度">输入布局</td>
+        <td data-label="allreduce">N 份 partial，<b>同 shape、不同值</b></td>
+        <td data-label="allgather">N 份互不重叠的 slice，<b>合起来才完整</b></td>
+        <td data-label="all2all">每 rank 一个 buffer，<b>按目的 rank 切成 N 块</b></td>
+      </tr>
+      <tr>
+        <td class="k" data-label="维度">是否有算术</td>
+        <td data-label="allreduce"><b>有</b>，sum</td>
+        <td data-label="allgather">无</td>
+        <td data-label="all2all">无</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="维度">每 rank 字节</td>
+        <td class="v" data-label="allreduce">n → n</td>
+        <td class="v" data-label="allgather">n/N → n</td>
+        <td class="v" data-label="all2all">n → n（重排）</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="维度">总线上搬的量</td>
+        <td class="v" data-label="allreduce">2·(N−1)/N·n</td>
+        <td class="v" data-label="allgather">(N−1)/N·n</td>
+        <td class="v" data-label="all2all">(N−1)/N·n</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="维度">输出在各 rank 上</td>
+        <td data-label="allreduce"><b>相同</b>（冗余复制）</td>
+        <td data-label="allgather"><b>相同</b>（冗余复制）</td>
+        <td data-label="all2all"><b>各不相同</b>（置换）</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="维度">发送模式</td>
+        <td data-label="allreduce">同一份发出，收端累加</td>
+        <td data-label="allgather">同一份发 N−1 次（内容相同）</td>
+        <td data-label="all2all">发 N−1 次，<b>每次内容不同</b></td>
+      </tr>
+      <tr class="hot">
+        <td class="k" data-label="维度">一句话判据</td>
+        <td data-label="allreduce">输入是 partial → 必需求和</td>
+        <td data-label="allgather">输入是切片 → 必需拼接</td>
+        <td data-label="all2all">输入按目的地切好 → 必需置换</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <b>allgather 与 all2all 的字节数完全相同，</b>都是 (N−1)/N·n。它们的差别不是"搬多少"，而是
+    "每一对之间搬的是不是同一个东西"。allgather 是 N−1 次<b>相同</b>内容的发送（等价于 N 次广播）；
+    all2all 是 N−1 次<b>互不相同</b>内容的发送。所以 allgather 的产物在 rank 之间可以互相替代，
+    all2all 的产物不行。
+  </div>
+
+  <h2 id="others"><span class="n">03</span>与其余五种集合通信的区别</h2>
+  <p>把另外五个放进来一起看，三者的特殊性才明显：<b>只有这三个是"无 root、全员参与、全员拿到结果"</b>的。
+  broadcast / scatter / gather / reduce 都有一个 root 或一个单点接收方；reduce_scatter 虽然全员参与，
+  但输出只有 n/N，不给全量。</p>
+
+  <table>
+    <thead>
+      <tr><th style="width:132px">原语</th><th>输入分布</th><th>输出分布</th><th style="width:64px">算术</th>
+      <th style="width:88px">有 root 吗</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="k" data-label="原语">broadcast</td><td data-label="输入分布">root 一份完整</td><td data-label="输出分布">全员一份完整（<b>相同</b>）</td><td data-label="算术">无</td><td data-label="有 root 吗">有</td></tr>
+      <tr><td class="k" data-label="原语">scatter</td><td data-label="输入分布">root 一份完整</td><td data-label="输出分布">每 rank 1/N（<b>各不相同</b>）</td><td data-label="算术">无</td><td data-label="有 root 吗">有</td></tr>
+      <tr><td class="k" data-label="原语">gather</td><td data-label="输入分布">每 rank 1/N（各不相同）</td><td data-label="输出分布">仅 dst 一份完整</td><td data-label="算术">无</td><td data-label="有 root 吗">有</td></tr>
+      <tr><td class="k" data-label="原语">reduce</td><td data-label="输入分布">每 rank 一份 partial</td><td data-label="输出分布">仅 dst 一份和</td><td data-label="算术">sum</td><td data-label="有 root 吗">有</td></tr>
+      <tr><td class="k" data-label="原语">reduce_scatter</td><td data-label="输入分布">每 rank 一份 partial</td><td data-label="输出分布">每 rank 1/N 的和（各不相同）</td><td data-label="算术">sum</td><td data-label="有 root 吗">无</td></tr>
+      <tr class="hot"><td class="k" data-label="原语">allreduce</td><td data-label="输入分布">每 rank 一份 partial</td><td data-label="输出分布">全员一份和（<b>相同</b>）</td><td data-label="算术">sum</td><td data-label="有 root 吗">无</td></tr>
+      <tr class="hot"><td class="k" data-label="原语">allgather</td><td data-label="输入分布">每 rank 1/N（各不相同）</td><td data-label="输出分布">全员一份完整（<b>相同</b>）</td><td data-label="算术">无</td><td data-label="有 root 吗">无</td></tr>
+      <tr class="hot"><td class="k" data-label="原语">all2all</td><td data-label="输入分布">每 rank 按目的切成 N 块</td><td data-label="输出分布">每 rank 收 N 块（<b>各不相同</b>）</td><td data-label="算术">无</td><td data-label="有 root 吗">无</td></tr>
+    </tbody>
+  </table>
+
+  <p>读这张表有两个捷径：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>看有没有 root。</b> 有 root 的四个（broadcast / scatter / gather / reduce）里，root 或 dst
+      是一个"特权 rank"，其余人要么只发、要么只收。三原语没有特权 rank，所有 rank 的地位对称 ——
+      这是它们必须全互通、必须做满 N 份收发的根本原因。</li>
+    <li><b>看输出是不是"全量"。</b> 只有三原语保证每个 rank 结束时都持有全量数据。
+      reduce_scatter 是唯一"全员参与但不给全量"的那个，所以它永远只能作为中间步骤出现，
+      不能单独承担一层的数据交换。</li>
+  </ul>
+
+  <h2 id="identity"><span class="n">04</span>两条恒等式：三者怎么互相造出来</h2>
+
+  <h3 class="mini">恒等式一：allreduce = reduce_scatter ∘ allgather</h3>
+  <pre><code>allreduce(x₀, x₁, …, x_{N-1})            <!-- 语义：每 rank 都拿到 Σx -->
+  ≡  reduce_scatter(x)   → 每 rank 拿到 Σ 的 1/N 个切片
+  ∘  allgather(那一片)    → 把 N 个切片拼回来，人人一份</code></pre>
+  <p>字节账也对得上：<code>reduce_scatter</code> 搬 (N−1)/N·n，<code>allgather</code> 再搬 (N−1)/N·n，
+  合计 <b>2·(N−1)/N·n</b>，与一次 ring allreduce 的代价相同。所以"把 allreduce 拆成两段"在带宽上不是免费的，
+  它换的是别的东西：中间那一步的数据量只有 n/N，可以做在更小的行数上、可以和下一层的 norm 融合、可以和计算重叠。</p>
+
+  <p>SGLang 里这条恒等式是<b>字面实现</b>的，不是类比。<code>layer_boundary/ops.py</code> 里两个函数直接对应两段：</p>
+
+  <pre><code><span class="cm"># layer_boundary/ops.py:69 —— 前半段：把层尾的 partial 求和并切到本 rank 的行</span>
+def tp_reduce_scatter(hidden_states, residual):
+    <span class="cm">"""Complete a TP sum onto each rank's token slice."""</span>
+    local_tokens = hidden_states.shape[0] // parallel.tp_size
+    output = hidden_states.new_empty(local_tokens, *hidden_states.shape[1:])
+    parallel.tp_group.reduce_scatter_tensor(output, hidden_states)
+    ...
+
+<span class="cm"># layer_boundary/ops.py:109 —— 后半段：下一层的输入需要整行时，再拼回来</span>
+def attn_tp_gather_input(hidden_states, forward_batch, gather=None):
+    <span class="cm">"""Gather a stage input from this rank's attention-TP slice of the rows"""</span>
+    ...
+    attn_tp_all_gather_into_tensor(output, local_hidden_states)</code></pre>
+
+  <p class="hint">严格说，<code>tp_reduce_scatter</code> 与 <code>attn_tp_gather_input</code> 是<b>两个 stage 的两端</b>，
+  中间隔着一次残差相加和一次 RMSNorm。把这两段看成"一次 allreduce 被拆开"是理解
+  <code>--boundary-reduction</code> 的钥匙 —— 见 <a href="#boundary">一节</a>。</p>
+
+  <h3 class="mini">恒等式二：allgather = N 次 broadcast</h3>
+  <p>allgather 可以看成"rank 0 广播 <code>s₀</code>、rank 1 广播 <code>s₁</code>……
+  rank N−1 广播 <code>s_{N-1}</code>"。ring 实现就是这个思路的流水化。反过来，
+  <b>all2all 不是</b> N 次 broadcast —— 因为 rank r 发出去的那 N 块内容互不相同，
+  收端也不能共享。所以 all2all 的实现必须是双向的、逐对的，SGLang 里它落在 DeepEP / FlashInfer / NIXL
+  这些专门的 transport 上，而不是 <code>GroupCoordinator</code> 的通用集合通信通路。</p>
+
+  <div class="callout warn">
+    <b>all2all 也不是"all-to-all 版的 allgather"。</b>
+    两者字节数一样，但 allgather 的每个接收者都得到<b>同一份</b>完整张量；
+    all2all 的每个接收者得到的是<b>自己那一列</b>。把 allgather 换成 all2all，
+    结果不是"慢一点"，而是<b>布局错了</b> —— 下游拿到的张量形状和内容都不对。
+  </div>
+
+  <h2 id="map"><span class="n">05</span>SGLang 的五层落点</h2>
+  <p>在 SGLang 里找一次集合通信，要沿着五个层往下走。三原语在这五层里的"存在感"完全不同 ——
+  <code>allreduce</code> 和 <code>allgather</code> 走第 2 到第 5 层，<code>all2all</code> 直接从第 1 层跳到第 5 层，
+  <b>中间两层它不经过</b>。</p>
+
+  <div class="layers">
+    <div class="layerow">
+      <div class="ln">L1 模型层</div>
+      <div class="lb"><b>models/glm5_next.py</b>
+        <p>声明这一层的 attention / FFN 用哪个 <code>stage</code>，以及少数"就地决定"的通信
+        （例如 <code>capture_output()</code> 里的 <code>all_gather</code>、MoE 前的 token 广播）。
+        它<b>不</b>决定原语，只声明契约。</p></div>
+    </div>
+    <div class="layerow">
+      <div class="ln">L2 边界层</div>
+      <div class="lb"><b>layers/layer_boundary/</b> ＋ <b>layers/dp_attention.py</b>
+        <p>真正决定"这一次求和现在做、留到下层做、还是用 reduce-scatter 顶掉"的地方。
+        <code>ops.py</code> 把选择翻译成具体的 <code>all_reduce</code> / <code>all_gather_into_tensor</code> /
+        <code>reduce_scatter_tensor</code> / <code>scatter</code> 调用。</p></div>
+    </div>
+    <div class="layerow">
+      <div class="ln">L3 API 层</div>
+      <div class="lb"><b>distributed/communication_op.py</b>
+        <p>12 个具名函数（其中 <b>8 个</b>是 all-reduce 入口、2 个是 gather、2 个是广播），全部是一行转发：<code>tensor_model_parallel_all_reduce()</code>、
+        <code>tensor_model_parallel_all_gather()</code>、<code>attention_tensor_model_parallel_all_reduce()</code>……
+        名字里的前缀（<code>tensor_model_parallel</code> / <code>attention_…</code> / <code>moe_…</code>）
+        决定选哪个 group。</p></div>
+    </div>
+    <div class="layerow">
+      <div class="ln">L4 组层</div>
+      <div class="lb"><b>distributed/parallel_state.py · class GroupCoordinator</b>
+        <p>按 dtype、size、是否对称内存、是否在 <code>torch.compile</code> 下，在
+        msCCL++ / custom all-reduce / pynccl / FlashInfer / quick-all-reduce / torch-symm-mem / NCCL
+        之间选一个后端。这一层是"同一条 <code>all_reduce</code> 调用，落在不同 kernel 上"的全部来源。</p></div>
+    </div>
+    <div class="layerow">
+      <div class="ln">L5 内核层</div>
+      <div class="lb"><b>distributed/device_communicators/</b> ＋ <b>layers/moe/token_dispatcher/</b>
+        <p>前者是 <code>custom_all_reduce.py</code>、<code>quick_all_reduce.py</code>、
+        <code>torch_symm_mem.py</code>、<code>triton_symm_mem_ag.py</code>、<code>vocab_gather.py</code>；
+        后者是 <code>deepep.py</code>、<code>deepep_v2.py</code>、<code>flashinfer.py</code>、
+        <code>mooncake.py</code>、<code>nixl.py</code>、<code>pplx.py</code>、<code>standard.py</code>。
+        <b>all2all 只在这一层</b>。</p></div>
+    </div>
+  </div>
+
+  <pre><code>python/sglang/srt/
+├── models/glm5_next.py                  <span class="cm">L1  声明 stage、capture_output 的 all_gather</span>
+├── layers/
+│   ├── layer_boundary/                  <span class="cm">L2  契约 → 原语的选择</span>
+│   │   ├── contracts.py                 <span class="cm">    ProducerReduction / ExitRows / OutputContract</span>
+│   │   ├── ops.py                        <span class="cm">    tp_reduce_scatter / attn_tp_gather_input / sum_output</span>
+│   │   ├── boundary.py                   <span class="cm">    _select_entry_step / _select_exit_move</span>
+│   │   ├── stage.py                      <span class="cm">    StageBoundary.prepare / finish / exit</span>
+│   │   └── factories.py                  <span class="cm">    append_stages()，GLM 层在这里组 stage</span>
+│   ├── dp_attention.py                  <span class="cm">    attn_tp_all_gather_into_tensor / reduce_scatterv</span>
+│   ├── logits_processor.py              <span class="cm">    TP logits 的 all_gather，以及 all_to_all_single 替代</span>
+│   ├── vocab_parallel_embedding.py      <span class="cm">    词表并行出口的 all_reduce</span>
+│   └── moe/
+│       ├── fused_moe_triton/layer.py    <span class="cm">    FusedMoE.forward_impl: dispatch → core → combine</span>
+│       └── token_dispatcher/            <span class="cm">L5  all2all 的全部实现</span>
+├── distributed/
+│   ├── communication_op.py              <span class="cm">L3  12 个具名入口</span>
+│   ├── parallel_state.py                <span class="cm">L4  GroupCoordinator + 各 group 单例</span>
+│   └── device_communicators/            <span class="cm">L5  allreduce / allgather 的 kernel</span>
+└── arg_groups/
+    ├── fields/exec_.py                  <span class="cm">    --moe-a2a-backend / --boundary-reduction</span>
+    ├── fields/parallel.py               <span class="cm">    --enable-tp-lm-head-all-to-all</span>
+    ├── overrides.py                     <span class="cm">    _a2a_ep_size：ep_size := tp_size</span>
+    └── boundary_reduction.py            <span class="cm">    auto 如何解析成 ar / rs / rsv / rs+rsv</span></code></pre>
+
+  <table>
+    <thead><tr><th style="width:96px">原语</th><th>L2 边界层</th><th>L3 API 层</th><th>L5 内核层</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">allreduce</td>
+        <td><code>sum_output()</code>、<code>attn_tp_all_reduce()</code></td>
+        <td><code>tensor_model_parallel_all_reduce()</code> 等 8 个</td>
+        <td><code>GroupCoordinator.all_reduce()</code> 的 6 级后端</td>
+      </tr>
+      <tr>
+        <td class="k">allgather</td>
+        <td><code>attn_tp_gather_input()</code>、<code>dp_gather()</code></td>
+        <td><code>tensor_model_parallel_all_gather()</code></td>
+        <td><code>all_gather_into_tensor</code>、<code>vocab_gather</code>、<code>triton_symm_mem_ag</code></td>
+      </tr>
+      <tr class="hot">
+        <td class="k">all2all</td>
+        <td><b>不经过</b></td>
+        <td><b>不经过</b>（<code>communication_op.py</code> 里没有 all2all）</td>
+        <td><code>token_dispatcher/*.dispatch()</code>、<code>tp_group.all_to_all_single()</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <b>为什么 all2all 跳过 L2 和 L3？</b> 因为它的接口不是"张量进、张量出"，而是
+    <b>一对语义</b>：<code>dispatch</code> 把 token 搬到专家所在 rank 并顺手把索引、权重、
+    每专家 token 数一起带过去；<code>combine</code> 把结果按原顺序收回并加权。
+    这中间夹着一次专家 GEMM，不可能是 <code>communication_op.py</code> 里那种一行转发。
+    所以它自成一套 <code>TokenDispatcher</code> 接口。
+  </div>
+
+  <h2 id="ar"><span class="n">06</span>allreduce 在 SGLang：从具名函数到 kernel</h2>
+  <p><b>一句话答案</b>：<code>communication_op.py</code> 提供 12 个一行转发的具名函数，真正的选择发生在
+  <code>GroupCoordinator.all_reduce()</code> 里 —— 那是一个 <b>十步的分支判断</b>，同一个调用在不同机器、
+  不同 dtype、不同 shape 上会落到完全不同的 kernel。</p>
+
+  <h3 class="mini">L3：八个 all-reduce 入口，差别只在 group</h3>
+  <pre><code><span class="cm"># distributed/communication_op.py:21</span>
+def tensor_model_parallel_all_reduce(input_):
+    <span class="cm">"""All-reduce the input tensor across model parallel group."""</span>
+    return get_tp_group().all_reduce(input_)
+
+<span class="cm"># :120   attention 那一组（DP attention 下 attn_tp ≠ tp）</span>
+def attention_tensor_model_parallel_all_reduce(input_):
+    return get_attn_tp_group().all_reduce(input_)
+
+<span class="cm"># :137   MoE 的专家并行组</span>
+def moe_expert_parallel_all_reduce(input_):
+    return get_moe_ep_group().all_reduce(input_)</code></pre>
+
+  <p>八个入口里另外五个：<code>tensor_model_parallel_quant_all_reduce()</code>（量化通信）、
+  <code>moe_tensor_model_parallel_all_reduce()</code>、
+  <code>attention_tensor_model_parallel_quant_all_reduce()</code>、
+  <code>tensor_model_parallel_fused_allreduce_rmsnorm()</code>（把 all-reduce 和 RMSNorm 焊进一个 kernel，
+  失败时返回 <code>None</code> 让调用方走通用路径）、
+  <code>tensor_model_parallel_fused_allreduce_rmsnorm_quant_per_group()</code>（再加 per-group FP8 量化）。</p>
+
+  <p class="hint">整份文件 139 行、12 个函数，没有一个做实际计算。它的价值在于<b>把"用哪个 group"写进函数名</b>：
+  读 <code>models/glm5_next.py</code> 时看到 <code>attention_tensor_model_parallel_all_reduce</code>，
+  就知道这次求和只跨 attention-TP，不跨 DP。</p>
+
+  <h3 class="mini">L4：<code>GroupCoordinator.all_reduce()</code> 的分支顺序</h3>
+  <p>这个函数在 <code>parallel_state.py:693-804</code>。它的分支顺序就是"谁的 kernel 更快"的顺序，
+  而且<b>前面的分支一旦命中就 return，不会继续往下走</b>：</p>
+
+  <table>
+    <thead><tr><th style="width:44px">#</th><th style="width:252px">命中条件</th><th>落到哪个实现</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="#">0</td><td data-label="命中条件"><code>world_size == 1</code></td><td data-label="落到哪个实现">直接 <code>return input_</code>，一次通信都不发</td></tr>
+      <tr><td class="k" data-label="#">1</td><td data-label="命中条件">输入在 CPU 上</td><td data-label="落到哪个实现"><code>torch.ops.sgl_kernel.shm_allreduce</code>（共享内存），否则回落 <code>torch.distributed</code></td></tr>
+      <tr><td class="k" data-label="#">2</td><td data-label="命中条件">HPU / XPU / NPU 的 communicator 可用</td><td data-label="落到哪个实现">各自的 <code>communicator.all_reduce()</code>；XPU 走 <code>inplace_all_reduce</code> 自定义算子，避免被 Dynamo 拆成 c10d primitive</td></tr>
+      <tr><td class="k" data-label="#">3</td><td data-label="命中条件"><code>torch.compiler.is_compiling()</code></td><td data-label="落到哪个实现">不在这里做 size 判断（会按符号 shape 反复重编译），统一交给运行时在自定义算子内部选</td></tr>
+      <tr><td class="k" data-label="#">4</td><td data-label="命中条件"><code>pymscclpp_comm.should_mscclpp_allreduce(input_)</code></td><td data-label="落到哪个实现">msCCL++ tuned AllReduce</td></tr>
+      <tr><td class="k" data-label="#">5</td><td data-label="命中条件"><code>ca_comm.should_custom_ar(input_)</code></td><td data-label="落到哪个实现">custom all-reduce（<code>custom_all_reduce.py</code> / <code>_v2</code>），one-shot 或 two-shot</td></tr>
+      <tr><td class="k" data-label="#">6</td><td data-label="命中条件"><code>pynccl_comm</code> 且开了对称内存</td><td data-label="落到哪个实现"><code>pynccl_comm.all_reduce()</code>，原地写回</td></tr>
+      <tr><td class="k" data-label="#">7</td><td data-label="命中条件"><code>_can_use_flashinfer_allreduce(input_)</code></td><td data-label="落到哪个实现"><code>flashinfer_allreduce()</code>，可与 GEMM 融合</td></tr>
+      <tr><td class="k" data-label="#">8</td><td data-label="命中条件"><code>_resolve_outplace_all_reduce_method(...)</code> 返回非空</td><td data-label="落到哪个实现">quick all-reduce 或 torch symmetric memory</td></tr>
+      <tr><td class="k" data-label="#">9</td><td data-label="命中条件">以上都不满足</td><td data-label="落到哪个实现"><code>inplace_all_reduce()</code> → <code>torch.distributed.all_reduce</code>（NCCL ring / tree）</td></tr>
+    </tbody>
+  </table>
+
+  <p>表里第 8 级那一句 <code>_resolve_outplace_all_reduce_method()</code> 自己又是一条阶梯
+  （<code>parallel_state.py:957-1001</code>），它按这个顺序返回第一个可用者：</p>
+  <pre><code><span class="cm"># _resolve_outplace_all_reduce_method 可能返回的值，按优先级</span>
+"ca"  →  "pcie_ipc"  →  "qr"  →  "pymscclpp"  →  "torch_symm_mem"  →  "pynccl"  →  None
+<span class="cm">#   custom AR     PCIe IPC     quick AR   msCCL++        torch 对称内存     pynccl（仅 TC piecewise 图内）</span>
+<span class="cm"># None 落到 _all_reduce_in_place()：pynccl → torch_symm_mem → torch.distributed</span></code></pre>
+
+  <p class="hint">第 4–8 级都带 <code>should_*</code> / <code>_can_use_*</code> 谓词，也就是说
+  <b>"用不用自定义 kernel"还取决于输入张量的 dtype、字节数和当前是否在图捕获里</b>。
+  这解释了为什么同一条 <code>all_reduce</code> 在小 batch 下走 NCCL、在大 batch 下走 one-shot ——
+  也解释了为什么改 batch size 会让性能曲线出现台阶。</p>
+
+  <h3 class="mini">谁在调用它：两个形状不同、选法也不同的出口</h3>
+
+  <p><b>(a) RowParallelLinear</b> —— TP 里最经典的一次。<code>layers/linear.py:1800</code>：</p>
+  <pre><code>if (
+    ((self.reduce_results and tp_size &gt; 1) or self.use_decode_attn_tp)
+    and not skip_all_reduce
+    and not should_skip_mlp_all_reduce()
+):
+    if self.use_dp_attention_reduce:
+        output = get_parallel().attn_tp_group.all_reduce(output_parallel)
+    else:
+        if quantize_communications:
+            output = tensor_model_parallel_quant_all_reduce(output_parallel)
+        elif self.parallel_group == "tp":
+            output = get_parallel().tp_group.all_reduce(output_parallel)
+        else:
+            output = tensor_model_parallel_all_reduce(output_parallel)</code></pre>
+  <p>注意 <code>should_skip_mlp_all_reduce()</code> 与 <code>skip_all_reduce</code>：
+  <b>模型层可以主动把这次 all-reduce 关掉</b>，交给边界层统一做。GLM-5.3 正是这么干的 ——
+  见下一节。</p>
+
+  <p><b>(b) VocabParallelEmbedding</b> —— 词表并行的入口。<code>layers/vocab_parallel_embedding.py:518</code>：</p>
+  <pre><code>output_parallel = self._embed_local_shard(input_)
+if (
+    output_parallel.numel() &gt; 0
+    and self.tp_size &gt; 1
+    and not get_attn_tp_context().input_scattered
+):
+    if self.use_attn_tp_group:
+        output_parallel = attn_tp_all_reduce(output_parallel)
+    else:
+        output_parallel = tensor_model_parallel_all_reduce(output_parallel)</code></pre>
+  <p>为什么 embedding 用 <b>all-reduce</b> 而不是 all-gather？因为词表并行把<b>词表</b>切了，
+  hidden 维没切：每个 rank 算出的 <code>[T, H]</code> 里，只有落在自己词表分片上的行非零，
+  其余行是 0（<code>masked_fill_</code> 置的）。<b>这些是 partial，求和就是正确答案</b>。
+  同一个布局在出口处换成 <code>lm_head</code> 时却是 all-gather —— 因为那时输出是
+  <code>[T, V/P]</code>，需要的是<b>拼接</b>而不是求和。同一层类型、两种出口、两个原语，
+  正好是<b>第 01 节那张判据表的两个方向</b>。</p>
+
+  <h2 id="boundary"><span class="n">07</span>边界层：这一层的 allreduce 到底在哪儿发生</h2>
+  <p><b>一句话答案</b>：GLM-5.3 的 decoder layer 里，attention、MoE、dense MLP
+  <b>四个模块全部用 <code>reduce_results=False</code> 构造</b> —— 它们自己不发起 all-reduce。
+  求和被记成数据流上的一个"欠账"，由 <code>layer_boundary</code> 在层与层的交界处兑现。
+  兑现方式有三种（就地 all-reduce / 延后 all-reduce / reduce-scatter），
+  由 <code>--boundary-reduction</code> 与当前 batch 的行布局共同决定。</p>
+
+  <h3 class="mini">先看模型层怎么把这次通信关掉的</h3>
+  <pre><code><span class="cm"># models/glm5_next.py:708-772（节选）</span>
+if self.is_linear_attn:
+    self.self_attn = Glm5NextLinearAttention(..., <span class="hl">reduce_results=False</span>)
+else:
+    self.self_attn = DeepseekV2AttentionMLA(..., <span class="hl">reduce_results=False</span>, skip_rope=True)
+
+if self.is_layer_sparse:
+    self.mlp = Glm5NextMoE(..., <span class="hl">reduce_results=False</span>)
+else:
+    self.mlp = Glm5NextMLP(..., <span class="hl">reduce_results=False</span>, allow_fused_down=False)</code></pre>
+
+  <p>四个 <code>reduce_results=False</code> 意味着：<code>o_proj</code> 算完是 partial，
+  <code>down_proj</code> 算完也是 partial，<b>谁都不许自己 all-reduce</b>。
+  这和 <code>layers/linear.py:1800</code> 里那个 <code>if self.reduce_results and tp_size &gt; 1</code>
+  是同一个开关 —— 关掉之后，那段 all-reduce 整块跳过，<code>output = output_parallel</code> 直接返回。</p>
+
+  <p>为什么要把这件事从模块里拿出来？因为只有站在层与层的交界处，才知道<b>下一个消费者是谁</b>：
+  它可能只需要 1/N 的行（那就能用 reduce-scatter 顺手切好），也可能需要整行（那就得 all-gather 回来），
+  还可能这一层的 norm 和残差可以跟求和焊进一个 kernel（<code>fused_allreduce_rmsnorm</code>）。
+  模块自己看不到这些，所以它没有资格决定。</p>
+
+  <h3 class="mini">契约：边界层用什么词说话</h3>
+  <pre><code><span class="cm"># layers/layer_boundary/contracts.py:29</span>
+class ProducerReduction(Enum):
+    <span class="cm">"""Who completes the sum a stage's output owes: exactly one completer for
+    each output, the boundary. Compute completes it only where an FFN fuses
+    it with a reduction its computation needs (``output_complete``).
+
+    ALWAYS_PARTIAL is attention-only: finish() hands the partial sum to the
+    next stage's input as its declared sum. EXIT_SCOPED, for an FFN or a
+    single-stage mixer: the exit completes the sum, or carries it to the next
+    stage's input.
+    """</span>
+    ALWAYS_PARTIAL = auto()
+    EXIT_SCOPED = auto()
+
+
+<span class="cm"># contracts.py:44</span>
+class ExitRows(Enum):
+    <span class="cm">"""The rows a layer or branch must leave its output on, independent of
+    compute's input rows."""</span>
+    ATTENTION = auto()
+    TBO_SPLIT = auto()
+    SLICE = auto()</code></pre>
+
+  <p>再往下一层，是每个 stage 输出声明的 <code>OutputContract</code>（<code>contracts.py:88</code>）。
+  四个字段正好把"这次通信怎么兑现"的四种自由度写全了：</p>
+
+  <table>
+    <thead><tr><th style="width:172px">字段</th><th>它回答的问题</th><th style="width:190px">对应的原语</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="字段">group</td><td data-label="它回答的问题">这份输出"欠谁的 sum"；为 <code>None</code> 表示已经是完整的</td>
+        <td data-label="对应的原语">决定 all_reduce 在哪个 group 上做</td></tr>
+      <tr><td class="k" data-label="字段">always_partial</td><td data-label="它回答的问题">这个和<b>必须</b>留给下一个 stage 的输入去收，本层不收</td>
+        <td data-label="对应的原语">把 all_reduce <b>推迟</b>，进而和下一层的 norm 融合</td></tr>
+      <tr><td class="k" data-label="字段">may_defer_to_next</td><td data-label="它回答的问题">本层的出口<b>可以</b>把和带到下一层输入，也可以现在就收</td>
+        <td data-label="对应的原语">同上，但是可选的</td></tr>
+      <tr class="hot"><td class="k" data-label="字段">may_reduce_scatter</td><td data-label="它回答的问题">允许由边界选中的一次<b>定长 reduce-scatter</b> 来完成求和</td>
+        <td data-label="对应的原语">把 allreduce 换成 reduce_scatter</td></tr>
+    </tbody>
+  </table>
+
+  <p><code>StageBoundary.finish()</code>（<code>stage.py:198</code>）就是兑现入口。它的逻辑可以压成三句话：</p>
+  <pre><code><span class="cm"># layers/layer_boundary/stage.py:198（语义摘要，非原文）</span>
+finish(hidden_states):
+  <span class="k">if</span> 这个 stage 有 row_transport:      → 交给 TransportExit，先搬行再收尾
+  <span class="k">if</span> 是 attention 且 finishes_directly:
+      <span class="k">if</span> 输出声明了 always_partial:      → 记一笔 DeclaredSum，欠着，交给下一层
+      <span class="k">else</span>:                              → 就地调用 sum_impl.run()，现在就把和收掉
+  <span class="k">else</span>:                                  → 走 exit()，由 ExitPolicy 选 sum_now / defer / reduce_scatter</code></pre>
+
+  <p>于是"allreduce 在哪"这个问题，答案变成了<b>三选一</b>：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>就地收</b> → 一次 <code>all_reduce</code>，输出是所有 rank 相同的完整行。</li>
+    <li><b>欠着</b> → 这一层一次通信都不发，和留到下一层的入口，与那里的 RMSNorm 一起做
+      （<code>tensor_model_parallel_fused_allreduce_rmsnorm</code> 就是为这条路准备的）。</li>
+    <li><b>reduce-scatter 顶掉</b> → 一次 <code>reduce_scatter_tensor</code>，输出是 1/N 的行；
+      下一层如果需要整行，再 <code>attn_tp_gather_input</code> 拼回来。</li>
+  </ul>
+
+  <h3 class="mini">决定权在命令行：<code>--boundary-reduction</code></h3>
+  <pre><code><span class="cm"># arg_groups/fields/exec_.py:714</span>
+boundary_reduction: A[
+    Literal["auto", "ar", "rs", "rsv", "rs+rsv"],
+    Arg(help="Select FFN boundary reduction: <span class="hl">ar uses all-reduce then token
+    redistribution</span>; rs and rsv permit fixed-size and variable-size
+    reduce-scatter respectively; <span class="hl">rs+rsv permits both (RSv first)</span>.
+    Unsupported paths fall back to ar. The option applies to the FFN stages of
+    decoders built with stage boundaries, where auto resolves the model default;
+    other models ignore it. Required attention and MoE collectives and
+    all-reduce fusion are unaffected."),
+] = "auto"</code></pre>
+
+  <p>这段 help 本身就是本页最好的论据：<b>"all-reduce"和"reduce-scatter"在 SGLang 里是同一个位置的两个实现</b>，
+  由 <code>--boundary-reduction</code> 选。而 <code>auto</code> 怎么解析，写在
+  <code>arg_groups/boundary_reduction.py</code> 里 —— 它用<b>架构名白名单</b>决定：</p>
+
+  <pre><code><span class="cm"># arg_groups/boundary_reduction.py:12-31（节选）</span>
+_RSV_ARCHITECTURES = {"BailingMoELinearForCausalLM", "LongcatFlashForCausalLM",
+                      "Step3VLForConditionalGeneration", ...}
+_AR_ARCHITECTURES  = {"KimiK3ForConditionalGeneration", "Qwen3ForCausalLM",
+                      "MossVLForCausalLM", "Qwen4ExpForConditionalGeneration", ...}
+
+def model_boundary_reduction(config):
+    architectures = set(getattr(config, "architectures", None) or ())
+    if architectures &amp; _RSV_ARCHITECTURES: return "rsv"
+    if architectures &amp; _AR_ARCHITECTURES:  return "ar"
+    ...
+    return <span class="hl">"rs+rsv"</span>          <span class="cm">← 兜底值</span></code></pre>
+
+  <div class="callout warn">
+    <b>GLM-5.3 的架构名不在那两张白名单里，所以 <code>auto</code> 落到兜底的 <code>"rs+rsv"</code> ——
+    reduce-scatter 这条路被<b>允许</b>了。</b>
+    但"允许"不等于"会走"。<code>_select_exit_move()</code> 还要看输出与残差的布局是否一致：
+    纯 TP8、行没被切开时 <code>produced.layout == residual</code> 成立，它在
+    <code>boundary.py:724-726</code> 直接返回 <code>ExitMove(keep_output)</code> ——
+    求和不会变形成 reduce-scatter，而是<b>延后到下一层入口、以 all-reduce 的形式</b>兑现
+    （<code>prepare.py:163-170</code>）。只有行真的被切开（SP / <code>INPUT_SCATTERED</code> 变体）时，
+    reduce-scatter 才启动。
+  </div>
+
+  <p class="hint">所以这件事必须分两层说：<b>配置层</b>，GLM-5.3 解析为 <code>rs+rsv</code>；
+  <b>运行层</b>，默认 TP8 布局下行是完整的，所以实际兑现的是延后执行的 all-reduce。
+  要确认某次请求到底走了哪条，看 profiler 里出现的是 <code>ncclAllReduce</code> 还是
+  <code>ncclReduceScatter</code> —— 本页没有跑 trace，只给出了代码上的选择规则。</p>
+
+  <p class="hint">这一段要加两个限定，免得读成"allreduce 在 GLM-5.3 里消失了"：
+  ① help 原话写明 <i>Required attention and MoE collectives and all-reduce fusion are unaffected</i> ——
+  这个开关只改 FFN stage 出口的求和方式，attention 与 MoE 自身必需的集合通信不受它管；
+  ② <code>auto</code> 的解析发生在模型配置加载之后，且 <code>--boundary-reduction</code> 显式给值时一律优先
+  （<code>if requested != "auto": target = draft = requested</code>）。</p>
+
+  <p>用一句话把两件事连起来：<b>第 04 节那条恒等式（allreduce = reduce_scatter ∘ allgather），
+  就是 <code>--boundary-reduction rs+rsv</code> 的数学内容</b>。它没有把 allreduce 优化掉 ——
+  它把 allreduce 拆成两段，让中间那段只处理 1/N 的行；而在行本来就是完整的布局下，
+  拆开没有收益，于是选择器退回 <code>keep_output</code>，求和照旧是一次延后的 all-reduce。</p>
+
+  <h2 id="ag"><span class="n">08</span>allgather 在 SGLang：三个内核、五处落点</h2>
+  <p><b>一句话答案</b>：allgather 的语义只有一句 —— <code>[T, H/TP] → [T, H]</code>，
+  但 SGLang 为它准备了三条完全不同的实现路径，选择依据是<b>调用者是谁</b>：
+  通用路径走 <code>GroupCoordinator</code>，logits 路径走 <code>MultimemAllGatherer</code>，
+  词表路径走 <code>vocab_gather</code>。</p>
+
+  <h3 class="mini">通用路径：语义就落在 <code>movedim</code> 那一行</h3>
+  <pre><code><span class="cm"># distributed/parallel_state.py:1382  GroupCoordinator.all_gather</span>
+input_size = input_.size()
+output_size = (input_size[0] * world_size,) + input_size[1:]
+output_tensor = torch.empty(output_size, dtype=input_.dtype, device=input_.device)
+...
+self.all_gather_into_tensor(output_tensor, input_)
+
+<span class="cm"># 拼的语义在这里</span>
+output_tensor = output_tensor.reshape((world_size,) + input_size)
+output_tensor = output_tensor.<span class="hl">movedim(0, dim)</span>
+output_tensor = output_tensor.reshape(
+    input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
+)</code></pre>
+  <p>先 <code>all_gather_into_tensor</code> 把一个连续的 stack 填满，再用
+  <code>reshape + movedim + reshape</code> 把它"摊"到目标维上。这三行是<b>拼接语义的完整实现</b>：
+  把 <code>[N, ...]</code> 的第 0 维移到目标维、再合并。注意代码里的原注释——
+  <i>we have to use concat-style all-gather here, stack-style all-gather has compatibility
+  issues with torch.compile</i> —— 这不是实现细节，是它能进 CUDA graph 的前提。</p>
+
+  <h3 class="mini">三条实现路径</h3>
+  <table>
+    <thead><tr><th style="width:196px">实现</th><th>干什么</th><th style="width:210px">什么时候被选中</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k" data-label="实现">GroupCoordinator<br><span class="hint">all_gather_into_tensor</span></td>
+        <td data-label="干什么">NCCL ring 的 all-gather，或 <code>shm_allgather</code>（CPU 输入）</td>
+        <td data-label="什么时候被选中">默认路径；<code>attn_tp_gather_input</code>、<code>dp_gather</code> 都走它</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="实现">MultimemAllGatherer<br><span class="hint">triton_symm_mem_ag.py:449</span></td>
+        <td data-label="干什么">对称内存 <code>multimem.st</code>，沿 hidden 维一次 multimem 写完成；
+          文件头原话：<i>instead of an NCCL ring</i>，且 <i>CUDA-graph capturable</i></td>
+        <td data-label="什么时候被选中">logits 的 TP gather；要求 TP 组不跨节点、dtype/shape/对齐满足契约，否则回落 NCCL</td>
+      </tr>
+      <tr>
+        <td class="k" data-label="实现">vocab_gather<br><span class="hint">vocab_gather.py</span></td>
+        <td data-label="干什么"><code>[rows, local_width] → [rows, world_size·local_width]</code>，
+          文件头明确写了这是 <i>the layout <code>GroupCoordinator.all_gather(dim=-1)</code> produces</i></td>
+        <td data-label="什么时候被选中">词表并行的 draft 模型（<code>dspark.py</code> / <code>deepseek_v4_dspark.py</code>）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">落点一：<code>lm_head</code> 出口的 logits gather（GLM-5.3 必走）</h3>
+  <pre><code><span class="cm"># layers/logits_processor.py:939</span>
+if self.do_tensor_parallel_all_gather:
+    if self.use_attn_tp_group:
+        logits = self._gather_attn_tp_logits(logits)
+    elif self._can_use_tp_lm_head_all_to_all(logits, local_hidden_states, lm_head, logits_metadata):
+        logits = <span class="hl">self._tp_lm_head_all_to_all(logits)</span>     <span class="cm">← 用 all2all 顶掉 allgather</span>
+    else:
+        logits = <span class="hl">self._logits_gatherer(logits)</span>            <span class="cm">← MultimemAllGatherer</span></code></pre>
+  <p>这是 SGLang 里 allgather 与 all2all <b>唯一一处可以互相替换</b>的地方，所以值得单独讲（见
+  <a href="#a2a">第 09 节第 5 小节</a>）。gatherer 的构造在 <code>logits_processor.py:495</code>：</p>
+  <pre><code>self._logits_gatherer = triton_symm_mem_ag.MultimemAllGatherer(
+    max_tokens=triton_symm_mem_ag.recommended_max_tokens(include_prefill=False, floor=128),
+    enabled=self.do_tensor_parallel_all_gather and not self.use_attn_tp_group,
+    skip_entry_sync=True,
+)</code></pre>
+  <p class="hint"><code>include_prefill=False</code> 说明这条 multimem 路径为自己定位在 decode：
+  gather 的字节数随 token 数线性增长，prefill 的大 batch 更适合 NCCL ring。
+  <code>enabled</code> 里的 <code>not self.use_attn_tp_group</code> 也是一句实话 ——
+  DP attention 打开后，gather 要跨的是 <code>tp_group</code> 而不是 <code>attn_tp_group</code>，
+  multimem 缓冲区的 peer 集合就不对了。</p>
+
+  <h3 class="mini">落点二：词表并行的<b>两个出口，两个原语</b></h3>
+  <p>同一份"词表并行"布局，入口用 all-reduce、出口用 all-gather。这是全页最能说明"判据是输出布局"的例子：</p>
+  <table>
+    <thead><tr><th style="width:150px">位置</th><th>输出形状</th><th>为什么是这个原语</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="位置">VocabParallelEmbedding<br><span class="hint">vocab_parallel_embedding.py:518</span></td>
+        <td data-label="输出形状"><code>[T, H]</code>，每 rank 覆盖全部 T 行</td>
+        <td data-label="为什么是这个原语">只有落在本 rank 词表分片上的行非零，其余被 <code>masked_fill_</code> 置 0 ——
+          这是 <b>partial</b>，求和即真值 → <b>all_reduce</b></td></tr>
+      <tr><td class="k" data-label="位置">ParallelLMHead 之后的 logits<br><span class="hint">logits_processor.py:939</span></td>
+        <td data-label="输出形状"><code>[T, V/P]</code>，每 rank 只覆盖 1/P 的<b>列</b></td>
+        <td data-label="为什么是这个原语">每列都是独立的值，缺的列只能从别人那里<b>拼</b>过来，不能求和 → <b>all_gather</b></td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">落点三：A2A 打开之后，<code>capture_output</code> 里的 all_gather</h3>
+  <pre><code><span class="cm"># models/glm5_next.py:1108 —— 只有这三种 A2A 后端才为真</span>
+if (
+    get_moe_a2a_backend().is_deepep()
+    or get_moe_a2a_backend().is_mooncake()
+    or get_moe_a2a_backend().is_deepep_v2()
+):
+    self.enable_a2a_moe = True
+else:
+    self.enable_a2a_moe = False
+
+<span class="cm"># models/glm5_next.py:1189（在 forward 的逐层循环里）</span>
+def capture_output(aux_hidden_state, *, owned=False):
+    aux_hidden_state = self._prepare_aux_hidden_state(aux_hidden_state)
+    owned = owned or (self.dflash_capture and self.config.mhc)
+    <span class="k">if</span> self.enable_a2a_moe and i &gt; self.first_k_dense_replace:
+        group = get_parallel().attn_tp_group
+        aux_hidden_state = group.<span class="hl">all_gather(aux_hidden_state, dim=0)</span>
+        owned = owned or group.world_size &gt; 1
+    aux_hidden_states.capture(aux_hidden_state, owned=owned)</code></pre>
+  <p>这条链路值得逐字读：<b>开了 A2A 之后，MoE 层的 hidden state 不再是"每个 rank 都有全部 token"</b> ——
+  dispatch 把它们按专家搬走了。但 aux hidden state（给 MTP / eagle 式草稿模型当输入的那几层输出）
+  要的是<b>完整序列</b>。于是这里补一次 <code>all_gather(dim=0)</code>，沿 token 维拼回来。</p>
+  <p class="hint">限定条件也写得很清楚：只对 <code>i &gt; self.first_k_dense_replace</code> 的层做
+  （dense 层没有 A2A，token 本来就在），且只在这三种后端下做 ——
+  <code>flashinfer</code> / <code>megamoe</code> / <code>nixl</code> 等<b>不在这个判断里</b>。
+  这是代码的字面事实；为什么这样划界，页面不做推测。</p>
+
+  <h3 class="mini">落点四：边界层的入口 gather</h3>
+  <p><code>attn_tp_gather_input()</code>（<code>ops.py:109</code>）把上一层 reduce-scatter 切小的行拼回来，
+  供 attention 使用。它的触发条件是 stage 声明了 <code>gathers_attn_tp_input</code>，
+  并且当前是 <code>SEQUENCE_PARALLEL</code> / <code>INPUT_SCATTERED</code> 变体之一 ——
+  或者一个环境变量 <code>SGLANG_USE_AG_AFTER_QLORA</code> 被打开（<code>factories.py:699</code>）：</p>
+  <pre><code>gathers = (
+    frozenset({TokenAxis.ATTN_TP})
+    if stage.gathers_attn_tp_input and (sp or scattered or <span class="hl">_use_ag_after_qlora</span>)
+    else frozenset()
+)</code></pre>
+  <p class="hint">这个 env 默认 <code>False</code>（<code>environ.py:1068</code>），
+  且要求模型有 <code>q_lora_rank</code>（<code>glm5_next.py:741</code> 会对没有 <code>q_lora_rank</code> 的配置直接报错）。
+  它的名字指向"低秩投影之后改用 all-gather 而不是 all-reduce"，但本页只引它<b>在上面那一行的效果</b>，
+  不替它解释设计动机。</p>
+
+  <h2 id="a2a"><span class="n">09</span>all2all 在 SGLang：不是一个函数，是一对语义</h2>
+  <p><b>一句话答案</b>：<code>communication_op.py</code> 里<b>没有</b> all2all。
+  它被拆成 <code>dispatch()</code> 和 <code>combine()</code> 两个方法，中间夹着一次本地专家 GEMM；
+  <code>dispatch()</code> 底下换后端，就是换 transport。</p>
+
+  <h3 class="mini">调用点：<code>FusedMoE.forward_impl</code> 的三段式</h3>
+  <pre><code><span class="cm"># layers/moe/fused_moe_triton/layer.py:1578</span>
+def forward_impl(self, hidden_states, topk_output, pre_quant_input=None):
+    origin_hidden_states_dim = hidden_states.shape[-1]
+    ...
+    dispatch_output = self._dispatch_with_pre_quant(hidden_states, topk_output, pre_quant_input)
+    <span class="cm">#   ↑ 第一次 all2all：按路由把 token 搬到专家所在 rank</span>
+
+    combine_input = self.run_moe_core(dispatch_output=dispatch_output)
+    <span class="cm">#   ↑ 本地 GEMM，没有任何跨 rank 通信</span>
+    ...
+    final_hidden_states = self.dispatcher.<span class="hl">combine</span>(combine_input=combine_input)
+    <span class="cm">#   ↑ 第二次 all2all：把结果按原 token 顺序搬回去</span>
+
+    if self.reduce_results and (self.moe_tp_size &gt; 1 or self.moe_ep_size &gt; 1):
+        final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)</code></pre>
+
+  <p>三件事在这段代码里同时可见：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>all2all 是"一对"，不是一次。</b> dispatch 与 combine 必须配对，中间那次 GEMM 是它们存在的理由。
+      这也是它无法塞进 <code>communication_op.py</code> 的原因 —— 那个文件里每个函数都是"张量进、张量出"。</li>
+    <li><b>combine 之后还可能跟着一次 allreduce。</b> <code>if self.reduce_results and …</code> 这一行说明
+      A2A 与 all-reduce 不是<b>互斥</b>关系；是否发生取决于 <code>reduce_results</code> 与
+      <code>moe_tp_size</code> / <code>moe_ep_size</code>。GLM-5.3 把 <code>reduce_results=False</code>
+      传了进来（<code>glm5_next.py:758</code>），所以这一层不会重复收一次和 —— 和归边界层管。</li>
+    <li><b><code>dispatcher</code> 是在构造期就绑定的。</b> <code>create_moe_dispatcher()</code> 在
+      <code>layer.py:568</code> 被调用一次，之后 <code>forward</code> 不再做后端判断。
+      换句话说：换 <code>--moe-a2a-backend</code> 是换模型构造，不是换运行时分支。</li>
+  </ul>
+
+  <h3 class="mini">后端表：12 个取值，落到 4 个 dispatcher</h3>
+  <pre><code><span class="cm"># arg_groups/fields/exec_.py:802  --moe-a2a-backend 的全部取值</span>
+moe_a2a_backend: A[
+    Literal["none", "deepep", "mooncake", "nixl", "mori", "ascend_fuseep",
+            "flashinfer", "megamoe", "deepep_v2", "ascend_tp", "pplx",
+            "flashinfer_megamoe"],
+    Arg(help="Choose the backend for MoE A2A."),
+] = "none"</code></pre>
+
+  <pre><code><span class="cm"># layers/moe/fused_moe_triton/layer.py:168  create_moe_dispatcher()</span>
+a2a_backend = get_moe_a2a_backend()
+if a2a_backend.is_none() and is_npu():
+    return AscendTPDispatcher(moe_runner_config)
+elif (a2a_backend.is_none() or a2a_backend.is_megamoe()
+      or a2a_backend.is_flashinfer_megamoe() or a2a_backend.is_ascend_fuseep()):
+    <span class="cm"># flashinfer_megamoe 把 EP all-to-all 放进 kernel 内部，dispatcher 只是 noop</span>
+    return <span class="hl">StandardDispatcher</span>(moe_runner_config)
+elif (a2a_backend.is_deepep() or a2a_backend.is_mooncake()
+      or a2a_backend.is_mori() or a2a_backend.is_nixl()
+      or a2a_backend.is_pplx()):
+    return <span class="hl">MaybeTboDeepEPDispatcher</span>(
+        group=_get_deepep_comm_group(a2a_backend),
+        router_topk=moe_runner_config.top_k,
+        permute_fusion=True,
+        num_experts=..., num_local_experts=..., hidden_size=...,
+        deepep_mode=get_deepep_mode(), async_finish=True, return_recv_hook=True,
+    )
+elif a2a_backend.is_deepep_v2():  return <span class="hl">DeepEPv2Dispatcher</span>(...)
+elif a2a_backend.is_flashinfer(): return <span class="hl">FlashinferDispatcher</span>(...)
+else: raise NotImplementedError(...)</code></pre>
+
+  <table>
+    <thead><tr><th style="width:250px">--moe-a2a-backend</th><th style="width:210px">dispatcher</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="--moe-a2a-backend">none</td><td data-label="dispatcher"><code>StandardDispatcher</code></td>
+        <td data-label="含义"><b>没有 all2all</b>：MoE 走 TP，层尾一次 all-reduce</td></tr>
+      <tr><td class="k" data-label="--moe-a2a-backend">megamoe / flashinfer_megamoe</td><td data-label="dispatcher"><code>StandardDispatcher</code></td>
+        <td data-label="含义">all2all 被<b>融进 mega kernel</b>，dispatcher 退化为 noop passthrough</td></tr>
+      <tr><td class="k" data-label="--moe-a2a-backend">ascend_fuseep</td><td data-label="dispatcher"><code>StandardDispatcher</code></td>
+        <td data-label="含义">绕过 dispatcher 抽象，走 <code>forward_fuseep</code>（<code>StandardDispatcher</code> 创建但不调用）</td></tr>
+      <tr class="hot"><td class="k" data-label="--moe-a2a-backend">deepep / mooncake / nixl / mori / pplx</td><td data-label="dispatcher"><code>MaybeTboDeepEPDispatcher</code></td>
+        <td data-label="含义">同一套 DeepEP 语义（<code>buffer.dispatch</code> / <code>combine</code>），换 <code>group</code> 与 transport</td></tr>
+      <tr><td class="k" data-label="--moe-a2a-backend">deepep_v2</td><td data-label="dispatcher"><code>DeepEPv2Dispatcher</code></td>
+        <td data-label="含义">v2 接口，多一个 <code>use_fp8_dispatch</code> 与 scale block size</td></tr>
+      <tr><td class="k" data-label="--moe-a2a-backend">flashinfer</td><td data-label="dispatcher"><code>FlashinferDispatcher</code></td>
+        <td data-label="含义">FlashInfer 的 a2a，配 <code>--flashinfer-a2a-dispatch-type</code></td></tr>
+      <tr><td class="k" data-label="--moe-a2a-backend">ascend_tp</td><td data-label="dispatcher"><code>AscendTPDispatcher</code></td>
+        <td data-label="含义">NPU 上 <code>none</code> 的等价物，不是 A2A</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">真实的那一行：DeepEP 的 <code>buffer.dispatch</code></h3>
+  <pre><code><span class="cm"># layers/moe/token_dispatcher/deepep.py:640</span>
+(
+    num_tokens_per_rank, num_tokens_per_rdma_rank,
+    num_tokens_per_expert, is_token_in_rank, previous_event,
+) = buffer.get_dispatch_layout(topk_ids, self.num_experts, ..., async_finish=self.async_finish)
+
+...
+(recv_x, recv_topk_ids, recv_topk_weights,
+ num_recv_tokens_per_expert, self.handle, event) = buffer.<span class="hl">dispatch</span>(
+    x,
+    topk_idx=topk_ids,
+    topk_weights=topk_weights,
+    num_tokens_per_rank=num_tokens_per_rank,
+    num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+    is_token_in_rank=is_token_in_rank,
+    num_tokens_per_expert=num_tokens_per_expert,
+    async_finish=self.async_finish,
+    expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+    config=DeepEPConfig.get_instance().normal_dispatch_config,
+)</code></pre>
+  <p>参数逐个对应第 01 节那张图的右栏：<code>num_tokens_per_rdma_rank</code> 是"发给每个 rank 多少"，
+  <code>is_token_in_rank</code> 是"每个 token 要去哪几个 rank"，<code>num_tokens_per_expert</code>
+  是"每个专家收多少"。<b>三个张量就是 all2all 的发送清单</b> —— 这也解释了为什么它是
+  "变长"的 <code>alltoallv</code> 而不是 <code>all_to_all_single</code>：
+  每个 rank 收到的 token 数不同，缓冲区必须按约定上限预分配，实际用多少由
+  <code>num_recv_tokens_per_expert</code> 决定。</p>
+
+  <h3 class="mini"><code>ep_size</code> 被强制等于 <code>tp_size</code></h3>
+  <pre><code><span class="cm"># arg_groups/overrides.py:1612</span>
+def _a2a_ep_size(view):
+    if view.moe_a2a_backend in _A2A_EP_SPANNING_BACKENDS:
+        if view.ep_size != view.tp_size:
+            logger.info(
+                f"{view.moe_a2a_backend} MoE is enabled. The expert parallel size "
+                f"is adjusted from {view.ep_size} to the tensor parallel size "
+                f"[{view.tp_size}]."
+            )
+        return {"ep_size": view.tp_size}
+    return {}</code></pre>
+  <p>所以"开了 A2A，就不要再谈独立的 <code>--ep-size</code>"这句话是有代码根据的：
+  <code>_A2A_EP_SPANNING_BACKENDS</code> 覆盖了除 <code>none</code> / <code>ascend_tp</code> 之外的全部后端
+  （<code>overrides.py:1579</code>）。你给 <code>--ep-size 4 --tp-size 8 --moe-a2a-backend deepep</code>，
+  启动日志会告诉你 ep 被改成了 8。</p>
+
+  <h3 class="mini">第 5 小节：MoE 之外的那一处 all2all —— TP <code>lm_head</code></h3>
+  <p>这是 SGLang 里唯一一处<b>可以在 allgather 与 all2all 之间二选一</b>的地方，也是理解两者差别的
+  最好样本。</p>
+  <pre><code><span class="cm"># layers/logits_processor.py:1218</span>
+def _tp_lm_head_all_to_all(self, logits: torch.Tensor) -> torch.Tensor:
+    <span class="cm">"""Exchange only the row block owned by each destination DP rank."""</span>
+    logits = logits.contiguous()
+    all_to_all_output = torch.empty_like(logits)
+    get_parallel().tp_group.<span class="hl">all_to_all_single</span>(
+        all_to_all_output.view(-1), logits.view(-1)
+    )
+    return _reassemble_tp_lm_head_all_to_all_output(all_to_all_output)</code></pre>
+  <p>为什么能换？因为两边的输出布局需求不同：</p>
+  <table>
+    <thead><tr><th style="width:150px">做法</th><th>每个 rank 最后拿到</th><th>冗余</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="做法">all-gather</td><td data-label="每个 rank 最后拿到">全部 T 行 × 完整 V（<code>[T, V]</code>）</td>
+        <td data-label="冗余"><b>TP 倍冗余</b>：每个 rank 都存了所有人的 logits</td></tr>
+      <tr><td class="k" data-label="做法">all-to-all</td><td data-label="每个 rank 最后拿到">本 rank 负责的那 1/TP 行 × 完整 V</td>
+        <td data-label="冗余"><b>零冗余</b>：每行只存在一个 rank 上</td></tr>
+    </tbody>
+  </table>
+  <p>触发条件写在 <code>_can_use_tp_lm_head_all_to_all()</code>（<code>logits_processor.py:1179</code>），
+  而<b>默认值由部署形态决定</b>（<code>overrides.py:1405</code>）：</p>
+  <pre><code>enable = (
+    view.disaggregation_mode == "decode"
+    and view.attn_dp_size &gt; 1
+    and view.tp_size == view.attn_dp_size
+    and view.attn_cp_size == 1
+    and not view.enable_dp_lm_head
+)</code></pre>
+  <p>即：<b>PD 分离里的 decode 节点、且是纯 DP attention</b> 时默认开启。
+  函数里还有一个必须满足的布局契约 —— <code>logits.shape[0] == local_rows * tp_size</code>；
+  不满足就退回 all-gather（<code>batches without an equal padded row count fall back to the
+  existing all-gather path</code>）。</p>
+
+  <div class="callout">
+    这一小节直接回答"allgather 和 all2all 到底差在哪"：<b>数学结果不同，代价可以相同</b>。
+    两者都搬 (N−1)/N·n 字节，但 all-gather 之后每个 rank 都持有全量（冗余 N 倍），
+    all-to-all 之后每个 rank 只持有自己那一片（无冗余）。当"全量"是下游所需时（例如 embedding 之后人人要算），
+    冗余是<b>必要成本</b>；当"全量"没人要时（例如 sampling 之后每 rank 只处理自己的行），
+    冗余就是纯粹浪费 —— 这就是这里能换的原因。
+  </div>
+
+  <h2 id="glm"><span class="n">10</span>GLM-5.3 的一条 forward：通信时序</h2>
+  <p><b>先说配置。</b> SGLang 仓库里 GLM-5.3 的官方用例只给了这一份
+  （<code>test/glm53_flash_common.py</code>）：</p>
+  <pre><code>MODEL_PATH = "zai-org/GLM-5.3-Flash"
+
+COMMON_SERVER_ARGS = [
+    "--tp-size", "8",
+    "--dsa-prefill-backend", "tilelang",
+    "--dsa-decode-backend", "tilelang",
+    "--kv-cache-dtype", "bf16",
+    "--moe-runner-backend", "deep_gemm",
+    "--reasoning-parser", "auto",
+    "--tool-call-parser", "auto",
+]</code></pre>
+  <p>三条推论，全部可以从参数本身读出来：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>没有 <code>--moe-a2a-backend</code></b>，所以取默认 <code>none</code> →
+      <code>StandardDispatcher</code> → <b>模型里没有 all2all</b>。</li>
+    <li><b>没有 <code>--ep-size</code></b>，且 <code>none</code> 不在
+      <code>_A2A_EP_SPANNING_BACKENDS</code> 里 → <code>ep_size</code> 保持默认 1 →
+      <b>MoE 走 TP，不是 EP</b>。</li>
+    <li><b>没有 <code>--attn-dp-size</code> / <code>--enable-dp-attention</code></b> →
+      <code>attn_tp_size == tp_size == 8</code>，于是 <code>get_tp_group()</code> 与
+      <code>get_attn_tp_group()</code> 是<b>同一个 group</b>（<code>parallel_state.py:2355</code>
+      的原注释：<i>_TP is deliberately absent: it is _ATTN_TP when attn_tp_size == tp_size</i>）。</li>
+  </ul>
+
+  <h3 class="mini">模型结构：KDA / DSA-MLA 混排 + 稀疏 MoE</h3>
+  <pre><code><span class="cm"># models/glm5_next.py:707 —— 逐层二选一</span>
+self.is_linear_attn = config.is_kda_layer(layer_id)
+if self.is_linear_attn:
+    self.self_attn = Glm5NextLinearAttention(...)                    <span class="cm">KDA 线性注意力</span>
+else:
+    self.self_attn = DeepseekV2AttentionMLA(..., skip_rope=True)     <span class="cm">DSA 稀疏 MLA</span>
+
+<span class="cm"># :750 —— FFN 按 is_layer_sparse 二选一</span>
+self.mlp = Glm5NextMoE(config, ..., reduce_results=False)   <span class="cm">= DeepseekV2MoE 的别名</span>
+self.mlp = Glm5NextMLP(..., reduce_results=False)           <span class="cm">= DeepseekV2MLP 的别名</span></code></pre>
+
+  <p>两个"别名"不是随手起的：<code>glm5_next.py:100-102</code> 直接
+  <code>from sglang.srt.models.deepseek_v2 import DeepseekV2MLP as Glm5NextMLP</code>、
+  <code>DeepseekV2MoE as Glm5NextMoE</code>。<b>GLM-5.3 的 MoE 层与 DeepSeek 系共用同一份实现</b> ——
+  第 09 节讲的那份 <code>FusedMoE</code> 与 dispatcher 原样适用。</p>
+
+  <p><code>is_kda_layer()</code> 的默认策略在 <code>configs/glm5_next.py:198-206</code>：
+  <code>layer_idx % 4 != 3</code> —— 每四层里留第四层给 MLA，其余三层是 KDA。</p>
+
+  <table>
+    <thead><tr><th style="width:150px">项</th><th style="width:200px">值</th><th>依据</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="项">text layers</td><td data-label="值"><b>45</b></td>
+        <td data-label="依据">仓库自带文档 <code>docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx</code>（"Its 45 text layers combine MLA attention, DSA sparse attention, and KDA linear attention"）</td></tr>
+      <tr><td class="k" data-label="项">attention 构成</td><td data-label="值">34 KDA + 11 MLA</td>
+        <td data-label="依据"><code>layer_idx % 4 != 3</code> 在 45 层上的直接结果；<code>layer_types</code> 若存在则以它为准</td></tr>
+      <tr><td class="k" data-label="项">FFN 构成</td><td data-label="值">3 dense + <b>42 MoE</b></td>
+        <td data-label="依据"><code>first_k_dense_replace=3</code>、<code>moe_layer_freq=1</code>（<code>configs/glm5_next.py</code> 默认值）</td></tr>
+      <tr><td class="k" data-label="项">专家</td><td data-label="值"><b>288</b> routed，top-8，1 个 shared</td>
+        <td data-label="依据"><code>n_routed_experts=288</code> / <code>num_experts_per_tok=8</code> / <code>n_shared_experts=1</code>；文档同述"288 routed experts with 8 active experts per token"</td></tr>
+      <tr><td class="k" data-label="项">MLA 形状</td><td data-label="值">q_lora 1536 · kv_lora 512 · qk_nope 256 · v_head 256</td>
+        <td data-label="依据"><code>configs/glm5_next.py</code> 默认值；<code>qk_rope_head_dim=0</code></td></tr>
+      <tr><td class="k" data-label="项">MTP</td><td data-label="值">1 个 draft layer</td>
+        <td data-label="依据"><code>num_nextn_predict_layers=1</code>，且 <code>glm5_next.py:1687</code> 断言它必须为 1</td></tr>
+    </tbody>
+  </table>
+
+  <p class="hint">这张表里 45 与 288 是<b>文档写明的</b>，34/11 与 3/42 是<b>默认配置字段</b>推出来的。
+  真正的 <code>config.json</code> 不在检出里，所以如果它的 <code>layer_types</code> /
+  <code>first_k_dense_replace</code> 与默认值不同，后两行会随之改变。
+  <b>要断定实际层数，读那份 config，不要读代码默认值。</b></p>
+
+  <h3 class="mini">通信清单：一次 text forward 里 <b>91 次 all-reduce + 1 次 all-gather</b></h3>
+  <p>把上面的层数和第 07 节的边界机制合起来，就能数出总数。TP = 8、A2A = none 时：</p>
+
+  <table>
+    <thead><tr><th style="width:164px">阶段</th><th style="width:52px">次数</th><th style="width:96px">原语</th>
+      <th style="width:118px">group</th><th>依据</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="阶段">embedding</td><td class="v" data-label="次数">1</td><td data-label="原语">all-reduce</td><td data-label="group"><code>tp_group</code></td>
+        <td data-label="依据"><code>vocab_parallel_embedding.py:533</code></td></tr>
+      <tr><td class="k" data-label="阶段">attention 出口 ×45</td><td class="v" data-label="次数">45</td><td data-label="原语">all-reduce</td><td data-label="group"><code>attn_tp_group</code></td>
+        <td data-label="依据"><code>prepare.py:163-170</code> 的 <code>attn_tp_all_reduce</code>（attention 的 sum 一律是 partial，延后到下一层入口收）</td></tr>
+      <tr><td class="k" data-label="阶段">MoE 出口 ×42</td><td class="v" data-label="次数">42</td><td data-label="原语">all-reduce</td><td data-label="group"><code>moe_tp_group</code></td>
+        <td data-label="依据"><code>moe/utils.py:878-885</code> 的 <code>moe_tensor_model_parallel_all_reduce</code>；
+          <code>moe_tp_size = tp_size // moe_ep_size // moe_dp_size</code>（<code>runtime_context.py:154</code>），ep = 1 时它等于 <code>tp_group</code></td></tr>
+      <tr><td class="k" data-label="阶段">dense MLP 出口 ×3</td><td class="v" data-label="次数">3</td><td data-label="原语">all-reduce</td><td data-label="group"><code>tp_group</code></td>
+        <td data-label="依据">同 attention 出口的边界路径，<code>SumGroup.TP</code></td></tr>
+      <tr class="hot"><td class="k" data-label="阶段">lm_head logits</td><td class="v" data-label="次数">1</td><td data-label="原语"><b>all-gather</b></td><td data-label="group"><code>tp_group</code></td>
+        <td data-label="依据"><code>logits_processor.py:939</code> → <code>MultimemAllGatherer</code></td></tr>
+      <tr><td class="k" data-label="阶段">MoE dispatch / combine</td><td class="v" data-label="次数">0</td><td data-label="原语">—</td><td data-label="group">—</td>
+        <td data-label="依据"><code>StandardDispatcher</code> 无跨 rank 交换</td></tr>
+      <tr><td class="k" data-label="阶段">DSA indexer</td><td class="v" data-label="次数">0</td><td data-label="原语">—</td><td data-label="group">—</td>
+        <td data-label="依据">只有 opt-in 的 rank-0 top-k 广播，<code>SGLANG_DSA_TOPK_BROADCAST</code> 默认 <code>False</code>（<code>environ.py</code>）</td></tr>
+    </tbody>
+  </table>
+
+  <p>两个值得记住的结论：</p>
+  <ul class="hint" style="font-size:13.8px;color:#3b4860">
+    <li><b>all-reduce 的次数近似等于层数 × 2。</b> 因为每层有两次"欠账"：attention 一次、FFN 一次。
+      45 层里 42 层是 MoE、3 层是 dense，所以是 45 + 42 + 3 = 90。
+      <b>这个数不随 MoE 后端改变</b> —— 换了 A2A，dispatch/combine 是<b>加</b>上去的，那一层的出口求和<em>仍然</em>要有人做。</li>
+    <li><b>只有一处 all-gather，在整条 forward 的最后。</b> 也就是说在 GLM-5.3 的默认配置里，
+      <code>allreduce</code> 是"每层都有"的稠密开销，<code>allgather</code> 是"全流程一次"的收尾开销，
+      <code>all2all</code> 一次都没有。三者的量级差了两个数量级 —— 这就是为什么优化 GLM-5.3
+      的多卡性能，重点是<b>那 90 次 all-reduce</b>，而不是 sampler 那一次 gather。</li>
+  </ul>
+
+  <p class="hint">这两段是<b>按源码调用点计数</b>，不是 trace 实测。真实次数还会被
+  <code>--boundary-reduction</code> 的取值、<code>may_defer_to_next</code> 是否生效、
+  以及空 batch 早退影响，所以把它当上界与量级，而不是常数。</p>
+
+  <h3 class="mini">一个 decoder layer 的通信时序</h3>
+  <div class="seq">
+    <div class="sitem loc">
+      <div class="sh"><b>① 取残差</b><span class="sbadge loc">本地</span></div>
+      <p><code>hidden_states_orig = residual_access.buffer(hidden_states)</code>（<code>glm5_next.py:966</code>）。
+      不发通信，只是留一份干净的残差给后面融合用。</p>
+    </div>
+    <div class="sitem ag">
+      <div class="sh"><b>② attention 入口</b><span class="sbadge ag">all-gather（条件性）</span></div>
+      <p><code>self.attn_boundary.prepare(hidden_states, forward_batch, ...)</code>（<code>:968</code>）。
+      如果上一层的出口把行切成了 1/8（<code>ExitRows.SLICE</code>），这里就要
+      <code>attn_tp_gather_input()</code> → <code>attn_tp_all_gather_into_tensor</code> 拼回整行。
+      纯 TP、无 SP、无 dp-attention 时这一格<b>不触发</b>。</p>
+    </div>
+    <div class="sitem ar">
+      <div class="sh"><b>③ attention 计算</b><span class="sbadge ar">all-reduce 推迟</span></div>
+      <p><code>self.self_attn(...)</code>（<code>:970</code>）。QKV 是 column-parallel，<code>o_proj</code> 是
+      row-parallel 且 <code>reduce_results=False</code> —— <b>算完是 partial，不在这里收</b>。</p>
+    </div>
+    <div class="sitem ar">
+      <div class="sh"><b>④ attention 出口</b><span class="sbadge ar">all-reduce / reduce-scatter</span></div>
+      <p><code>self.attn_boundary.finish(hidden_states, forward_batch)</code>（<code>:984</code>）。
+      attention 的 <code>ProducerReduction</code> 是 <code>ALWAYS_PARTIAL</code>，
+      所以这里的 partial 通常<b>记成欠账</b>交给下一个 stage，真正兑现发生在 FFN 入口的 norm 里。
+      兑现方式由 <code>--boundary-reduction</code> 决定。</p>
+    </div>
+    <div class="sitem loc">
+      <div class="sh"><b>⑤ FFN 入口</b><span class="sbadge loc">norm + 残差</span></div>
+      <p><code>self.ffn_boundary.prepare(hidden_states, forward_batch)</code>（<code>:985</code>）。
+      如果上一步欠了 sum，这里与 <code>post_attention_layernorm</code> 一起做，
+      可以用 <code>tensor_model_parallel_fused_allreduce_rmsnorm()</code> 一次完成。</p>
+    </div>
+    <div class="sitem a2a">
+      <div class="sh"><b>⑥ MoE 层（<code>is_layer_sparse</code>）</b><span class="sbadge a2a">all2all × 2</span>
+      <span class="sbadge loc">仅当 --moe-a2a-backend ≠ none</span></div>
+      <p><code>self.mlp(hidden_states, forward_batch, ...)</code>（<code>:1003</code>）→
+      <code>FusedMoE.forward_impl</code>：<code>dispatch()</code>（→ <code>buffer.dispatch</code>）→
+      本地专家 GEMM → <code>combine()</code>。<b>默认 <code>none</code> 时这两个格子都不存在</b>，
+      此时 MoE 在 TP 上切专家，出口是 partial。</p>
+    </div>
+    <div class="sitem loc">
+      <div class="sh"><b>⑦ dense 层（<code>not is_layer_sparse</code>）</b><span class="sbadge loc">本地 GEMM</span></div>
+      <p><code>Glm5NextMLP(...)</code>：<code>gate_up_proj</code> column-parallel +
+      <code>down_proj</code> row-parallel 且 <code>reduce_results=False</code>，出口同样是 partial。</p>
+    </div>
+    <div class="sitem ar">
+      <div class="sh"><b>⑧ FFN 出口</b><span class="sbadge ar">边界求和</span></div>
+      <p><code>self.ffn_boundary.finish(hidden_states, forward_batch)</code>（<code>:1008</code>）。
+      FFN 的 <code>ProducerReduction</code> 是 <code>EXIT_SCOPED</code> ——
+      由 <code>ExitPolicy</code> 三选一：就地 all-reduce / 留给下一层 / reduce-scatter。
+      <b>GLM-5.3 的 <code>auto</code> 解析结果是 <code>rs+rsv</code></b>（<a href="#boundary">第 07 节</a>）。</p>
+    </div>
+  </div>
+
+  <p>一个 layer 之外还有三处：</p>
+  <div class="seq">
+    <div class="sitem ar">
+      <div class="sh"><b>L0 · embedding</b><span class="sbadge ar">all-reduce</span></div>
+      <p><code>self.embed_tokens(input_ids)</code>（<code>:1136</code>）→
+      <code>VocabParallelEmbedding.forward</code> → <code>tensor_model_parallel_all_reduce</code>。</p>
+    </div>
+    <div class="sitem pp">
+      <div class="sh"><b>L1 · PP 边界</b><span class="sbadge pp">send / recv（不是集合通信）</span></div>
+      <p><code>residual_batch.to_pp(...)</code> / <code>attn_boundary.from_pp(...)</code>（<code>:1142</code>、<code>:1221</code>）。
+      PP 用的是点对点，<b>不产生 allreduce / allgather / all2all</b>。
+      非首 rank 的 <code>embed_tokens</code>、非末 rank 的 <code>lm_head</code> 都被替换成
+      <code>PPMissingLayer</code>（<code>:1284-1296</code>）。</p>
+    </div>
+    <div class="sitem ag">
+      <div class="sh"><b>L2 · 末层 logits</b><span class="sbadge ag">all-gather / all-to-all</span></div>
+      <p><code>self.logits_processor(input_ids, hidden_states, self.lm_head, forward_batch, aux)</code>
+      （<code>:1674</code>）→ <code>MultimemAllGatherer</code> 把 <code>[T, V/8]</code> 拼成 <code>[T, V]</code>；
+      若命中了 <code>enable_tp_lm_head_all_to_all</code> 则改成一次 <code>all_to_all_single</code>。</p>
+    </div>
+  </div>
+
+  <h3 class="mini">开 <code>--moe-a2a-backend deepep</code> 之后，这张图怎么变</h3>
+  <table>
+    <thead><tr><th style="width:150px">环节</th><th>TP8 默认（<code>none</code>）</th>
+      <th>加 <code>--moe-a2a-backend deepep</code></th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="环节">MoE 的通信</td><td data-label="TP8 默认（none）">无 all2all；专家切在 TP 上，层尾一次求和</td>
+        <td data-label="加 --moe-a2a-backend deepep"><b>每层两次 all2all</b>：dispatch + combine</td></tr>
+      <tr><td class="k" data-label="环节"><code>ep_size</code></td><td data-label="TP8 默认（none）">1</td>
+        <td data-label="加 --moe-a2a-backend deepep"><b>被强制改成 8</b>（<code>_a2a_ep_size</code> 的日志会写出来）</td></tr>
+      <tr><td class="k" data-label="环节">层尾求和</td><td data-label="TP8 默认（none）">边界层的 all-reduce / reduce-scatter</td>
+        <td data-label="加 --moe-a2a-backend deepep">同样归边界层；但 MoE 的 <code>reduce_results</code> 已是 False，不会再叠一次</td></tr>
+      <tr><td class="k" data-label="环节">aux hidden state</td><td data-label="TP8 默认（none）">每 rank 已有全部 token，无需 gather</td>
+        <td data-label="加 --moe-a2a-backend deepep"><b>多一次 <code>attn_tp_group.all_gather(dim=0)</code></b>（<code>glm5_next.py:1191</code>）</td></tr>
+      <tr><td class="k" data-label="环节">CUDA graph</td><td data-label="TP8 默认（none）">可捕获</td>
+        <td data-label="加 --moe-a2a-backend deepep">受 A2A 后端限制（DeepEP 的 <code>get_dispatch_layout</code> 带 CPU 侧的 token 计数）</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn">
+    <b>一句话总结这张表：</b>在 GLM-5.3 上，"开 A2A"不是给现有的一条 allreduce 加个更快的内核，
+    而是<b>把一次稠密求和换成一堆变长 dispatch/combine</b>，同时顺手把 <code>ep_size</code> 绑到 <code>tp_size</code>、
+    并在 MTP 的捕获路径上<b>补回一次 allgather</b>。三件事必须一起看。
+  </div>
+
+  <h2 id="parallel"><span class="n">11</span>并行配置速查：哪种并行触发哪条原语</h2>
+  <p>把这页的结论压成一张表。<b>同一个原语可以由完全不同的并行方式触发</b>，
+  所以"GLM-5.3 里 allreduce 有几次"这个问题，必须先问并行配置。</p>
+
+  <table>
+    <thead>
+      <tr><th style="width:132px">并行方式</th><th style="width:120px">触发的原语</th>
+        <th style="width:126px">落在哪个 group</th><th>依据（源码位置）</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="k" data-label="并行方式">TP<br><span class="hint">--tp-size N</span></td>
+        <td data-label="触发的原语">allreduce<br>allgather</td>
+        <td data-label="落在哪个 group"><code>tp_group</code></td>
+        <td data-label="依据（源码位置）">RowParallelLinear / embedding 出口的求和（<code>linear.py:1800</code>）；
+          lm_head 的 logits 拼接（<code>logits_processor.py:939</code>）</td></tr>
+      <tr><td class="k" data-label="并行方式">DP attention<br><span class="hint">--attn-dp-size</span></td>
+        <td data-label="触发的原语">allreduce<br>allgather<br>reduce_scatter</td>
+        <td data-label="落在哪个 group"><code>attn_tp_group</code></td>
+        <td data-label="依据（源码位置）"><code>attn_tp_size = tp_size // attn_cp_size // attn_dp_size</code>
+          （<code>parallel_state.py:2599-2601</code>）；<code>dp_gather()</code> / <code>dp_reduce_scatterv()</code>
+          在 <code>layer_boundary/ops.py:249</code> 起</td></tr>
+      <tr class="hot"><td class="k" data-label="并行方式">EP<br><span class="hint">--moe-a2a-backend</span></td>
+        <td data-label="触发的原语"><b>all2all × 2</b><br>+ 可能的 allreduce</td>
+        <td data-label="落在哪个 group"><code>moe_ep_group</code></td>
+        <td data-label="依据（源码位置）"><code>FusedMoE.forward_impl</code>（<code>layer.py:1578</code>）：
+          <code>dispatch</code> → GEMM → <code>combine</code>；
+          <code>ep_size := tp_size</code>（<code>overrides.py:1612</code>）</td></tr>
+      <tr><td class="k" data-label="并行方式">PP<br><span class="hint">--pp-size N</span></td>
+        <td data-label="触发的原语"><b>无集合通信</b></td>
+        <td data-label="落在哪个 group"><code>pp_group</code></td>
+        <td data-label="依据（源码位置）"><code>residual_batch.to_pp()</code> / <code>attn_boundary.from_pp()</code>
+          （<code>glm5_next.py:1142</code>、<code>:1221</code>）—— 点对点；
+          非首/末 rank 的 embed / lm_head 是 <code>PPMissingLayer</code></td></tr>
+      <tr><td class="k" data-label="并行方式">CP<br><span class="hint">--attn-cp-size</span></td>
+        <td data-label="触发的原语">allgather<br>reduce_scatter</td>
+        <td data-label="落在哪个 group"><code>attn_cp_group</code></td>
+        <td data-label="依据（源码位置）"><code>cp_gather_full_sequence_states</code> / <code>cp_shard_hidden_states</code>
+          （<code>ops.py</code> 的 import 与 <code>cp_gather_in_token_order()</code>）；
+          CP 是 <code>tp_size</code> 的一个因子，不额外占卡</td></tr>
+      <tr><td class="k" data-label="并行方式">SP<br><span class="hint">sequence parallel</span></td>
+        <td data-label="触发的原语">scatter<br>allgather</td>
+        <td data-label="落在哪个 group"><code>tp_group</code></td>
+        <td data-label="依据（源码位置）"><code>BatchVariant.SEQUENCE_PARALLEL</code>（<code>contracts.py:56</code>）；
+          norm 之后行被切开，层尾再拼回</td></tr>
+    </tbody>
+  </table>
+
+  <p class="hint">最后一行值得单独记住：<b>PP 是这张表里唯一不产生集合通信的并行方式</b>。
+  它只做相邻 stage 的点对点发送，所以"PP 为什么不能降低单层延迟"和"PP 为什么不影响通信量"
+  是两个分开的问题 —— 后者成立，前者不成立。</p>
+
+  <h2 id="myths"><span class="n">12</span>常见误解</h2>
+
+  <div class="myth">
+    <p class="wrong">all2all 就是"更通用的 allgather"，因为两者字节数一样的。</p>
+    <p class="right">两者字节数相同（都是 (N−1)/N·n），<b>语义完全不同</b>。</p>
+    <p class="why">allgather 之后每个 rank 都持有全量、且内容一致，产物可以在 rank 之间互换；
+    all2all 之后每个 rank 持有的是输入矩阵的一列，<b>互换就是错的</b>。
+    第 09 节第 5 小节那处 <code>_tp_lm_head_all_to_all</code> 能换来换去，是因为那里
+    <b>下游只需要自己那一片</b>，不是因为两者等价。</p>
+  </div>
+
+  <div class="myth">
+    <p class="wrong">既然 allreduce = reduce_scatter + allgather，那拆开肯定更快。</p>
+    <p class="right">拆开<b>不会</b>降低总线字节数 —— 两段加起来正好等于一次 ring allreduce。</p>
+    <p class="why">收益只能来自别的地方：中间那一步只有 n/N 的行，norm 与残差可以做在更小的张量上；
+    这一段可以和下一层的计算重叠；还能被融合进一个 kernel。
+    <code>--boundary-reduction</code> 的 help 里写的是 <i>ar uses all-reduce then token redistribution</i>
+    —— "token redistribution"就是拆开之后必须补的那笔开销，说明拆开是有代价的。</p>
+  </div>
+
+  <div class="myth">
+    <p class="wrong">开了 EP / A2A 之后，MoE 层就没有 allreduce 了。</p>
+    <p class="right">要看 <code>reduce_results</code> 与 <code>moe_tp_size</code> / <code>moe_ep_size</code>。</p>
+    <p class="why"><code>layer.py:1612</code> 那一行是
+    <code>if self.reduce_results and (self.moe_tp_size &gt; 1 or self.moe_ep_size &gt; 1):</code> ——
+    条件成立时 combine 之后<b>仍然会有一次</b> <code>tensor_model_parallel_all_reduce</code>。
+    GLM-5.3 之所以没有，是因为它在构造时传了 <code>reduce_results=False</code>（<code>glm5_next.py:758</code>），
+    把这次求和交给了边界层，不是因为它开了 A2A。</p>
+  </div>
+
+  <div class="myth">
+    <p class="wrong">给了 <code>--ep-size 8</code> 之后 MoE 走专家并行，那 42 次 MoE 的 allreduce 就没了。</p>
+    <p class="right">次数<b>不变</b>，变的只是它落在哪个 group、叫什么名字。</p>
+    <p class="why"><code>moe_tp_size = tp_size // moe_ep_size // moe_dp_size</code>
+    （<code>runtime_context.py:154</code>）。<code>--ep-size 8</code> 把它从 8 变成 1，于是
+    <code>moe/utils.py:878-885</code> 的两个分支对调：<code>reduce_ep</code> 为真走
+    <code>moe_expert_parallel_all_reduce</code>，<code>reduce_tp</code> 为假不再走
+    <code>moe_tensor_model_parallel_all_reduce</code> —— <b>还是一层一次</b>。
+    真要消掉它，只能开 A2A 后端，让求和并进 dispatch/combine；代价是每层多出两次变长 all2all。</p>
+  </div>
+
+  <div class="myth">
+    <p class="wrong"><code>--boundary-reduction</code> 对 GLM-5.3 解析成 <code>rs+rsv</code>，
+      所以它的层尾根本不是 allreduce，是 reduce-scatter。</p>
+    <p class="right">解析成 <code>rs+rsv</code> 只是<b>允许</b> reduce-scatter；走不走还要看布局。</p>
+    <p class="why"><code>_select_exit_move()</code> 在 <code>produced.layout == residual</code> 时直接
+    返回 <code>ExitMove(keep_output)</code>（<code>boundary.py:724-726</code>）。纯 TP8、行没被切开时
+    条件成立，求和因此<b>延后到下一层入口，以 all-reduce 兑现</b>（<code>prepare.py:163-170</code>）。
+    reduce-scatter 只在行真的被切开（SP / <code>INPUT_SCATTERED</code>）时才启动。
+    "<b>配置允许</b>"和"<b>这次请求走了</b>"是两件事。</p>
+  </div>
+
+  <h2 id="quiz"><span class="n">13</span>自测</h2>
+
+  <details class="q">
+    <summary>N = 8 的 TP 组上，一次 <code>all_reduce</code> 搬多少字节？换成
+      <code>reduce_scatter</code> + <code>all_gather</code> 呢？</summary>
+    <p class="a">两者都是 <span class="v">2·(N−1)/N·n = 1.75n</span>。
+    <code>all_reduce</code> 一次搬 1.75n；拆开是 0.875n + 0.875n。
+    <b>总额一样</b>，差别在于中间那一步只有 n/8 的数据量可以做别的事。</p>
+  </details>
+
+  <details class="q">
+    <summary>为什么 <code>VocabParallelEmbedding</code> 用 all_reduce，而 <code>lm_head</code> 之后的 logits 用 all_gather？</summary>
+    <p class="a">因为输出布局不同。embedding 的输出是 <code>[T, H]</code>，hidden 维没切，
+    每个 rank 算出来的是"只有自己词表分片那几行非零"的 <b>partial</b> —— 求和即真值。
+    logits 是 <code>[T, V/P]</code>，V 维被切了，每列都是独立值 —— 只能<b>拼接</b>。
+    同一份词表并行布局，两个出口、两个原语。</p>
+  </details>
+
+  <details class="q">
+    <summary>在 GLM-5.3 的默认 H200 配方里，MoE 层会不会出现 all2all？为什么？</summary>
+    <p class="a">不会。配方只给了 <code>--tp-size 8</code>，<code>--moe-a2a-backend</code> 取默认
+    <code>none</code>，<code>create_moe_dispatcher()</code> 于是返回 <code>StandardDispatcher</code> ——
+    它的 dispatch / combine 不做跨 rank 交换，MoE 在 TP 上切专家。
+    要出现 all2all，必须显式给 <code>--moe-a2a-backend deepep</code> 之类的值。</p>
+  </details>
+
+  <details class="q">
+    <summary>为什么开了 A2A 之后，<code>capture_output()</code> 里反而多了一次 all_gather？</summary>
+    <p class="a">因为 A2A 把 token 按专家搬散了，MoE 层输出时每个 rank 不再持有完整序列；
+    而 aux hidden state 要喂给草稿模型，必须��完整序列。
+    所以 <code>glm5_next.py:1191</code> 在 <code>enable_a2a_moe and i &gt; first_k_dense_replace</code>
+    时补一次 <code>attn_tp_group.all_gather(..., dim=0)</code>，沿 token 维拼回来。
+    ——<b>这是"置换"与"复制"两种语义在同一份 forward 里同时出现的实例。</b></p>
+  </details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/dflash-pp-adaptation/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</b></span></a><a class="sm-pn-a sm-next" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html"><span class="sm-more-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html"><span class="sm-more-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-more-m">9 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html"><span class="sm-more-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-more-m">12 分钟<i aria-hidden="true"></i>2026-09-20</span></a><a class="sm-more-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><span class="sm-more-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-15</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p><b>源码基准</b>：<code>sgl-project/sglang</code> <b>main@16eb87c</b>（2026-10-20）的本地检出。
+      本页每一条符号、行号与代码片段都按该 commit 的文件原文核对过。同一仓库的
+      <code>v0.5.21</code>（<code>e00930c</code>，2026-09-29）里
+      <code>communication_op.py</code>、<code>token_dispatcher/deepep.py</code>、<code>models/glm5_next.py</code>
+      均存在，但 <code>test/glm53_flash_common.py</code> 尚不存在 ——
+      引用配方时请以 main 为准。</p>
+
+    <p><b>读过的文件</b>：<code>distributed/communication_op.py</code>、
+      <code>distributed/parallel_state.py</code>（<code>GroupCoordinator</code> 与
+      <code>initialize_model_parallel</code> 的 docstring）、
+      <code>layers/layer_boundary/</code>（<code>contracts.py</code>、<code>ops.py</code>、<code>stage.py</code>、
+      <code>boundary.py</code>、<code>factories.py</code>）、
+      <code>layers/linear.py</code>、<code>layers/vocab_parallel_embedding.py</code>、
+      <code>layers/logits_processor.py</code>、
+      <code>layers/moe/fused_moe_triton/layer.py</code>、
+      <code>layers/moe/token_dispatcher/base.py</code>、<code>…/deepep.py</code>、
+      <code>distributed/device_communicators/vocab_gather.py</code>、<code>…/triton_symm_mem_ag.py</code>、
+      <code>models/glm5_next.py</code>、<code>configs/glm5_next.py</code>、
+      <code>arg_groups/fields/exec_.py</code>、<code>arg_groups/fields/parallel.py</code>、
+      <code>arg_groups/overrides.py</code>、<code>arg_groups/boundary_reduction.py</code>、
+      <code>arg_groups/moe_hook.py</code>、<code>runtime_context.py</code>、<code>layers/moe/utils.py</code>、
+      <code>layers/layer_boundary/prepare.py</code>、<code>environ.py</code>、
+      <code>test/glm53_flash_common.py</code>、
+      <code>docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx</code>。</p>
+
+    <p><b>没有做的事</b>：本页<b>没有跑运行时实测</b>。所有字节公式
+      （2·(N−1)/N·n 等）是集合通信的代数结果，不是测出来的；
+      GLM-5.3 的层数（45）与专家数（288）取自仓库自带文档页，<b>不是</b>取自
+      <code>config.json</code> —— 那份文件不在检出里。34 KDA / 11 MLA、3 dense / 42 MoE
+      是由 <code>configs/glm5_next.py</code> 的默认字段推出来的，
+      若实际 checkpoint 的 <code>layer_types</code> 或 <code>first_k_dense_replace</code> 不同，
+      第 10 节那张通信清单的系数要跟着改。
+      同理，<code>91 次 all-reduce</code> 是<b>按调用点计数</b>，不是 trace 计数。
+      <code>--boundary-reduction</code> 在 GLM-5.3 上解析为 <code>rs+rsv</code> 是从
+      <code>boundary_reduction.py</code> 的白名单逻辑推出来的路径结论，不是实测的 kernel trace ——
+      要确认某次请求真的走了 reduce-scatter，需要用 profiler 看 <code>ncclReduceScatter</code>
+      是否出现。</p>
+
+    <p class="lic">内容 CC BY 4.0 ·
+      <a href="../../index.html">返回 show-me 知识库</a> ·
+      <a href="../../index.html#comm-parallel">同类条目</a></p>
+  </footer>
+
+</div>
+</body>
+</html>

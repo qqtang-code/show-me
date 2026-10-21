@@ -1,0 +1,21 @@
+{
+  "title": "三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward",
+  "slug": "a2a-ar-ag-sglang",
+  "category": "comm-parallel",
+  "date": "2026-10-21",
+  "tags": ["SGLang", "集合通信", "all2all", "allreduce", "allgather", "GLM-5.3", "TP / EP", "源码走读"],
+  "one_liner": "先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码：allreduce 有 6 级后端优先级、all2all 根本不在 communication_op 里而是一对 dispatch/combine 语义、GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "sources": [
+    "SGLang 公开主分支 main@16eb87c（2026-10-20）本地检出：distributed/communication_op.py、distributed/parallel_state.py、layers/layer_boundary/*（contracts/ops/stage/boundary/prepare/factories）、layers/linear.py、layers/vocab_parallel_embedding.py、layers/logits_processor.py、layers/moe/fused_moe_triton/layer.py、layers/moe/token_dispatcher/{base,deepep}.py、layers/moe/utils.py、distributed/device_communicators/{vocab_gather,triton_symm_mem_ag}.py、models/glm5_next.py、configs/glm5_next.py、runtime_context.py、environ.py",
+    "参数解析与默认值：arg_groups/fields/exec_.py、arg_groups/fields/parallel.py、arg_groups/overrides.py、arg_groups/boundary_reduction.py、arg_groups/moe_hook.py",
+    "GLM-5.3 部署配方：python/sglang/test/glm53_flash_common.py",
+    "模型规格（45 层、288 专家、MLA+DSA+KDA 混合）：docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx",
+    "字节公式（2·(N−1)/N·n 等）为集合通信的代数结果，非实测"
+  ],
+  "visibility": "public",
+  "redactions": [],
+  "enriched": "2026-10-21"
+}
