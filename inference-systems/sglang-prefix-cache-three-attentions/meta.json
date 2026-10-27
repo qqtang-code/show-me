@@ -1,0 +1,22 @@
+{
+  "title": "SGLang prefix cache 的三类注意力：Linear · SWA · Sparse",
+  "slug": "sglang-prefix-cache-three-attentions",
+  "category": "inference-systems",
+  "date": "2026-10-27",
+  "tags": ["SGLang", "prefix cache", "Unified Radix Cache", "线性注意力", "KDA", "滑动窗口注意力", "DSA 稀疏注意力", "tombstone", "GLM5"],
+  "one_liner": "同一棵 radix 树上，线性注意力、滑动窗口、稀疏注意力各自缓存什么、怎么判定命中、怎么更新、在什么场景下会失效：MAMBA 存一个 slot id（O(1)/序列）、SWA 的复用是尾窗全有或全无（5000-token 前缀在 L<4999 时复用 0）、稀疏注意力缓存的是 indexer K 而不是 top-k 模式。附 GLM5 系列模型的完整推理路径。",
+  "artifact": "index.html",
+  "extra_files": ["notes.md"],
+  "session_ref": "",
+  "sources": [
+    "SGLang 源码（commit 16eb87c0，含 Unified Radix Cache）：mem_cache/unified_cache/{unified_tree_core.py, unified_radix_cache.py, components/{base,full,swa,mamba}.py}",
+    "SGLang 源码：mem_cache/{memory_pool.py, swa_memory_pool.py, index_key_cache.py, registry.py, common.py, base_prefix_cache.py, radix_cache.py, hicache_storage.py}",
+    "SGLang 源码：managers/{scheduler.py, schedule_policy.py, schedule_batch.py, batch_result_processor.py}、model_executor/model_runner.py",
+    "SGLang 源码：layers/attention/{dsa/, hybrid_linear_attn_backend.py, index_topk_share.py}、configs/glm5_next.py、models/glm5_next.py",
+    "SGLang 单元测试：test/registered/unit/mem_cache/test_rust_tree_core_integration.py（SWA 短前缀 0 复用的行为断言）",
+    "数值结论（如 5000-token 前缀的复用阈值 T）由源码中的阈值公式推导，非运行时实测"
+  ],
+  "visibility": "public",
+  "redactions": ["本地 checkout 的绝对路径（正文只保留仓库相对路径）", "会话标识"],
+  "enriched": "2026-10-27"
+}

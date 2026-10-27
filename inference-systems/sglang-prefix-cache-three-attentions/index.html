@@ -1,0 +1,1530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</title><!-- show-me:shell:begin -->
+<meta name="description" content="同一棵 radix 树上，线性注意力、滑动窗口、稀疏注意力各自缓存什么、怎么判定命中、怎么更新、在什么场景下会失效：MAMBA 存一个 slot id（O(1)/序列）、SWA 的复用是尾窗全有或全无（5000-token 前缀在 L&lt;4999 时复用 0）、稀疏注意力缓存的是 indexer K 而不是 top-k 模式。附 GLM5 系列模型的完整推理路径。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="SGLang prefix cache 的三类注意力：Linear · SWA · Sparse">
+<meta property="og:description" content="同一棵 radix 树上，线性注意力、滑动窗口、稀疏注意力各自缓存什么、怎么判定命中、怎么更新、在什么场景下会失效：MAMBA 存一个 slot id（O(1)/序列）、SWA 的复用是尾窗全有或全无（5000-token 前缀在 L&lt;4999 时复用 0）、稀疏注意力缓存的是 indexer K 而不是 top-k 模式。附 GLM5 系列模型的完整推理路径。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/inference-systems/sglang-prefix-cache-three-attentions/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/inference-systems/sglang-prefix-cache-three-attentions/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  /* ============ 全站共用设计变量（三篇保持一致） ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  @media (max-width:640px){ code{overflow-wrap:anywhere} }
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+    .pciegroup{flex-wrap:wrap;min-width:0}
+    .prow .lbl{min-width:0;flex:1 0 100%}
+    .node{font-size:11.5px;padding:5px 9px}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none;float:none}
+  }
+
+  /* ---------- 流程图组件 ---------- */
+  .flow{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .flow .step{display:grid;grid-template-columns:26px minmax(0,1fr);gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52;min-width:0;overflow-wrap:anywhere}
+  .flow .step .t b{color:var(--ink)}
+  .flow .step .t .sub2{display:block;color:var(--dim);font-size:13px;margin-top:3px;overflow-wrap:anywhere}
+  .flow .step .t .where{font:11.5px var(--mono);color:var(--dim2);margin-top:4px;display:block;overflow-wrap:anywhere}
+
+  .topo{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px;margin:16px 0}
+  .prow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+  .prow .lbl{font:11.5px var(--mono);color:var(--dim2);min-width:104px}
+  .node{border:1px solid #cfd8e8;background:#f7f9ff;border-radius:8px;padding:6px 11px;
+        font:12px var(--mono);color:#1b2740;flex:none}
+  .node.hot{background:#e8eefb;border-color:#b9cdf0;font-weight:600}
+  .node.gpu{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .arrowdown{text-align:center;color:var(--dim2);font-size:14px;margin:2px 0}
+  .pciegroup{display:flex;gap:6px;padding:8px;border:1px dashed #c9d6ea;border-radius:10px;background:#fbfcff}
+
+  .stack{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .band{display:flex;gap:3px;margin:10px 0}
+  .band div{height:38px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+            font:11px var(--mono);color:#0b1220;overflow:hidden}
+  .band .dense{background:linear-gradient(180deg,#bcd0f0,#dbe7fb);flex:3}
+  .band .moe{background:linear-gradient(180deg,#8fd8c4,#c6efe3);flex:75}
+  .band .mtp{background:linear-gradient(180deg,#f3c168,#fbe0ab);flex:1}
+  /* 3 / 75 / 1 是等比条：两侧太窄放不下字，标签一律交给下方图例 */
+  .bandlegend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--dim);margin:12px 0 0}
+  .bandlegend span{display:inline-flex;align-items:center;gap:6px}
+  .bandlegend i{width:11px;height:11px;border-radius:3px;flex:none;border:1px solid var(--line)}
+  .layerzoom{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+  @media (max-width:700px){.layerzoom{grid-template-columns:1fr}}
+  .box{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px}
+  .box h5{margin:0 0 6px;font:600 12.5px var(--mono);color:#1b2740;letter-spacing:.03em}
+  .box ul{margin:0;padding-left:16px;font-size:13px;color:#3b4860}
+  .box li{margin:3px 0}
+
+  .dsa{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+  @media (max-width:700px){.dsa{grid-template-columns:1fr}}
+  .keys{display:flex;flex-wrap:wrap;gap:3px;margin:8px 0}
+  .keys i{width:11px;height:11px;border-radius:3px;background:#e2e8f4;display:block}
+  .keys i.sel{background:#1d4ed8}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:8px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+
+  .lanes3{display:grid;grid-template-columns:1fr;gap:10px;margin:16px 0}
+  .lane3{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 14px}
+  .lane3 .hd{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between}
+  .lane3 .hd .t{font:600 13px var(--mono);color:#1b2740}
+  .lane3 .hd .n{font:12.5px var(--mono);color:var(--dim)}
+  .bytes{display:flex;height:22px;border-radius:5px;overflow:hidden;margin:9px 0 4px;border:1px solid var(--line)}
+  .bytes i{display:block;height:100%}
+  .bytes .b1{background:#f0a184} .bytes .b2{background:#f5c99b} .bytes .b3{background:#a8ecc4}
+  .bytes .b4{background:#cfe3fb} .bytes .b5{background:#e6ecf8}
+
+  .spec{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .specrow{display:flex;gap:4px;align-items:center;margin:8px 0}
+  .specrow .s{flex:1;height:30px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+              font:11.5px var(--mono);color:#0b1220;border:1px solid #00000010}
+  .specrow .draft{background:#dbe7fb}
+  .specrow .verify{background:#a8ecc4}
+  .specrow .acc{background:#8fd8c4}
+  .specrow .rej{background:#f6d5cd;color:#8a3a1c}
+
+  .buckets{display:flex;gap:5px;align-items:flex-end;height:70px;margin:10px 0}
+  .buckets div{flex:1;background:linear-gradient(180deg,#7db3f0,#cfe3fb);border-radius:4px 4px 0 0;
+               position:relative}
+  .buckets div span{position:absolute;bottom:-19px;left:0;right:0;text-align:center;font:10.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 计算器 ---------- */
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:180px 1fr 104px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr 1fr;gap:6px 10px}
+    .calc .ctl label{grid-column:1/-1}.calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent)}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff;color:var(--fg)}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,1fr)}
+  .calc .row.g3{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:1fr}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:18px/1.35 var(--mono);font-weight:600;color:var(--ink)}
+  .calc .cell .v.good{color:var(--good)} .calc .cell .v.warn{color:var(--waste)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .upd{font-size:12.5px;color:var(--dim);margin-top:14px}
+  .verdictbox{margin-top:14px;border-radius:10px;padding:11px 14px;font-size:13.5px;border:1px solid}
+  .verdictbox.ok{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .verdictbox.no{background:#fff4ec;border-color:#f0d9c8;color:#9a4d06}
+
+  /* ---------- 误区 / 自测 / 链接 ---------- */
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:11px 14px;font-size:13.5px;color:#4a3a1c;margin:16px 0}
+
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+
+<style>
+  /* ============ 本页新增组件 ============ */
+  .f{font:11px var(--mono);color:var(--dim2);margin:-4px 0 12px;display:block}
+  .f b{color:var(--accent);font-weight:600}
+  .axis{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0;
+        overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .axis .cap{font:600 11.5px var(--mono);letter-spacing:.05em;color:var(--dim2);text-transform:uppercase;margin:0 0 4px}
+  .axis .row{margin:14px 0 0}
+  .axis .row:first-of-type{margin-top:8px}
+  .axis .cap code{font-size:.9em}
+  .track{display:flex;height:26px;border-radius:6px;overflow:hidden;border:1px solid var(--line);min-width:280px}
+  .track i{display:block;height:100%}
+  .tk-live{background:var(--accent)}
+  .tk-dead{background:repeating-linear-gradient(45deg,#dfe5f0,#dfe5f0 4px,#f1f4fa 4px,#f1f4fa 9px)}
+  .tk-idx{background:#8fd8c4}
+  .tk-none{background:#eef2f9}
+  .scale{display:flex;justify-content:space-between;gap:8px;font:10.5px var(--mono);color:var(--dim2);min-width:280px;margin-top:4px}
+  .scale2{position:relative;height:16px;min-width:280px;margin-top:4px;font:10.5px var(--mono);color:var(--dim2)}
+  .scale2 span{position:absolute;top:0;white-space:nowrap}
+  .legend2{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--dim);margin:14px 0 0}
+  .legend2 span{display:inline-flex;align-items:center;gap:6px}
+  .legend2 i{width:12px;height:10px;border-radius:3px;display:inline-block;border:1px solid #00000012}
+  .nodecard{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:14px 16px;margin:16px 0}
+  .nodecard .hdr{font:600 12px var(--mono);color:var(--accent);letter-spacing:.04em;margin:0 0 10px}
+  .slotgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  @media (max-width:700px){.slotgrid{grid-template-columns:minmax(0,1fr)}}
+  .slot{border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 13px;min-width:0}
+  .slot .t{font:600 12px var(--mono);color:#1b2740;display:block;margin-bottom:5px}
+  .slot .v{font:11.5px/1.6 var(--mono);color:#12489c;display:block;overflow-wrap:anywhere}
+  .slot .n{font-size:12px;color:var(--dim);display:block;margin-top:6px}
+  .two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:16px 0}
+  @media (max-width:760px){.two{grid-template-columns:minmax(0,1fr)}}
+  .pane{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 14px;min-width:0}
+  .pane h5{margin:0 0 7px;font:600 12.5px var(--mono);color:#1b2740}
+  .pane ul{margin:0;padding-left:16px;font-size:13px;color:#3b4860}
+  .pane li{margin:4px 0}
+  .pane code{font-size:.9em}
+  .tagline{display:inline-block;font:11px var(--mono);border-radius:999px;padding:2px 8px;margin-left:6px;
+           border:1px solid var(--accent-line);background:#eef3fe;color:var(--accent)}
+  .tagline.warn{border-color:#f0d9c8;background:#fff4ec;color:#9a4d06}
+  .tagline.dead{border-color:#e6ebf3;background:#f4f7fc;color:var(--dim2)}
+  .clock{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}
+  @media (max-width:700px){.clock{grid-template-columns:minmax(0,1fr)}}
+  .clock .c{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;min-width:0}
+  .clock .c .k{font:600 11px var(--mono);letter-spacing:.05em;color:var(--dim2);text-transform:uppercase}
+  .clock .c .v{font:13.5px/1.6 var(--mono);color:var(--ink);margin-top:5px;display:block;overflow-wrap:anywhere}
+
+  /* 移动端：本页表格单元里是成段的中文说明，右对齐会读到断行错位。
+     改成「标签独占一行 + 值左对齐」，仍是卡片式，但按段落读。 */
+  @media (max-width:600px){
+    td[data-label]{text-align:left}
+    td[data-label]::before{float:none;display:block;max-width:100%;padding:0 0 3px;
+                           font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+  }
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">32 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-27</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 9 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/deepinfer-vs-sglang/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-rail-m">43 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>inference-systems<span class="sep">/</span>sglang-prefix-cache-three-attentions
+  </div>
+  <h1>SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</h1>
+  <p class="sub">同一棵 radix 树上，线性注意力、滑动窗口、稀疏注意力各自缓存什么、怎么判定命中、怎么更新、在什么场景下会失效</p>
+  <div class="metarow">
+    <span>2026-10-27</span><span>SGLang</span><span>prefix cache</span><span>Unified Radix Cache</span>
+    <span>线性注意力 / KDA</span><span>Sliding Window</span><span>DSA 稀疏注意力</span><span>GLM5</span>
+  </div>
+
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#base">共同底座</a>
+    <a href="#node">节点与组件</a>
+    <a href="#match">匹配判定</a>
+    <a href="#linear">Linear</a>
+    <a href="#swa">SWA</a>
+    <a href="#slice">一条序列的切面</a>
+    <a href="#sparse">Sparse</a>
+    <a href="#diff">三类区别</a>
+    <a href="#glm">GLM5 的路径</a>
+    <a href="#myth">常见误解</a>
+    <a href="#quiz">自测</a>
+  </nav>
+
+  <div class="note">
+    <b>术语约定。</b>本页保留源码里的英文标识：<code>ComponentType</code>（<code>FULL</code> / <code>SWA</code> / <code>MAMBA</code>）、
+    <code>component_data</code>、<code>match_prefix</code>、<code>tombstone</code>、<code>branching_seqlen</code>、
+    <code>checkpoint</code>、<code>paged</code>、<code>indexer</code>、<code>top-k</code>。函数名、字段名、flag 名一律原样，
+    便于直接拿去 grep。中文只承担叙述，不承担命名。
+  </div>
+
+  <div class="note" style="background:#f7f9ff;border-left-color:var(--accent);color:#33415c">
+    <b>源码基线。</b>所有行号来自一份 SGLang checkout（commit <code>16eb87c0</code>，已含 Unified Radix Cache）。
+    路径相对仓库根，例如 <code>python/sglang/srt/mem_cache/unified_cache/components/swa.py:365</code>。
+    本页由读源码产出，<b>未做运行时实测</b>；带数字的结论都给了推导所依据的那几行。
+  </div>
+
+  <div class="tldr" id="tldr">
+    <h4>速览 —— 五条结论</h4>
+    <ul>
+      <li><b>不是三套缓存，是同一棵树上的三类组件。</b><code>UnifiedTreeNode</code> 每个节点带一份
+        <code>component_data[ct]</code>，<code>ct ∈ {FULL, SWA, MAMBA}</code>。线性注意力落在 <code>MAMBA</code>；
+        滑动窗口是 <code>SWA</code>；<b>稀疏注意力没有组件身份</b>，它的 indexer K 寄生在 <code>FULL</code> 的同一批 token slot 上。</li>
+      <li><b>同一个 <code>.value</code> 字段，三种粒度。</b><code>FULL</code>/<code>SWA</code> 存 per-token 的池索引（<code>len(value)</code> 就是覆盖的 token 数）；
+        <code>MAMBA</code> 存 <b>一个 slot id</b>（<code>len(value)==1</code>），因为状态里根本没有 token 轴。</li>
+      <li><b>命中是「合取」。</b><code>_all_valid(validators, node)</code> 要所有组件同时通过，边界才前进。
+        但 Full 命中长度 <code>full_kv_hit_length</code> <b>独立于校验器先行累加</b>，所以「KV 命中、辅助组件没命中」不会浪费，
+        而是变成 <code>branching_seqlen</code> 交回调度器。</li>
+      <li><b>SWA 的复用是尾窗「全有或全无」。</b>一条已解码过的 5000-token 缓存序列，查询前缀长度
+        <code>L &lt; 4999</code> 时<b>可复用 0 个 token</b>，只有 <code>L ≥ 4999</code> 才能拿到完整的 <code>L</code>。
+        不是「复用最后 128 个」，而是「凑不满一窗就一个都不复用」。</li>
+      <li><b>稀疏注意力缓存的是 indexer K，不是 top-k 模式。</b>模式每步用当前 query 重算，
+        因此「上下文不同 / 前缀长度不同 / 稀疏配置不同」在结构上都不可能让旧模式失效 —— 它从没被留下来。</li>
+    </ul>
+  </div>
+
+  <h2 id="base"><span class="n">01</span>共同底座：一棵树，三类组件</h2>
+  <p class="lead">先看三者共用的那部分。三类机制之所以能放在一起讲，是因为 SGLang 把「注意力怎么算」和「缓存怎么管」拆开了：
+  缓存层只承诺一件事 —— 每个节点身上挂着一份 <code>ComponentData</code>，谁挂了什么、挂多长，由各自的组件定义。</p>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t"><b>UnifiedRadixCache</b> —— controller
+      <span class="sub2">实现 <code>BasePrefixCache</code>。做所有 pool / host I/O，并把树发出的延迟动作（<code>CacheAction</code> /
+      <code>ComponentAction</code>）排空。设计口号是「<b>tree decides, cache executes</b>」：树只按逻辑 key 做决定，
+      物理资源的分配、释放、copy-on-write 全部由 controller 执行。</span>
+      <span class="where">python/sglang/srt/mem_cache/unified_radix_cache.py:603 match_prefix · :1121 checkpoint</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t"><b>UnifiedTreeCore</b> —— 树本体
+      <span class="sub2">持有 <code>root_node</code>、<code>{ComponentType → TreeComponent}</code>、<code>{ComponentType → UnifiedLRUList}</code>，
+      以及每个组件各自的 evictable / protected 尺寸计数。<b>主树对组件零特殊处理</b>，全部通过 hook 接口。</span>
+      <span class="where">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:416</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t"><b>TreeComponent</b> —— 每类注意力一个
+      <span class="sub2"><code>FullComponent</code> / <code>SWAComponent</code> / <code>MambaComponent</code>，各自实现
+      match validator、insert overlap、commit、split、evict、lock 六组 hook。加一类缓存类型只加一个组件。</span>
+      <span class="where">python/sglang/srt/mem_cache/unified_cache/components/{full,swa,mamba}.py · base.py:418 TreeComponent ABC</span></div></div>
+  </div>
+
+  <p>哪些组件被注册是<b>按模型</b>决定的，在 <code>registry.py</code> 里写成三行：</p>
+
+<pre><code># python/sglang/srt/mem_cache/registry.py:165-169
+tree_components = [ComponentType.FULL]
+if ctx.is_hybrid_swa:
+    tree_components.append(ComponentType.SWA)
+if ctx.is_hybrid_ssm:
+    tree_components.append(ComponentType.MAMBA)
+params.tree_components = tuple(tree_components)</code></pre>
+
+  <p>于是三类机制的关系可以一句话说清：<b>Linear Attention 是「要不要加 MAMBA」，SWA 是「要不要加 SWA」，
+  而 Sparse Attention 根本不进这个列表</b> —— 它没有组件身份，详见 <a href="#sparse">05</a>。</p>
+
+  <h3 class="mini" id="node">节点的形状</h3>
+  <p>一个 <code>UnifiedTreeNode</code> 是普通 radix 节点，多了一列按枚举下标索引的组件槽：</p>
+
+<pre><code># python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:112-128（节选）
+class UnifiedTreeNode:
+    def __init__(self, tree_components, priority=0):
+        self.children = {}
+        self.parent = None
+        self.key: Optional[RadixKey] = None
+        self.component_types = tree_components
+        # list indexed by ComponentType (int enum 0..N-1)
+        self.component_data: list[ComponentData] = [
+            ComponentData() for _ in range(_NUM_COMPONENT_TYPES)
+        ]
+        self.last_access_time = get_and_increase_time_counter()
+        self.hash_value = None
+        self.hit_count = 0
+        self.lru_prev = [None] * (_NUM_COMPONENT_TYPES * 2)   # device / host 各一条链表
+        self.lru_next = [None] * (_NUM_COMPONENT_TYPES * 2)</code></pre>
+
+  <div class="nodecard">
+    <div class="hdr">component_data[ct] —— 同一个字段，三种含义</div>
+    <div class="slotgrid">
+      <div class="slot"><span class="t">FULL</span>
+        <span class="v">value: Tensor[int64]<br>len(value) = 覆盖的 token 数</span>
+        <span class="n">指向主 KV 池的 per-token slot 索引。稀疏层的 indexer K 也用这批 loc 寻址。</span></div>
+      <div class="slot"><span class="t">SWA</span>
+        <span class="v">value: Tensor[int64]<br>len(value) = 窗口内的 token 数</span>
+        <span class="n">指向 <b>另一个</b> SWA 池的索引（需翻译表）。<code>value=None</code> 而节点保留 = tombstone。</span></div>
+      <div class="slot"><span class="t">MAMBA</span>
+        <span class="v">value: Tensor，shape (1)<br>len(value) == 1</span>
+        <span class="n">一个 slot id。卷积状态与 recurrent 状态都不在 KV 池里，挂在这个 id 上。</span></div>
+    </div>
+  </div>
+
+<pre><code># python/sglang/srt/mem_cache/unified_cache/components/base.py:69-77
+@dataclasses.dataclass
+class ComponentData:
+    value: Optional[torch.Tensor] = None      # 设备侧池索引；None = tombstone
+    lock_ref: int = 0                          # 活跃请求的引用计数
+    metadata: dict[str, Any] = field(default_factory=dict)   # 组件私有状态（SWA 的窗口锁 uuid 在此）
+    host_value: Optional[torch.Tensor] = None # HiCache 备份到 host 的副本
+    host_lock_ref: int = 0
+    session_ref: int = 0
+    session_ids: Optional[set[str]] = None</code></pre>
+  <span class="f"><b>ComponentType</b> 是 <code>int</code> 枚举，好让 per-node 的 list 直接下标访问：
+  <code>FULL=0 · SWA=1 · MAMBA=2 · C128=3 · AUXILIARY_SWA=4</code>（unified_cache/component_type.py）。</span>
+
+  <h3 class="mini">key 里有什么，没有什么</h3>
+  <p><code>RadixKey</code> 只描述「这段 token 是谁」：</p>
+
+<pre><code># python/sglang/srt/mem_cache/radix_cache.py:59-81
+class RadixKey:
+    __slots__ = ("token_ids", "extra_key", "cache_salt", "is_bigram", "limit")
+    # token ids 序列（bigram 模式下 length = max(0, len(token_ids) - 1)）
+    # extra_key / cache_salt：命名空间，同时进树、进 L3 存储、进 KV 事件
+    # limit：等价于 token_ids[:limit]，不复制</code></pre>
+
+  <p>要点：<b>key 里没有注意力配置</b>。没有 <code>sliding_window_size</code>，没有 <code>index_topk</code>，没有稀疏模式。
+  这条事实后面会直接决定稀疏注意力那条路径为什么「不会失效」。粒度由 <code>page_size</code> 决定，
+  匹配长度一律 <code>page_aligned</code>（<code>radix_cache.py:139-143</code>）。
+  比较本身是「指数搜索 + 二分」而不是逐 token Python 循环，长共享前缀不会退化成 O(n) 次解释器循环
+  （<code>radix_cache.py:186-210</code> <code>match_at()</code>）。</p>
+
+  <h3 class="mini" id="match">命中判定：合取 + 两个独立进度</h3>
+  <p>这是三类机制共用、也是最容易被读漏的一段。走查从 root 向下，每个节点过一遍所有组件的校验器：</p>
+
+<pre><code># python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:932-970（重排为逻辑序）
+def _all_valid(validators, node):
+    return all([v(node) for v in validators])       # ← 合取：所有组件都点头
+
+def _update_best_if_valid(node):
+    if _all_valid(validators, node):
+        best_match_node = node                      # ← 边界只在这里前进
+
+while key_offset &lt; len(key) and child_key in node.children:
+    child = node.children[child_key]
+    if child.evicted and not child.backuped:
+        break                                       # ← FULL 缺失：整条匹配直接断
+    prefix_len = child.key.match_at(key, key_offset, page_size=self.page_size)
+    full_kv_hit_length += prefix_len                # ← 先累加，早于任何校验器
+    if prefix_len &lt; len(child.key):
+        node, action = self._split_node(child.key, child, prefix_len)
+        _update_best_if_valid(node); break
+    node = child
+    _update_best_if_valid(node)
+    key_offset += prefix_len</code></pre>
+
+  <div class="two">
+    <div class="pane"><h5>两个进度必须分开看</h5>
+      <ul>
+        <li><code>best_match_node</code> —— 最后一个「所有组件都通过」的节点，<b>决定辅助组件复用到哪</b>（LRU 提升、加锁、COW 源）。</li>
+        <li><code>full_kv_hit_length</code> —— 纯 token 比较的进度，<b>不受校验器影响</b>，可以比 <code>best_match_node</code> 更深。</li>
+        <li><code>device_prefix_len</code> 由前者派生（<code>unified_tree_core.py:1041</code>），是调度器实际采用的 token 数。</li>
+      </ul></div>
+    <div class="pane"><h5>于是总有 <code>full_kv_hit_length ≥ device_prefix_len</code></h5>
+      <ul>
+        <li>差额不能被静默吞掉，否则每次都会白白重算一段长前缀。</li>
+        <li>两个辅助组件把它包装成<b>建议</b>：SWA 出 <code>swa_branching_seqlen</code>，
+            MAMBA 出 <code>mamba_branching_seqlen</code>——「这里本来可以命中，但我没有状态」。</li>
+        <li>下游据此在<b>本次</b>前向里补一个快照点，供后来的兄弟分支用。</li>
+      </ul></div>
+  </div>
+
+  <table>
+    <thead><tr><th>MatchResult 字段</th><th>谁写</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td class="k">device_prefix_len</td><td>tree core :1041</td><td>可复用的设备侧 token 数（= <code>best_match_node</code> 的深度）</td></tr>
+      <tr><td class="k">full_kv_hit_length</td><td>tree core :958</td><td>纯 token 比较的命中长度，可深于上一项</td></tr>
+      <tr><td class="k">swa_host_hit_length</td><td>SWA :397-416</td><td>窗口内命中落在 host、需 load-back 的 token 数</td></tr>
+      <tr><td class="k">swa_branching_seqlen</td><td>SWA :387-395</td><td>Full 命中超出 SWA 覆盖时的 page 对齐分支点</td></tr>
+      <tr><td class="k">mamba_branching_seqlen</td><td>MAMBA :171-192</td><td>同上，但按 <code>mamba_checkpoint_grid</code> 对齐</td></tr>
+    </tbody>
+  </table>
+  <span class="f">定义见 python/sglang/srt/mem_cache/base_prefix_cache.py:269-317。</span>
+
+  <h3 class="mini">两件共用的事：锁与逐出优先级</h3>
+  <p>组件不只定义「匹配」，还定义「谁不能被我挤出内存」和「我先死还是你先死」。这两条是三类机制差异最锐利的地方，
+  后面每节都会回到这张表：</p>
+
+  <div class="clock">
+    <div class="c"><div class="k">加锁策略</div><span class="v">FULL：路径锁<br>root → node 逐个 lock_ref++</span></div>
+    <div class="c"><div class="k">&nbsp;</div><span class="v">SWA：窗口锁<br>只到窗口边界，末尾盖 uuid</span></div>
+    <div class="c"><div class="k">&nbsp;</div><span class="v">MAMBA：单点锁<br>只动 best_match_node 一个节点</span></div>
+  </div>
+  <span class="f">unified_tree_core.py:715 inc_lock_ref → 逐组件 acquire_component_lock；SWA 见 swa.py:848-935，MAMBA 见 mamba.py:446-472。</span>
+
+<pre><code># 级联逐出优先级（internal 节点；leaf 节点一律 0，逐出即整叶删除）
+# components/base.py:548-571
+#   FULL  = 2   ← 最后死
+#   SWA   = 1
+#   MAMBA = 0   ← 最先死，且不触发级联
+# 逐出某组件时，同一节点上 priority ≤ 它的组件一起走（unified_tree_core.py:2056 _cascade_evict）</code></pre>
+
+  <h2 id="linear"><span class="n">02</span>Linear Attention：一个 checkpoint = 一个节点的状态</h2>
+  <p class="lead">线性注意力（Gated DeltaNet、Kimi Delta Attention / KDA、Mamba2）把整条历史折进一个固定大小的循环状态里，
+  于是缓存的对象不再是「每个 token 一份 KV」，而是「某些位置上的<b>整条状态</b>」。这一句话决定了后面所有细节。</p>
+
+  <p><b>先归并：所有线性注意力家族都收敛到同一个组件。</b>Qwen3-Next 的 GDN、Kimi-Linear 的 KDA、<code>glm5_next</code> 的
+  <code>Glm5NextLinearAttention</code>、nemotron_h、gigachat35、bailing_hybrid 全部走
+  <code>uses_ssm_state()</code> → <code>registry.py:166-169</code> → <code>ComponentType.MAMBA</code>。
+  不同家族之间只差状态<b>形状参数</b>（<code>KimiLinearStateShape</code> vs <code>Mamba2StateShape</code>：卷积轴
+  <code>(K-1, dim)</code> 还是 <code>(dim, K-1)</code>、是否 per-K gate），<b>缓存层一行都不用改</b>。</p>
+
+  <h3 class="mini">2.1 存什么：一个 slot id，加上它指向的两块状态</h3>
+  <p>状态<b>不在 KV 池里</b>。<code>MambaComponent.__init__</code> 断言池子的类型，它挂的是 <code>HybridReqToTokenPool</code>：</p>
+
+<pre><code># python/sglang/srt/mem_cache/memory_pool.py:720-751（节选）
+conv_state = [
+    torch.zeros(size=(num_mamba_layers, size + 1) + conv_shape,
+                dtype=conv_dtype, device=device)
+    for conv_shape in conv_state_shape
+]
+temporal_state = torch.zeros(
+    size=(num_mamba_layers, size + 1) + temporal_state_shape,
+    dtype=ssm_dtype, device=device,
+)</code></pre>
+
+  <table>
+    <thead><tr><th>张量</th><th>形状</th><th>是什么</th></tr></thead>
+    <tbody>
+      <tr><td class="k">conv</td><td class="v">[L, size+1, dim, K-1]</td>
+        <td>短卷积（深度可分离）的滑动窗口状态。<code>K</code> 是卷积核宽度，KDA/GDN 把它放在另一个轴上（<code>conv_window_axis</code>）。</td></tr>
+      <tr><td class="k">temporal</td><td class="v">[L, size+1, H, d_v, d_k]</td>
+        <td>recurrent / SSM 状态本身，history 的全部压缩。</td></tr>
+      <tr><td class="k">slot 0</td><td class="v">保留</td><td>padding token 的写入目标，从没被分配给请求。</td></tr>
+      <tr><td class="k">MambaCheckpointPool</td><td class="v">int8 + per-(head,k) scale</td><td>可选的 radix 侧副本池，让树持有的状态不占用请求活跃池的精度/容量。</td></tr>
+    </tbody>
+  </table>
+
+  <p>一个请求在 <code>req.kv.mamba_pool_idx</code> 上持有<b>一个元素</b>（shape <code>(1)</code>）。
+  <code>mamba_cache_per_req</code> 的公式里<b>没有长度项</b> —— 4 个 token 的前缀和 400k token 的前缀，各占一个 slot。
+  这是本节最关键的一句话：<b>状态成本是 O(1)/序列，而树的成本是 O(#节点)</b>。</p>
+
+  <p>树上存的就是这个 id：<code>component_data[MAMBA].value</code> 是 shape <code>(1)</code> 的张量。
+  所以尺寸账目记的是<b>「几个状态」而不是「几个 token」</b>：<code>mamba.py:237-239</code> 做
+  <code>component_evictable_size_[ct] += len(params.mamba_value)</code>，而 <code>len(...)==1</code>；
+  <code>EvictParams.mamba_num</code> 因此是 slot 数（<code>base_prefix_cache.py:158</code>）。</p>
+
+  <h3 class="mini">2.2 复用判定：条件就是「这个节点有没有状态」，但合法边界只有网格点</h3>
+  <p>校验器短到可以直接整段贴出来 —— <b>没有任何长度运算</b>：</p>
+
+<pre><code># python/sglang/srt/mem_cache/unified_cache/components/mamba.py:149-160（完整函数）
+def create_match_validator(self, match_device_only: bool = False):
+    ct = self.component_type
+    if match_device_only:
+        return lambda node: node.component_data[ct].value is not None
+    # HiCache: evicted + backuped (host_value present) is also a valid match
+    return lambda node: (
+        node.component_data[ct].value is not None
+        or node.component_data[ct].host_value is not None
+    )</code></pre>
+
+  <p>对比一下 <a href="#swa">SWA 的校验器</a>：那边要累加窗口长度，这边什么也不算。
+  因为<b>「这个节点有状态」在构造上就等于「这个深度是合法状态边界」</b>，靠三条约束维持：</p>
+
+  <div class="flow">
+    <div class="step"><div class="i">a</div><div class="t">insert 的 key 被截断到状态的 seqlen
+      <span class="sub2"><code>prepare_for_caching_req</code> 返回 <code>mamba_last_track_seqlen</code>，
+      <code>checkpoint_into_tree</code> 对组件返回值取 <code>min()</code> 作为有效发布长度。于是「节点深度」与「状态加密的 seqlen」
+      是同一个数，不是碰巧相等。</span>
+      <span class="where">unified_radix_cache.py:1152-1161 · mamba.py:585-663</span></div></div>
+    <div class="step"><div class="i">b</div><div class="t">发布深度必须落在网格上
+      <span class="sub2"><code>mamba_checkpoint_grid = lcm(mamba_cache_chunk_size(), page_size)</code>。
+      不够长的 chunk 干脆不产生快照（启动时会给 warning）。</span>
+      <span class="where">mamba.py:80-84 · runtime_context.py:1938-1951 · mamba_hook.py:140-146</span></div></div>
+    <div class="step"><div class="i">c</div><div class="t">kernel 只在 chunk 对齐的位置 materialize
+      <span class="sub2">后端的 docstring 写得很直白：对齐的 seqlen 缓存 <code>last_recurrent_state</code>，
+      不对齐的只保留「最后一个 chunk 边界处的中间 <code>h</code>」。</span>
+      <span class="where">layers/attention/hybrid_linear_attn_backend.py:445-449</span></div></div>
+  </div>
+  <span class="f">另有一条硬约束：关掉 extra buffer 时 <code>page_size</code> 必须是 1
+  （<code>mamba.py:75-78</code> 与 <code>arg_groups/mamba_hook.py:157-158</code>）—— 一个 page 永远不能跨过一个状态边界。</span>
+
+  <p><b>两个方向都被显式命名了。</b>一个方向是「状态比 key 走得远」，另一个是「key 比状态走得远」：</p>
+
+  <div class="two">
+    <div class="pane"><h5>mamba_last_track_seqlen —— 往回截</h5>
+      <ul>
+        <li>完整跑完后，最新状态可能<b>超出</b>要发布的 key 长度。</li>
+        <li>此时回退到 ping-pong 的<b>另一个</b> slot：它一定存着张量，只有 <code>mamba_prev_track_seqlen</code>
+            能说明它对应哪个长度。</li>
+        <li>两个都超了就返回 <code>None</code>，即「什么都不捐」（docstring：<code>None means donate nothing</code>）。</li>
+      </ul></div>
+    <div class="pane"><h5>mamba_branching_seqlen —— 往前补</h5>
+      <ul>
+        <li>Full KV 命中得比任何状态都深 ⇒ 那个位置<b>本来可以</b>有状态。</li>
+        <li>取 <code>full_kv_hit_length</code> 内最后一个网格对齐点，作为「分支点」交回调度器。</li>
+        <li>它的语义是<b>「请你在这里补一个快照」</b>，不是「你可以复用到这里」。<br>
+            <code>schedule_batch.py:3210-3225</code> 据此设 <code>mamba_track_seqlen</code>。</li>
+      </ul></div>
+  </div>
+
+  <h3 class="mini">2.3 缓存更新：ping-pong、捐或拷、COW</h3>
+  <p>状态是<b>原地被覆盖</b>的，这和 append-only 的 KV 有本质区别。所以「更新」分三段看：</p>
+
+<pre><code># ① decode：状态在 ping-pong 两个 slot 之间轮转，只在 track 间隔上换
+#    batch_result_processor.py:1394-1396
+mamba_prev_track_seqlen = mamba_last_track_seqlen
+mamba_last_track_seqlen = kv_committed_len - lookahead
+#    :1634  _mamba_check_track_boundary  → committed_len % mamba_track_grid == 0
+#    :1559  mamba_next_track_idx = get_mamba_ping_pong_other_idx(track_idx)
+
+# ② 请求结束 → donate（捐掉 slot，不拷）；请求未完（chunk 化）→ fork（copy_from 一份）
+#    mamba.py:609-662
+insert_params.mamba_value = mamba_value_donated    # 捐
+...  insert_params.mamba_value = mamba_value_donated  # 或拷贝后的新 slot（fork）
+
+# ③ 别的请求命中 → COW
+#    mamba.py:194-223  finalize_match_result_in_cache
+req.kv.mamba_pool_idx = dst_index[0]
+req.kv.mamba_cow_src_index = src_index            # 只记录，不立刻搬
+req.kv.mamba_needs_clear = False</code></pre>
+
+  <p>第 ③ 步值得单独说：<b>COW 是「记录 + 在前向流上执行」</b>，不是命中时就 memcpy。
+  <code>model_runner.py:1912-1957</code> 的 <code>_maybe_execute_deferred_mamba_cow_and_clear</code>
+  在 extend 阶段把 <code>mamba_cow_src_index → mamba_pool_idx</code> 搬一次，必要时先 <code>clear_slots</code>。
+  这样命中路径上没有同步拷贝，也不会把 COW 的开销算到调度头上。</p>
+
+  <div class="clock">
+    <div class="c"><div class="k">插入重叠时</div><span class="v">什么都不消耗<br><code>update_component_on_insert_overlap</code> 未覆写</span></div>
+    <div class="c"><div class="k">插入落到已有节点</div><span class="v">树保留自己的状态<br><code>result.mamba_exist = True</code>，捐来的释放掉</span></div>
+    <div class="c"><div class="k">节点分裂时</div><span class="v">父节点拿 <code>None</code><br>状态留在子节点（深度没变）</span></div>
+  </div>
+  <span class="f">mamba.py:225-251 commit_insert_component_data 的三种结局 · mamba.py:311-321 redistribute_on_node_split。
+  注意：README 与代码注释都写「mamba = leaf-only data」，但 <code>commit_insert_component_data</code> 对任何 insert 尾节点都会挂状态、
+  <code>_evict_excess_path_states</code> 还会沿 <b>祖先</b> 找状态持有者 —— 准确说法是「状态属于<b>深度命名它</b>的那个节点」，不是「只能在叶子上」。</span>
+
+  <p>逐出方向上，MAMBA 是三者中最「便宜」的：<code>eviction_priority</code> 内部节点为 <b>0</b>、且<b>不触发级联</b>。
+  理由写在 ABC 的 docstring 里（<code>base.py:548-571</code>）：Mamba 数据在<b>匹配边界节点</b>上才有意义，
+  在内部节点上对路径没有贡献。所以逐出做法是打 tombstone、保留节点结构与 Full KV。
+  另外 <code>--mamba-max-states-per-path</code>（默认 <code>-1</code> 不限）会沿尾节点的祖先剪掉「浅层的、线性的」多余状态，
+  但保留尾节点、分叉点、被锁的和 device 叶子 —— 注释自己说这是 <b>best-effort soft limit</b>。</p>
+
+  <h3 class="mini">2.4 场景差异</h3>
+  <table>
+    <thead><tr><th>场景</th><th>发生什么</th><th>锚点</th></tr></thead>
+    <tbody>
+      <tr><td class="k">完全相同前缀</td><td>只触达 <code>best_match_node</code> 一个节点的状态；请求拿到自己的 COW slot + <code>mamba_cow_src_index</code></td><td>mamba.py:125-147, 194-223</td></tr>
+      <tr><td class="k">部分重叠</td><td>复用停在<b>最深的带状态节点</b>，可能远浅于 Full 命中；更深的部分重算，并给出 <code>mamba_branching_seqlen</code> 让本次前向补快照</td><td>mamba.py:171-192</td></tr>
+      <tr><td class="k">从共享前缀分叉</td><td>状态是<b>按节点</b>的，两个兄弟就是两个状态，树不需要 per-path 副本；soft cap 保留分叉、丢掉线性中间态</td><td>base.py:556-565 · mamba.py:296-299</td></tr>
+      <tr><td class="k">并发共享一个前缀</td><td>每个请求各 COW 进私有 slot：N 个并发 = N 个活跃 slot + 树里 1 个。因为状态会被原地改写，这是唯一正确做法</td><td>mamba.py:207-221 · memory_pool.py:1724</td></tr>
+      <tr><td class="k">chunk 化 prefill</td><td>chunk 边界不是状态边界：未完成的 insert 走 <b>fork</b>，随后 <code>mamba_last_track_seqlen</code>/<code>prev</code> 归 <code>None</code>，下一块再次从自己的 slot fork</td><td>mamba.py:646-662 · :703-708</td></tr>
+      <tr><td class="k">chunk 小于网格</td><td>mask 为假 → <b>完全不产生快照</b>，这一段不被发布。启动期会显式 warning</td><td>schedule_batch.py:3196-3198</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <b>为什么线性注意力的「命中长度」不能等于 token 数。</b>
+    <ol style="margin:8px 0 0;padding-left:20px">
+      <li>状态<b>没有 token 轴</b>（<code>temporal [L, size+1, H, d_v, d_k]</code>），取不出任何一个子区间。</li>
+      <li>状态是<b>一个 slot id</b>，不是一段 span；<code>len(value)==1</code> 就是逐出账目记的 1。</li>
+      <li>decode <b>原地改写</b>状态，共享必须 COW；KV 是 append-only，天然可只读共享。</li>
+    </ol>
+    所以「这个请求能省掉多少 token」和「它从哪个节点的状态起步」是两个不同的数，组件把两个都保留：
+    <code>device_prefix_len</code> 与 <code>best_match_node</code>。
+  </div>
+
+  <h2 id="swa"><span class="n">03</span>Sliding Window Attention：窗口之外全是 tombstone</h2>
+  <p class="lead">SWA 层只读最近 <code>W</code> 个 token 的 KV，于是 SWA 池只保留这 <code>W</code> 个。
+  但树是按 token 前缀组织的，前缀比窗口长得多 —— 两者的落差就是 SGLang 这里全部复杂度的来源：
+  <b>节点还在，值被清空</b>。这个状态叫 tombstone。</p>
+
+  <p><b>先分清三条实现路径</b>，它们的复用语义完全不同，混着读必然读错：</p>
+
+  <table>
+    <thead><tr><th>路径</th><th>判定条件</th><th>缓存实现</th></tr></thead>
+    <tbody>
+      <tr><td class="k">hybrid full+SWA</td><td><code>is_hybrid_swa and full_tokens_per_layer &gt; 0</code></td>
+        <td><code>UnifiedRadixCache</code> + <code>SWAComponent</code> + tombstone 机制（本节主体）</td></tr>
+      <tr><td class="k">pure SWA</td><td><code>is_pure_swa = is_hybrid_swa and full_tokens_per_layer == 0</code></td>
+        <td><code>PureSWARadixCache</code>，<b>没有 SWA 组件、没有 tombstone</b></td></tr>
+      <tr><td class="k">per-request ring</td><td><code>is_swa_req_ring(allocator)</code> 或 <code>kv_pool.request_window is not None</code></td>
+        <td>SWA 归请求自己的 ring，树里 <code>swa_gates_prefix_match=False</code>，SWA 不参与 gate</td></tr>
+    </tbody>
+  </table>
+  <span class="f">registry.py:84 · pure_swa_radix_cache.py:14-21 · kv_cache_builder.py:341-347。下文若无特别说明，均指 hybrid 路径。</span>
+
+  <h3 class="mini">3.1 存什么：两个池、一张翻译表、一个窗口锁标记</h3>
+  <p><code>SWAKVPool</code> <b>不是一个池切两半</b>，是两个独立池加一张翻译表：</p>
+
+<pre><code># python/sglang/srt/mem_cache/swa_memory_pool.py:96-107
+self.full_kv_pool = full_kv_pool_class(
+    size=size, dtype=dtype, layer_num=self.full_layer_nums, **full_kv_pool_kwargs)
+self.swa_kv_pool = swa_kv_pool_class(
+    size=size_swa, dtype=dtype, layer_num=self.swa_layer_nums, **swa_kv_pool_kwargs)</code></pre>
+
+  <table>
+    <thead><tr><th>对象</th><th>内容</th><th>尺寸来源</th></tr></thead>
+    <tbody>
+      <tr><td class="k">full_kv_pool</td><td>是 full-attention 层的 KV，逐 token</td><td><code>size</code>（就是全模型那份 <code>max_total_num_tokens</code>）</td></tr>
+      <tr><td class="k">swa_kv_pool</td><td>SWA 层的 KV，<b>也逐 token，但池小得多</b></td><td><code>size_swa = full_tokens × swa_full_tokens_ratio</code></td></tr>
+      <tr><td class="k">full_to_swa_index_mapping</td><td>一张与 full 池<b>等长</b>的 int64 表，末尾一个 <code>-1</code> 哨兵；未映射 = 0 = padding</td><td>allocator/swa.py:108-119</td></tr>
+      <tr><td class="k">layers_mapping</td><td><code>global_layer_id → (子池内下标, is_swa_layer)</code></td><td>swa_memory_pool.py:122-127</td></tr>
+    </tbody>
+  </table>
+  <span class="f"><code>swa_full_tokens_ratio</code> 默认 <code>0.8</code>，且 help 明确写着「<b>按 token 数打折，与 swa:full 层数无关</b>」
+  （arg_groups/fields/schedule.py:156）；DeepSeek-V4 / Inkling 的 override 把它设成 <code>0.1</code>。
+  所以 <code>ComponentData[SWA].value</code> 里的索引<b>必须先翻译</b>才能拿去 <code>swa_kv_pool</code> 取值 ——
+  这是它和 <code>FULL</code> 在数据层面最实际的区别。</span>
+
+  <p><b>tombstone 是这一节的中心概念。</b>逐出 SWA 数据时不清节点：<code>evict_component</code> 把
+  <code>cd.value</code> 收进 free list 然后置 <code>None</code>。节点是否继续存在，<b>只由 FULL 决定</b>
+  （<code>_iteratively_delete_tombstone_leaf</code>）。所以你会看到一种结构：<b>路径完整、Full KV 齐全、SWA 值缺失</b>。</p>
+
+  <p>窗口锁需要知道「锁到哪一段为止」。做法不是记录长度，而是<b>在边界节点上盖一个 uuid</b>：
+  存在 <code>metadata["uuid"]</code> / <code>metadata["host_uuid"]</code> 里（注意：<code>components/README.md</code>
+  把它叫 <code>component_uuid</code>，代码里的键名是 <code>"uuid"</code>），值来自 <code>next_component_uuid()</code>
+  （<code>base.py:168-170</code>），在覆盖长度首次达到 <code>W</code> 的那个节点上打（<code>swa.py:876-883</code>），
+  节点分裂时迁移给新的父节点（<code>swa.py:673-682</code>），释放时走查据此停下（<code>swa.py:930-932</code>）。</p>
+
+  <h3 class="mini">3.2 复用判定：凑不满一窗，一个 token 都不复用</h3>
+
+<pre><code># python/sglang/srt/mem_cache/unified_cache/components/swa.py:365-375（完整校验器）
+def validator(node: UnifiedTreeNode) -> bool:
+    cd = node.component_data[ct]
+    # HiCache: a host-only tombstone is a valid match boundary too
+    # — load_back will restore SWA from host before use.
+    if cd.value is None and (match_device_only or cd.host_value is None):
+        state["len"] = 0
+        if not gates_prefix_match and (node.backuped or not node.evicted):
+            return True
+        return False
+    state["len"] += len(node.key)
+    return state["len"] >= sliding_window_size</code></pre>
+
+  <ul>
+    <li><b><code>state</code> 每次 match 新建</b>，所以累加量贯穿整条 root→leaf 走查，<b>只在遇到 tombstone 时归零</b>。</li>
+    <li><b>累加的是 <code>len(node.key)</code>，不是 <code>len(cd.value)</code>。</b>一个覆盖 5000 token 的节点，
+        它的 SWA 值可能只有最后 129 个位置，但校验器按节点的 5000 计。这是「Full 全命中 + SWA 只有尾窗」能同时成立的原因。</li>
+    <li><b>短前缀必然 miss。</b>累计量 <code>&lt; W</code> 时返回 <code>False</code>，<code>best_match_node</code> 不前进；
+        走查本身不会停，但边界没动 = <b>0 复用</b>。</li>
+    <li><b>ring / request-window 模式是反向的</b>：<code>gates_prefix_match=False</code> 时 tombstone 直接判 <code>True</code>，
+        因为 SWA 由请求自己的 ring 重建，让它 gate 只会误伤 Full 命中。</li>
+  </ul>
+
+  <p>判据可以写成一行：设 <code>B</code> = 该边界上溯最近的 device tombstone 的右端点（即连续 live 段的起点），
+  则<b>边界 <code>L</code> 合法 ⟺ <code>L − B ≥ W</code></b>。直觉是：位置 <code>L</code> 处的 SWA 层要读
+  <code>[L−W, L)</code>，这段里只要有一节被 tombstone 过，增量 prefill 就无法只算尾部。</p>
+
+  <p>单测把这条钉死了 —— <code>window=8</code>、插入 12 token、SWA 游标 8，去 match 前 8 个 token：</p>
+
+<pre><code># test/registered/unit/mem_cache/test_rust_tree_core_integration.py:3743-3746
+matched = cache.match_prefix(MatchPrefixParams(key=_key(list(range(8)))))
+assert matched.full_kv_hit_length == 8
+assert cache.path_device_indices(matched.last_device_node).tolist() == (
+    indices[:8].tolist() if ring else []
+)</code></pre>
+  <span class="f">分页 SWA（<code>ring=False</code>）时 <code>last_device_node</code> 停在 root（<code>== []</code>）——
+  <b>Full 明明命中 8 个 token，复用的是 0</b>；只有 ring 模式才 8 个全中。</span>
+
+  <p>SWA 还额外产出两个 <code>MatchResult</code> 字段：<code>swa_host_hit_length</code>（窗口内命中在 host 上、需 load-back 的数量）
+  与 <code>swa_branching_seqlen</code>（Full 命中超出 SWA 覆盖时，page 对齐的分支点）。
+  注意 <b>SWA 不覆写 <code>finalize_match_result_in_cache</code></b>，所以 <code>device_prefix_len</code> 不会被 cache 层二次裁剪
+  —— 上面那个「0」就是最终值。</p>
+
+  <h3 class="mini">3.3 缓存更新：滑窗推进游标，insert 时在游标处把节点切开</h3>
+
+<pre><code># 每次 forward 前（alloc_for_extend / alloc_for_decode 都会调）batch.maybe_evict_swa()
+# python/sglang/srt/mem_cache/common.py:111-120
+else:
+    # Prefix-sharing cache: keep max(window, page) rounded up to whole pages, so
+    # a key that ends at page_floor(pre_len) still has a full window of live SWA,
+    # and the last leaf, below page_floor(seq_len), is never all-tombstone.
+    evict_threshold = pre_len - ceil_align(
+        max(sliding_window_size, page_size), page_size
+    )</code></pre>
+
+  <p>这个阈值是<b>整个机制的枢轴</b>：它一边决定释放哪些 slot，一边决定 insert 时把节点切在哪里。
+  记 <code>Wp = ceil_align(max(W, P), P)</code>，稳态游标就是 <code>B = pre_len − Wp</code>。
+  insert 时 <code>_clip_to_window</code> 先断言游标是 page 对齐的，再在 <code>window_start</code> 处切节点：</p>
+
+<pre><code># python/sglang/srt/mem_cache/unified_cache/components/swa.py:434-447
+def _clip_to_window(self, *, node, start, end, window_start, cache_actions):
+    if node.component_data[self.component_type].value is not None:
+        return None                       # 已有值：不用管
+    assert window_start % self.tree_core.page_size == 0, ...
+    live_start = max(start, window_start)
+    if live_start >= end:
+        return None                       # 整段都在窗口外
+    if live_start > start:
+        _, action = self.tree_core._split_node(node.key, node, live_start - start)
+    return live_start</code></pre>
+
+  <p>切完是「<b>父 tombstone、子 live</b>」的组合。新叶子还会被 <code>_maybe_split_leaf_for_swa_lock</code>
+  再切一次，把叶子上的 SWA 值<b>上限压到一个 page 对齐窗口</b>，然后经 <code>SWARebuild</code> 这个延迟动作由 controller 真正重建。</p>
+
+  <p><b>tombstone 不是永久的。</b>一个更短的请求从同一段 token 上 insert 时，
+  <code>update_component_on_insert_overlap</code> 会尝试恢复它，分三种结局：</p>
+
+  <table>
+    <thead><tr><th>分支</th><th>条件</th><th>动作</th></tr></thead>
+    <tbody>
+      <tr><td class="k">全恢复</td><td>整段落在窗口内</td>
+        <td><code>consumed_from = 0</code>：树的 Full 值<b>直接被换成新请求的 KV 索引</b>
+            （<code>full_cd.value = incoming_full.clone()</code>），旧值 <code>FreeDeviceKVFullOnly</code> 释放，
+            再 <code>SWARebuild</code> 从 Full 重建 SWA 数据</td></tr>
+      <tr><td class="k">部分恢复</td><td>只有窗口内那部分</td>
+        <td>返回 <code>live_start − total_prefix_len</code>，树按返回值释放「未被消费」的重复索引</td></tr>
+      <tr><td class="k">Full 被锁</td><td><code>full_cd.lock_ref &gt; 0</code></td>
+        <td>发 <code>RecoverSWAWithLockedFull</code>，不动已锁的 Full 值（它同时被 SWA tombstone 锁着）</td></tr>
+    </tbody>
+  </table>
+  <span class="f">swa.py:454-513。注意这里的设计取向：tombstone 恢复不重算，而是<b>去重</b> —— 把新请求刚算出来的 KV 收编进树，
+  再把 SWA 数据从它重建出来。</span>
+
+  <p>逐出方向上，SWA 是中间层：内部节点打 tombstone（节点留下），叶子节点整叶删除；
+  <code>eviction_priority</code> 内部节点为 <b>1</b>，逐出它会级联掉 MAMBA，但不会动 FULL。
+  要写回 HiCache 时会先返回 <code>InternalStateBackup</code> 暂停逐出、等 host 备份完成。</p>
+
+  <h3 class="mini">3.4 场景差异：一条已解码的 5000-token 缓存序列</h3>
+  <p>假设 <code>C = 5000</code>、<code>W = 128</code>、<code>P = 1</code>、请求已 decode 至少一步。
+  那么 <code>Wp = 128</code>、<code>B = 4999 − 128 = 4871</code>，live 段是 <code>[4871, 5000)</code> 共 129 个 token。
+  现在来一个<b>严格前缀</b>请求，长度 <code>L</code>：</p>
+
+  <table>
+    <thead><tr><th>查询前缀长度 L</th><th>FULL 可复用</th><th>hybrid SWA 可复用</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td class="k">L ≤ 4871</td><td class="v">L</td><td class="v">0</td><td>落点本身在 tombstone 里，累计归零后永远 &lt; 128</td></tr>
+      <tr><td class="k">4871 &lt; L &lt; 4999</td><td class="v">L</td><td class="v">0</td><td><code>L − B &lt; W</code>，切点处的 live 段不够一窗</td></tr>
+      <tr><td class="k">L = 4999</td><td class="v">4999</td><td class="v">4999</td><td><code>L − B = 128 ≥ W</code>，刚好够</td></tr>
+      <tr><td class="k">L = 5000</td><td class="v">5000</td><td class="v">5000</td><td>整条命中；SWA 只需尾窗 live</td></tr>
+    </tbody>
+  </table>
+
+  <p>通式：<code>max_reusable = 0 if L &lt; B + W else L</code>，而 <code>B + W = C − 1 − (Wp − W)</code>。
+  因为 <code>Wp − W ∈ [0, P−1]</code>，阈值 <code>T = C − 1 − (Wp − W) ∈ [C−P, C−1]</code>：
+  <b>能复用的前缀只可能落在已缓存序列最后一个 page 之内</b>。</p>
+
+  <div class="note">
+    <b>把「SWA 只保留最后 128 个」读对。</b>那句话说的是 SWA <b>层</b>的池子只留尾窗（<code>Wp+1 ≈ 129</code> 个位置），
+    Full <b>层</b>留着全部 <code>C</code>。而<b>复用边界是整条链上的一个数</b> <code>device_prefix_len</code>，不能一半一半。
+    所以短前缀的结局不是「复用尾部 128」，而是<b>一个都不复用</b> —— 要么整段可复用，要么全重算。
+  </div>
+
+  <p><b>另一种可能的形态：匹配停在更深的那个窗口沿。</b>如果树里先前还插过一个 1000-token 的请求，
+  它会在 <code>[872, 1000)</code> 留下自己的 live 窗。此时一条 5000-token 查询的走查是：
+  <code>[0,872)</code> tombstone → 归零；<code>[872,1000)</code> 累计 128 → <b>有效</b>，边界推进到 1000；
+  <code>[1000, 4871)</code> 又是 tombstone → 归零，但<b>已取得的边界不回退</b>。
+  结果 <code>device_prefix_len = 1000</code>，其余 4000 token 重算。</p>
+
+  <table>
+    <thead><tr><th>还有一个场景</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td class="k">请求短于一窗（L &lt; W）</td><td>恒 0 复用。它自己继续解码没问题（持有自己的 KV 行），只是<b>不可被他人共享</b></td></tr>
+      <tr><td class="k">窗口边界前移</td><td>同一批 token 会被切成「tombstone 父 + live 子」。老节点不重写：一旦某段在插入时被判窗口外，就一直 <code>value=None</code>，除非有新请求的 overlapping insert 或 host load-back</td></tr>
+      <tr><td class="k">pure SWA</td><td>没有组件、没有 tombstone，复用 = 普通 radix 复用，可复用 <code>min(L, page_floor(swa_evict_floor))</code>；<code>swa_evict_floor</code> 只对 <code>prefill_aware_swa</code> 模型非零</td></tr>
+      <tr><td class="k">HiCache</td><td>host-only tombstone 计入窗口长度，匹配可以跨过它，内容由 load-back 补齐</td></tr>
+      <tr><td class="k"><code>swa_branching_seqlen</code> 非空</td><td>insert key 被截断到分支点，树里只留下「SWA 与 Full 一致」的那一段</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="slice"><span class="n">04</span>一条 5000-token 序列的切面</h2>
+  <p class="lead">把三张账画在同一条 token 轴上，就能看清它们真正的差别：
+  <b>Full 是整段留、SWA 只留尾窗、Mamba 只有几个点、稀疏的 indexer K 跟着 Full 走</b>。
+  取 <code>W = 128</code>、<code>P = 1</code>、序列已 decode 过，于是窗口游标停在 <code>B = 4871</code>。</p>
+
+  <div class="axis">
+    <div class="cap">① Full 层 KV —— 整段都在池里</div>
+    <div class="row">
+      <div class="scale"><span>0</span><span>5000</span></div>
+      <div class="track"><i class="tk-live" style="width:100%"></i></div>
+    </div>
+
+    <div class="cap" style="margin-top:16px">② indexer K —— 与 Full 共用同一批 loc，跟着它整段在</div>
+    <div class="row">
+      <div class="track"><i class="tk-idx" style="width:100%"></i></div>
+    </div>
+
+    <div class="cap" style="margin-top:16px">③ SWA 层 KV —— 只留尾窗；游标 B = 4871 落在 97.4% 处，它左边的节点值被清空（tombstone）</div>
+    <div class="row">
+      <div class="scale2"><span style="left:0">0</span><span style="right:0">5000</span></div>
+      <div class="track">
+        <i class="tk-dead" style="width:97.42%"></i><i class="tk-live" style="width:2.58%"></i>
+      </div>
+    </div>
+
+    <div class="cap" style="margin-top:20px">④ 尾段放大 4700 – 5000：边界落在 57% 处；可复用阈值 T = 4999 已贴到最右端（99.7%）</div>
+    <div class="row">
+      <div class="scale2"><span style="left:0">4700</span><span style="left:57%;transform:translateX(-50%)">4871 游标 B</span><span style="right:0">5000</span></div>
+      <div class="track">
+        <i class="tk-dead" style="width:57%"></i><i class="tk-live" style="width:43%"></i>
+      </div>
+    </div>
+
+    <div class="cap" style="margin-top:16px">⑤ 查询前缀要落进哪：只有 <code>L ≥ 4999</code> 才进得了可复用区</div>
+    <div class="row">
+      <div class="scale"><span>4700</span><span>5000</span></div>
+      <div class="track">
+        <i class="tk-none" style="width:57%"></i>
+        <i style="width:43%;background:repeating-linear-gradient(90deg,#1d4ed8,#1d4ed8 1px,transparent 1px,transparent 6px)"></i>
+      </div>
+    </div>
+
+    <div class="legend2">
+      <span><i class="tk-live"></i>live：数据在池里，可被复用</span>
+      <span><i class="tk-dead"></i>tombstone：节点保留、<code>value = None</code></span>
+      <span><i class="tk-idx"></i>indexer K：与 Full 同一批 loc</span>
+      <span><i style="width:12px;height:10px;background:repeating-linear-gradient(90deg,#1d4ed8,#1d4ed8 1px,transparent 1px,transparent 6px)"></i>只有 <code>L ≥ 4999</code> 才落得进可复用区</span>
+    </div>
+  </div>
+
+  <p>读法：第一、二行是 <b>Full 层</b>与 <b>indexer K</b>，整段都在；第三行是 <b>SWA 层</b>，
+  游标左侧 97.4% 已经是 tombstone；第四行把尾段拉开，边界左侧是 tombstone、右侧一个窗口是 live；
+  第五行是「查询前缀必须落到哪」—— 前缀长度只要短于 <code>T = 4999</code>，就整个落在 tombstone 区，复用为 0。
+  <b>KDA 的状态不在任何一行上</b>：它是一个个「点」，挂在网格对齐的节点上，不占 token span。</p>
+
+  <h2 id="sparse"><span class="n">05</span>Sparse Attention：缓存的不是稀疏模式</h2>
+  <p class="lead">这类注意力在结构上和前两类完全不同：<b>它在树里没有身份</b>。
+  没有 <code>ComponentType.SPARSE</code>，没有稀疏专用校验器，<code>tree_components</code> 里也找不到它。
+  原因是一句话就能说完：<b>SGLang 缓存 indexer K，从不缓存 top-k 选择。</b></p>
+
+  <h3 class="mini">5.1 存什么：indexer K，寄生在主 KV 池的同一批 loc 上</h3>
+  <p>DSA（DeepSeek Sparse Attention）的每层有一个轻量 indexer，用 <code>index_head_dim</code> 维的 key
+  算「每个历史 token 有多重要」，再取 top-k 做稀疏 attention。要缓存的是<b>这些 key</b>，不是取出来的 k 个下标。</p>
+
+<pre><code># python/sglang/srt/mem_cache/index_key_cache.py:21-47（节选）
+class IndexKeyCache:
+    def __init__(self, pool: DSATokenToKVPool, index_buf_size: int):
+        num_pages = (index_buf_size + pool.page_size + 1) // pool.page_size
+        self.buffer = [
+            torch.zeros(self._buffer_shape(self._layer_num_pages(i, num_pages)),
+                        dtype=pool.index_k_with_scale_buffer_dtype,
+                        device=pool.device)
+            for i in range(pool.layer_num)
+        ]
+
+    def _buffer_shape(self, num_pages: int) -> tuple[int, int]:
+        pool = self.pool
+        return (num_pages,
+                pool.page_size // pool.index_kpool
+                * (pool.index_head_dim + pool.index_head_dim // pool.quant_block_size * 4))</code></pre>
+
+  <table>
+    <thead><tr><th>项</th><th>值</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td class="k">张量</td><td>每层一个二维 <b>uint8</b> 张量：行 = 物理 page，列 = <code>index_page_size × (K + scale)</code></td><td>index_key_cache.py:40-47</td></tr>
+      <tr><td class="k">每 token 每层</td><td><code>index_head_dim(128) + 128/128×4 = 132</code> 字节（fp8 key + 每 128 维一个 fp32 scale）</td><td>memory_pool.py:5287-5288</td></tr>
+      <tr><td class="k">dtype 是 uint8</td><td>kernel 侧再 <code>view(torch.float8_e4m3fn)</code>，不是直接存 fp8 张量</td><td>dsa_indexer.py:1541-1544</td></tr>
+      <tr><td class="k">粒度</td><td>按 page 分配、按 token loc 寻址；<code>index_kpool</code> 是<b>池化因子</b>，<code>index_page_size = page_size / index_kpool</code></td><td>memory_pool.py:5338-5341</td></tr>
+      <tr><td class="k">地址空间</td><td><b>与主 KV 共用</b>：<code>index_buf_size</code> 由 KV 的 <code>size</code> 推导，<code>move_kv_cache</code> 两者同步搬</td><td>memory_pool.py:5344-5351, :5561-5565</td></tr>
+      <tr><td class="k">HiCache 声明</td><td><code>indices_from_pool=PoolName.KV</code>、<code>layout_source=PoolName.KV</code> ——「index 缓冲区骑在 Full KV 页上」</td><td>pool_host/dsa.py:113-140</td></tr>
+      <tr><td class="k">skip-topk 层</td><td>复用上一层的 top-k，因此拿 0 行占位缓冲，也没有 host 层</td><td>index_key_cache.py:56-59 · pool_host/dsa.py:135-139</td></tr>
+    </tbody>
+  </table>
+
+  <p><b>「寄生」这件事的后果非常实在。</b>因为 index-K 与 KV 用同一批 loc 寻址，
+  树上只要记住了 KV 的 token 索引，就<b>顺带</b>记住了 index-K 的位置 —— 一次插入、一次逐出、一次搬迁同时覆盖两者。
+  代价是树上<b>没有任何字段或断言</b>记录「这一页的 index-K 已经写过」，一致性靠结构不变量而不是靠标记。</p>
+
+  <h3 class="mini">5.2 复用判定：没有稀疏专用边界，因为复用的不是模式</h3>
+
+<pre><code># python/sglang/srt/mem_cache/unified_cache/components/full.py:107-118
+def create_match_validator(self, match_device_only: bool = False):
+    if match_device_only:
+        return lambda node: (node.component_data[self.component_type].value is not None)
+    # HiCache: evicted + backuped nodes are valid match boundaries.
+    return lambda node: (
+        node.component_data[self.component_type].value is not None or node.backuped
+    )</code></pre>
+
+  <p>检查里<b>只有 FULL</b>，没有 index-K 存在性判断。另外两处也一起说明「稀疏不参与判定」：</p>
+
+  <ul>
+    <li><b>key 不含稀疏配置。</b>树哈希只吃 token ids（加 <code>extra_key</code>/<code>cache_salt</code> 命名空间种子），
+        <code>index_topk</code> / <code>index_kpool</code> / <code>index_topk_pattern</code> 一律不进 key
+        （<code>utils.py:116-123</code>、<code>:166-174</code>）。</li>
+    <li><b>唯一真按页校验 index 存在性的是 L3。</b>HiCache/L3 路径用 <code>PoolHitPolicy.ALL_PAGES</code>，
+        并把可用前缀 clamp 成 <code>min(KV pages, indexer pages)</code>（<code>hicache_storage.py:95</code>、<code>:665-690</code>）——
+        注释直接写「A partial prefix is still usable」。</li>
+  </ul>
+
+  <p><b>为什么可以这么松？因为要复用的东西与上下文无关。</b>indexer K 是每个 token 自己的投影，
+  和「这次查询从哪个上下文来」无关；而 top-k 选择是 <b>query × 全部历史 key</b> 的函数，天然随上下文变。
+  把前者缓存、后者现算，就把「失效」这件事从设计里删掉了。</p>
+
+<pre><code># 每步、每层：用 cached index-K + 当前 query 现算 logits，再取 top-k
+# python/sglang/srt/layers/attention/dsa/dsa_indexer.py:1536-1539
+k_fp8, k_scale = get_token_to_kv_pool().get_index_k_scale_buffer(
+    layer_id, metadata.get_indexer_seq_len(), block_tables, seq_len_sum, max_seq_len
+)
+# → paged MQA logits → top-k → 稀疏 MLA</code></pre>
+  <span class="f">在 <code>python/sglang/srt/mem_cache/</code> 整个目录里搜 <code>topk_indices</code> 是 0 命中 —— 因为从来没有任何地方需要把它留下来。
+  唯一「留存 top-k 张量」的机制都只活在<b>同一次 forward 内部</b>：跨层共享（<code>index_topk_share.py:83-91</code>）与 MTP / 投机（<code>spec_info.dsa_topk_indices</code>），
+  <code>finally</code> 里就清掉了。</span>
+
+  <h3 class="mini">5.3 缓存更新：同 loc、同 forward；没有独立淘汰</h3>
+
+  <table>
+    <thead><tr><th>时机</th><th>发生什么</th><th>锚点</th></tr></thead>
+    <tbody>
+      <tr><td class="k">新 token</td><td>在<b>同一次 forward</b> 里用 <code>forward_batch.out_cache_loc</code> 写完 KV 再写 index-K；两者没有独立提交点，也没有 dirty 标记</td><td>dsa_indexer.py:1794-1874 → memory_pool.py:5581</td></tr>
+      <tr><td class="k">复用前缀</td><td>index-K 由缓存「恢复」，top-k 用新 query <b>重算</b>；没有任何从树里读回模式的路径</td><td>dsa_indexer.py:1536</td></tr>
+      <tr><td class="k">短上下文</td><td><code>seq_len ≤ index_topk</code> 时直接跳过 logits 与 top-k（全选有效页）——「index 池填了但模式从未materialize」是<b>合法状态</b></td><td>dsa_indexer.py:837-846</td></tr>
+      <tr><td class="k">淘汰</td><td><code>IndexKeyCache</code> 只有 <code>clear / move / cpu_copy / load_cpu_copy / store_*</code>，<b>没有 evict</b>；页随主 KV 的 loc 释放而失效</td><td>index_key_cache.py:61-187</td></tr>
+      <tr><td class="k">HiCache 卸载</td><td>显式同步搬：<code>cpu_copy</code> 的注释是「Retracted pages may be reused before resume, so offload index-K with KV」</td><td>index_key_cache.py:141-175</td></tr>
+      <tr><td class="k">布局切换</td><td>fp4 / fp8 / page8 布局<b>不写进 key</b>，只能在切布局前清库</td><td>deepseek_v4_memory_pool.py:583-586</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <b><code>index_topk_pattern</code> / <code>index_topk_freq</code> / <code>index_skip_topk_offset</code> 管的是什么。</b>
+    它们不决定「怎么算 top-k」，而是决定<b>哪些层复用上一层的 top-k</b>（从而连 indexer 都不构造、index 缓冲拿 0 行）。
+    判定顺序在 <code>dsa_layer_skips_topk()</code>（model_config.py:410-443）：先看 <code>indexer_types</code>，
+    再看 <code>cli_factor</code>，再看 <code>index_topk_pattern</code> 里的 <code>"S"</code> 标记，最后用 <code>index_topk_freq</code> 取模。
+    这些全是<b>部署级</b>配置，改它们只改选择宽度与层间共享，不触碰缓存内容。
+  </div>
+
+  <h3 class="mini">5.4 场景差异：从设计上不存在失效路径</h3>
+  <table>
+    <thead><tr><th>场景</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td class="k">完全相同前缀</td><td>index-K 逐字节复用；top-k 在<b>新上下文</b>上重算，所以对任意新 query 都正确</td></tr>
+      <tr><td class="k">部分重叠前缀</td><td>标准 radix 匹配；命中段内的 index-K 一并复用，跨过 miss 点后重新写</td></tr>
+      <tr><td class="k">前缀长度变了</td><td>没有「位置漂移」问题 —— 旧模式根本没被读过，按新 <code>seq_len</code> 重算即可</td></tr>
+      <tr><td class="k">稀疏配置不同</td><td>不影响缓存：这些值不进 key、不进树、不进存储键</td></tr>
+      <tr><td class="k">skip-topk 层</td><td>无 index 缓冲也无所谓，它的 top-k 来自同一步的 anchor 层</td></tr>
+      <tr><td class="k">CP prefill（分层）</td><td><code>dsa_cache_layer_split.py</code> 做的是<b>层切分路由</b>（非 owner 层 0 行 + owner broadcast），对树完全透明</td></tr>
+      <tr><td class="k">HiCache 部分命中</td><td>可用前缀被 clamp 到 <code>min(KV, indexer)</code>，page 对齐截断，安全</td></tr>
+    </tbody>
+  </table>
+
+  <p>同一类「稀疏」在 SGLang 里其实有六个家族，但只有 DSA 这一支真正接进了 radix 前缀复用路径。
+  简要对比放在这里，免得把别处的机制误当成本节讲的机制：</p>
+
+  <table>
+    <thead><tr><th>家族</th><th>稀疏发生在哪</th><th>有没有 index / top-k 缓存</th><th>走 radix 复用？</th></tr></thead>
+    <tbody>
+      <tr><td class="k">DSA / indexer</td><td>每层每步：cached index-K → logits → top-k → 稀疏 MLA</td><td><b>缓存 index-K；不缓存 top-k</b></td><td><b>是</b>（寄生于 FULL）</td></tr>
+      <tr><td class="k">HiSparse</td><td>容量分层：device 池 + host 池，按需换回</td><td>index-K 随 DSA 池</td><td>是，但解决的是容量不是模式</td></tr>
+      <tr><td class="k">QSA</td><td>压缩后 indexer 打分</td><td>pre-compression index-K 是 <b>per-request ring</b></td><td>部分（压缩后的 K 有页缓存）</td></tr>
+      <tr><td class="k">sparsity/（Quest 类）</td><td>decode 期按 query 动态选重要 KV 页</td><td>每步 <code>retrieve_topk</code> 现算，状态挂请求槽</td><td>否，纯 per-request</td></tr>
+      <tr><td class="k">DeepSeek-V4</td><td>多压缩比分区，每比例一个 indexer 池</td><td>有独立 <code>DeepSeekV4IndexerPool</code>，页数仍由 KV 推导</td><td>是；NPU 上以 <code>ComponentType.C128</code> sidecar 进树</td></tr>
+      <tr><td class="k">NSA 目录</td><td>—</td><td>—</td><td>已是废弃 shim，指向 <code>dsa.dsa_indexer</code></td></tr>
+    </tbody>
+  </table>
+  <span class="f">只有 DeepSeek-V4 的 C128 sidecar 是唯一一个「稀疏相关但真的有自己的组件身份」的例子
+  （<code>registry.py:171-181</code>），它有独立的 value / validator / 逐出优先级；DSA 与 GLM5 都不满足那个条件，所以只注册 <code>FULL</code>。</span>
+
+  <h2 id="diff"><span class="n">06</span>三类机制的主要区别</h2>
+  <p class="lead">把四个问题逐行摊开。左列是问题，三列是答案 —— 这张表可以直接当查找表用。</p>
+
+  <table>
+    <thead><tr><th style="width:13%">问题</th><th style="width:29%">Linear（MAMBA）</th><th style="width:29%">SWA（SWA）</th><th style="width:29%">Sparse（无组件）</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">① 存什么</td>
+        <td data-label="Linear">树上一个 slot id（<code>shape (1)</code>）；指向 <code>MambaPool</code> 的 <code>conv</code> + <code>temporal</code> 两块状态。成本 <b>O(1)/序列</b></td>
+        <td data-label="SWA">per-token 的 <b>SWA 池</b>索引（需经翻译表）；窗口外的节点是 tombstone。<code>metadata["uuid"]</code> 记窗口锁边界</td>
+        <td data-label="Sparse">indexer K + scale（uint8，约 132 B/token/层），<b>与主 KV 同 loc 空间</b>；树上没有独立字段</td>
+      </tr>
+      <tr>
+        <td class="k">② 怎么判命中</td>
+        <td data-label="Linear">校验器等价于 <code>value is not None</code>；合法边界由 <code>lcm(chunk, page)</code> 网格 + insert 时截断保证</td>
+        <td data-label="SWA">累加 <code>len(node.key)</code>，遇 tombstone 归零；<b>边界合法 ⟺ 连续 live 段 ≥ W</b></td>
+        <td data-label="Sparse">复用 <code>FULL</code> 的校验器。<b>index-K 存在性不被检查</b>，靠同 loc 空间的结构不变量</td>
+      </tr>
+      <tr>
+        <td class="k">③ 怎么更新</td>
+        <td data-label="Linear">decode 在 ping-pong 两 slot 间轮转；结束 <b>donate</b>、未完成 <b>fork</b>；命中后 <b>COW</b>（记录 + 前向流执行）</td>
+        <td data-label="SWA">滑窗推进游标 → insert 在游标处切节点（父 tombstone / 子 live）→ 新叶 SWA 上限一窗；tombstone 可被更短请求<b>恢复</b></td>
+        <td data-label="Sparse">与 KV 同一次 forward、同一批 loc 写入；复用后 <b>top-k 重算</b>；<b>无独立淘汰</b></td>
+      </tr>
+      <tr>
+        <td class="k">④ 场景差异</td>
+        <td data-label="Linear">相同前缀：1 次 COW/请求。部分重叠：停在最深带状态节点。并发：N 请求 = N 个 COW slot</td>
+        <td data-label="SWA">相同前缀：整段可复用。严格前缀：<b>0</b>（除非落进最后一个 page）。短于一窗：恒 0</td>
+        <td data-label="Sparse">所有场景都安全 —— 没有可失效的旧状态</td>
+      </tr>
+      <tr>
+        <td class="k">加锁</td><td data-label="加锁">单点锁（<code>best_match_node</code>）</td>
+        <td data-label="加锁">窗口锁（上溯到窗口边界，盖 uuid）</td>
+        <td data-label="加锁">随 <code>FULL</code> 的路径锁</td>
+      </tr>
+      <tr>
+        <td class="k">逐出优先级</td><td data-label="逐出">0，不触发级联</td>
+        <td data-label="逐出">1，级联 MAMBA</td>
+        <td data-label="逐出">跟 <code>FULL</code>（2）同生共死</td>
+      </tr>
+      <tr>
+        <td class="k">粒度单位</td><td data-label="粒度">状态（slot）</td>
+        <td data-label="粒度">token（page 对齐）</td>
+        <td data-label="粒度">token（page 对齐，随 KV）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">三条最本质的差异</h3>
+  <div class="two">
+    <div class="pane"><h5>1. 负载有没有 token 轴</h5>
+      <ul>
+        <li>KV 与 index-K <b>有</b> token 轴 → 任何 token 下标都是合法切点，可以按需截断共享。</li>
+        <li>循环状态<b>没有</b> → 只有网格对齐的位置才是合法边界，所以引入 <code>branching_seqlen</code> 这种「建议补快照」的机制。</li>
+      </ul></div>
+    <div class="pane"><h5>2. 负载是可变还是只增</h5>
+      <ul>
+        <li>KV append-only → 命中前缀可被任意多请求<b>只读共享</b>。</li>
+        <li>状态被 decode <b>原地改写</b> → 命中必须 <b>COW</b>。并发成本是 O(并发请求数)，不是 O(1)。</li>
+      </ul></div>
+    <div class="pane"><h5>3. 「值」是连续的还是离散的</h5>
+      <ul>
+        <li>SWA 的值会随窗口滑动<b>大片消失</b>，于是需要 tombstone 表达「节点在、值没了」。</li>
+        <li>稀疏的值与 KV 同生共死，<b>不需要第三种状态</b> —— 这也是它不需要组件身份的原因。</li>
+      </ul></div>
+    <div class="pane"><h5>为什么稀疏不能走组件化</h5>
+      <ul>
+        <li>组件化的前提是「这份数据有独立的生命周期」：要能单独分配、单独逐出、单独加锁。</li>
+        <li>index-K 的生命周期<b>完全被 KV 决定</b>，独立成组件只会带来一致性成本而没有收益。</li>
+        <li>反过来，<b>真正需要独立生命周期</b>的 DSV4 C128 sidecar 就确实拿到了自己的 <code>ComponentType</code>。</li>
+      </ul></div>
+  </div>
+
+  <h2 id="glm"><span class="n">07</span>以 GLM5 系列的推理路径为例</h2>
+  <p class="lead">用一个真实模型把三条线串起来。先纠正两个容易搞错的前提，否则后面全是错的。</p>
+
+  <div class="note">
+    <b>前提一：名字。</b><code>GLM5.3flash</code> 这个字符串在这份 checkout 里<b>不存在</b>。
+    与之对应的架构是 <code>Glm5NextForConditionalGeneration</code>（<code>python/sglang/srt/models/glm5_next.py</code>）；
+    下文一律用架构名，不替它补版本号。
+  </div>
+  <div class="note" style="background:#fff4ec;border-left-color:var(--waste);color:#5a3418">
+    <b>前提二：这个模型没有 SWA。</b><code>Glm5NextForConditionalGeneration</code> 不在 hybrid-SWA 白名单里
+    （<code>model_config.py:2548-2575</code>），glm5 代码里也没有 <code>sliding_window</code>；
+    它注册的组件是 <b><code>(FULL, MAMBA)</code> 两个</b>，不是三个。
+    所以本章讲的是 <b>Linear + Sparse(+Full)</b> 两条线，SWA 只作为对照出现。
+  </div>
+
+  <h3 class="mini">7.1 层划分：四层里三层是线性注意力</h3>
+
+<pre><code># python/sglang/srt/configs/glm5_next.py:198-224（节选）
+if linear_attn_config is None:
+    layer_types = kwargs.get("layer_types")
+    if layer_types is None:
+        kda_layers = [i for i in range(num_hidden_layers) if i % 4 != 3]
+    else:
+        kda_layers = [i for i, t in enumerate(layer_types) if t == "linear_attention"]
+    kda_layer_set = set(kda_layers)
+    linear_attn_config = {
+        "full_attn_layers": [i for i in range(num_hidden_layers) if i not in kda_layer_set],
+        "kda_layers": kda_layers, ... }</code></pre>
+
+  <p>默认参数 <code>num_hidden_layers = 45</code>，按上面的规则落到「每 4 层 3 层 KDA」，
+  即 <b>34 个线性注意力层 + 11 个 full-attention 层</b>（<code>i % 4 == 3</code> 的那些：3, 7, 11, …, 43）。
+  <b>这只是兜底推导</b> —— 真实切分来自 checkpoint 的 <code>layer_types</code> 或 <code>linear_attn_config</code>，
+  这份 checkout 里没有该 config，逐层数量记为<b>未确认</b>。</p>
+
+  <p>之后代码里唯一真源是 <code>is_kda_layer()</code>（<code>configs/glm5_next.py:243-247</code>），
+  <code>Glm5NextDecoderLayer</code> 据此二选一：</p>
+
+<pre><code># python/sglang/srt/models/glm5_next.py:707-720
+self.is_linear_attn = config.is_kda_layer(layer_id)
+if self.is_linear_attn:
+    self.self_attn = Glm5NextLinearAttention(...)     # ← 走 MAMBA 组件
+else:
+    self.self_attn = DeepseekV2AttentionMLA(...)      # ← 走 FULL；带 indexer 时就是 DSA 稀疏</code></pre>
+
+  <div class="note">
+    <b>一个必须点出的命名陷阱。</b><code>Glm5NextDecoderLayer._is_layer_sparse()</code>（<code>glm5_next.py:947-952</code>）
+    看的是 <code>n_routed_experts</code> 与 <code>moe_layer_freq</code> —— 它是 <b>MoE 与 dense MLP 的选择器</b>，
+    和稀疏注意力毫无关系。真正的稀疏开关是 <code>is_deepseek_dsa(config)</code>
+    （<code>model_config.py:190-204</code>，架构名 + <code>index_topk</code> 非空）。
+  </div>
+
+  <table>
+    <thead><tr><th>层种类</th><th>缓存什么</th><th>在哪</th><th>谁复用它</th></tr></thead>
+    <tbody>
+      <tr><td class="k">KDA 线性层（多数）</td><td>卷积状态 + recurrent 状态，每层一个 slot</td>
+        <td><code>MambaPool</code>（挂 <code>HybridReqToTokenPool</code>）</td>
+        <td>组件 <code>MAMBA</code>：单点锁 + COW</td></tr>
+      <tr><td class="k">full-attention 层</td><td>MLA latent KV，逐 token</td>
+        <td>主 KV 池</td><td>组件 <code>FULL</code>：路径锁</td></tr>
+      <tr><td class="k">full-attention 层的 indexer</td><td>indexer K + scale（uint8）</td>
+        <td>同主 KV 池的 page，同一批 loc</td>
+        <td><b>组件 <code>FULL</code>（无独立身份）</b></td></tr>
+      <tr><td class="k">MoE / MLP</td><td>不缓存</td><td>—</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">7.2 一个请求的旅程</h3>
+
+<pre><code>Req.init_next_round_input(tree_cache)                       schedule_batch.py:1707
+└─ match_kv_cache(..., cow_mamba=tree_cache.supports_mamba())  :1749 · mem_cache/common.py:220
+   └─ UnifiedRadixCache.match_prefix                        unified_radix_cache.py:603
+      └─ UnifiedTreeCore.match_prefix                       unified_tree_core.py:867
+         ├─ 每组件 create_match_validator()  → 2 个：FULL, MAMBA     :918-930
+         ├─ 走查：child.key.match_at → _all_valid(validators, node)  :932-970
+         │    └─ MAMBA 节点缺状态 ⇒ 边界不前进（但继续走）          mamba.py:149
+         │    └─ FULL 节点被逐出 ⇒ break，整条匹配断                :954-956
+         ├─ finalize_match_result_in_tree_core
+         │    └─ MAMBA 算 mamba_branching_seqlen                    mamba.py:171-192
+         └─ _match_post_processor：LRU 提升 / device_prefix_len       :1010-1047
+      └─ finalize_match_result_in_cache
+         └─ MAMBA：分配私有 slot，记 mamba_cow_src_index（COW 延后） mamba.py:194-223
+   └─ schedule_policy.py:1625  req.lock = tree_cache.lock(req.last_node)
+
+（batch 构建）schedule_batch.py:3117 → :3234 收集 COW / clear 列表
+   └─ model_runner.py:1912  _maybe_execute_deferred_mamba_cow_and_clear（前向流执行）
+
+（逐层前向）按 layer_id 分流：KDA 层走 linear-attn backend；full-attention 层走 DSA MLA
+   稀疏层每步重算 top-k（dsa_indexer.py:1536）
+
+（每 chunk）checkpoint_kv_cache → tree_cache.checkpoint(req, up_to=extend_end)
+   └─ checkpoint_into_tree                              unified_radix_cache.py:1126
+      ├─ prepare_for_caching_req × 2：MAMBA 返回状态网格长度；FULL 无操作
+      ├─ effective_cache_len = min(...)  ← KDA 状态在此决定发布到哪
+      ├─ page_aligned → insert
+      └─ 重新 match → 把树给的索引写回请求行 → 转移 req.lock
+
+（结束）release_kv_cache → checkpoint(up_to=owned_len) → 解锁 + 释放
+</code></pre>
+
+  <p><b>这条路径上最关键的一处不对称</b>，值得单独写出来：</p>
+
+  <div class="two">
+    <div class="pane"><h5>MAMBA 缺 → 只让边界停住</h5>
+      <ul>
+        <li>校验器返回 <code>False</code>，<code>best_match_node</code> 不前进，走查<b>继续</b>。</li>
+        <li><code>full_kv_hit_length</code> 继续累加 → 差额变成 <code>mamba_branching_seqlen</code>。</li>
+        <li>结果：KV 前缀照样复用，只是状态要在这个请求自己的 extend 里补一个快照点。</li>
+      </ul></div>
+    <div class="pane"><h5>FULL 缺 → 整条匹配断</h5>
+      <ul>
+        <li><code>if child.evicted and not child.backuped: break</code>（<code>unified_tree_core.py:954-956</code>）。</li>
+        <li>后面的节点再好也没有意义了 —— 没有 KV 就无法前向。</li>
+        <li>所以 FULL 的逐出优先级最高（2），它一死，整条路径都不必谈复用。</li>
+      </ul></div>
+  </div>
+
+  <h3 class="mini">7.3 四个场景</h3>
+  <table>
+    <thead><tr><th>场景</th><th>这条路径上发生什么</th></tr></thead>
+    <tbody>
+      <tr><td class="k">共享 system prompt</td>
+        <td>FULL 路径复用、MAMBA 每个请求 COW 一份、index-K 顺带复用且 top-k 重算。三件事同时成立，不需要任何额外协调。</td></tr>
+      <tr><td class="k">多轮对话，第 N+1 轮续第 N 轮</td>
+        <td>KV 侧几乎全中；KDA 侧受状态网格约束，复用停在最深的网格对齐状态上，尾巴重算。差额由 <code>mamba_branching_seqlen</code> 在本次 extend 里补成一个新 track 点，供后续兄弟分支命中。</td></tr>
+      <tr><td class="k">「窗口命中但状态过期」</td>
+        <td>本模型没有 SWA，这个具体情形不存在。等价真实情形是 <code>full_kv_hit_length &gt; mamba_boundary_len</code>，以及 MAMBA 单独被逐出（优先级 0，最先死）。两者都走同一条处理路径：边界停住 + 给 branching 建议。</td></tr>
+      <tr><td class="k">并发请求共享同一前缀</td>
+        <td>FULL 的路径锁叠加；MAMBA 各自 COW。池子不够时 <code>finalize_match_result_in_cache</code> 会先加锁、<code>evict_for_alloc(EvictParams(num_tokens=0, mamba_num=1))</code>、再分配、再解锁 —— 用一个精确的逐出请求换一个 slot。</td></tr>
+    </tbody>
+  </table>
+
+  <p>如果想在这个模型上理解 SWA，唯一沾边的机制是 <b>KDA 自身的短卷积窗口</b>
+  （<code>linear_conv_kernel_dim = 4</code>）—— 但那是状态内部的一个 4 步滑动窗口，
+  不是一个可以被前缀缓存单独命中的 KV 区域。真正的 SWA 前缀缓存只出现在
+  <code>DeepseekV4*</code> / <code>Gemma4*</code> / <code>Step3p5*</code> / <code>Inkling*</code> 这一类
+  <code>is_hybrid_swa</code> 架构上，形态就是本页 <a href="#swa">03</a> 讲的那套。</p>
+
+  <h2 id="myth"><span class="n">08</span>常见误解</h2>
+
+  <div class="myth">
+    <div class="w">「SWA 的 prefix cache 就是复用最后 128 个 token。」</div>
+    <div class="r">不是。<b>链上的复用边界是一个整数</b> <code>device_prefix_len</code>，不能一半一半。
+      一条已解码的 5000-token 序列，长度 4000 的前缀请求拿到的是 <b>0</b>，不是 128。
+      要复用，前缀必须落进最后不到一个 page 的窄带里。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「稀疏注意力会把 top-k 选择缓存下来，命中时要检查模式是否兼容。」</div>
+    <div class="r">不存在这个检查，因为<b>模式从来没被保存过</b>。
+      缓存的是 indexer K（每个 token 自己的投影），top-k 每步用当前 query 重算。
+      <code>mem_cache/</code> 整个目录搜 <code>topk_indices</code> 是 0 命中。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「线性注意力的状态也占 KV 池的槽位，命中长度就是 token 数。」</div>
+    <div class="r">状态挂在 <code>HybridReqToTokenPool</code> 的 <code>MambaPool</code> 上，
+      <code>value</code> 是 shape <code>(1)</code> 的 slot id，<code>len(value)==1</code>。
+      「能省多少 token」与「从哪个状态起步」是两个独立的数，组件把两个都留着。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「三类机制各有一套独立的缓存树。」</div>
+    <div class="r">只有一棵树。<code>UnifiedTreeNode.component_data</code> 是
+      <b>按 <code>ComponentType</code> 下标索引的 list</b>，一份 key、多条 value 线。
+      稀疏干脆连这条线都不占 —— 它和 <code>FULL</code> 共用同一批 token slot。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「命中失败就等于这部分完全白算。」</div>
+    <div class="r">不一定。<code>full_kv_hit_length</code> 早于校验器累加，
+      所以「KV 命中但辅助组件没命中」会被包装成 <code>branching_seqlen</code>，
+      让<b>本次前向</b>顺手在那个位置落一个状态快照，后来的兄弟分支就能命中。
+      这一次仍然要重算，但下一次不用。</div>
+  </div>
+
+  <h2 id="quiz"><span class="n">09</span>自测题</h2>
+
+  <details>
+    <summary>Q1 · 一个 hybrid full+SWA 模型，<code>W=256</code>、<code>page_size=16</code>。已缓存并解码过一条 8000-token 序列。现在来一个 3000-token 的严格前缀请求，SWA 侧能复用多少？</summary>
+    <div class="ans"><b>0。</b><code>Wp = ceil_align(max(256,16),16) = 256</code>，稳态游标
+      <code>B = pre_len − Wp = 7999 − 256 = 7743</code>。判据是 <code>L − B ≥ W</code>，
+      这里 <code>3000 − 7743 &lt; 0</code>，落点本身就在 tombstone 里。
+      通式 <code>max_reusable = 0 if L &lt; B + W else L</code>，阈值 <code>T = C − 1 − (Wp − W) = 8000 − 1 − 0 = 7999</code>。</div>
+  </details>
+
+  <details>
+    <summary>Q2 · 同一个请求，若只让 FULL 组件参与判定、SWA 不 gate（ring 模式），能复用多少？</summary>
+    <div class="ans"><b>3000。</b>回落到 Full 语义 —— 每个 page 对齐的 token 下标都是合法边界。
+      这正是 <code>swa_gates_prefix_match=False</code> 的效果（<code>kv_cache_builder.py:341-347</code>）：
+      当 SWA 由请求自己的 ring 重建时，让它 gate 只会误伤 Full 命中。</div>
+  </details>
+
+  <details>
+    <summary>Q3 · 一条 KDA 层与 full-attention 层混排的模型，为什么 <code>prepare_for_caching_req</code> 的返回值要取 <code>min()</code>？</summary>
+    <div class="ans">因为它决定「树能发布到多长」。MAMBA 返回的是<b>状态实际加密的 seqlen</b>
+      （受 <code>mamba_checkpoint_grid</code> 约束和 <code>mamba_last_track_seqlen</code> 截断），
+      FULL 返回 <code>None</code>（表示不限制）。取 <code>min()</code> 保证了
+      <b>节点深度与状态 seqlen 是同一个数</b> —— 这是 2.2 那三条约束里的第一条。
+      不这么做，节点就会声称自己在某个深度有状态，而实际上没有。</div>
+  </details>
+
+  <details>
+    <summary>Q4 · index-K 的布局从 fp8 换成 fp4，同一份 L3 缓存还能命中吗？</summary>
+    <div class="ans"><b>不能，而且代码不会拦住你。</b>布局不写进 key，注释只提醒
+      「a persisted cache written under the other one must be cleared before switching」
+      （<code>deepseek_v4_memory_pool.py:583-586</code>）。
+      页数和形状都没变，但字节语义变了 —— 命中会读到错位的数据。这是这份实现里少数需要运维纪律兜底的地方。</div>
+  </details>
+
+  <details>
+    <summary>Q5 · 为什么 MAMBA 内部节点的逐出优先级是 0，而且不触发级联？</summary>
+    <div class="ans">因为状态<b>只在匹配边界节点上被消费</b>。内部节点上的状态对任何路径都没有贡献，
+      删掉它不影响别人读 —— 影响的是「以后还能不能从那个深度起步」，而这已经由
+      <code>branching_seqlen</code> 这套补快照机制在管理了。
+      反过来 FULL 是 2：它一死，整条路都读不了（<code>break</code>），所以必须最后死。</div>
+  </details>
+
+  <details>
+    <summary>Q6 · 如果一个请求的前缀在树里同时命中 FULL 与 SWA，但 MAMBA 只到一半深，会发生什么？</summary>
+    <div class="ans">不是「三选一」，而是<b>合取 + 差额建议</b>：
+      <code>best_match_node</code> 停在 MAMBA 还能命中的深度（FULL、SWA 会跟着这个边界一起加锁、提升 LRU），
+      <code>full_kv_hit_length</code> 继续记录到更深的位置，
+      <code>mamba_branching_seqlen</code> 把「本可以命中的网格对齐点」交回调度器，
+      由 <code>schedule_batch.py:3210-3225</code> 在本次前向补一个 track 点。
+      这样本次多算了一点，但下一个同前缀的请求能命中得更深。</div>
+  </details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-next" href="../../inference-systems/deepinfer-vs-sglang/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../inference-systems/deepinfer-vs-sglang/index.html"><span class="sm-more-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-more-m">43 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html"><span class="sm-more-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-more-m">14 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/sglang-stream-interval/index.html"><span class="sm-more-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-24</span></a><a class="sm-more-a" href="../../inference-systems/moe-a2a-megamoe/index.html"><span class="sm-more-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-09-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-prefetch-prediction/index.html"><span class="sm-more-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/sglang-request-lifecycle/index.html"><span class="sm-more-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-more-m">19 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/hicache-mooncake/index.html"><span class="sm-more-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-18</span></a><a class="sm-more-a" href="../../inference-systems/dflash-pp-adaptation/index.html"><span class="sm-more-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-16</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p>本页由读源码产出，<b>未做运行时实测</b>。所有行号对应一份 SGLang checkout（commit <code>16eb87c0</code>，
+      已含 Unified Radix Cache）。每条非显然的结论都附了文件与符号，可以直接拿去 grep 复核；
+      三处标注为「未确认」的地方是：GLM5 的逐层 KDA/full 切分（checkout 内无 checkpoint config）、
+      若干数值型 <code>index_*</code> 取值、以及 sparse/SWA 报告中各自列出的边缘路径。</p>
+    <p>主要阅读路径：<code>python/sglang/srt/mem_cache/unified_cache/{unified_tree_core.py, unified_radix_cache.py}</code>、
+      <code>unified_cache/components/{base,full,swa,mamba}.py</code>、
+      <code>python/sglang/srt/mem_cache/{memory_pool.py, swa_memory_pool.py, index_key_cache.py, registry.py}</code>、
+      <code>python/sglang/srt/managers/{scheduler.py, schedule_policy.py, schedule_batch.py}</code>、
+      <code>python/sglang/srt/layers/attention/dsa/</code>、<code>configs/glm5_next.py</code>、
+      <code>models/glm5_next.py</code>。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+</div>
+</body>
+</html>
