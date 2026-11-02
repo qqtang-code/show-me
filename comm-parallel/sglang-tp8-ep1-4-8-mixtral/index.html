@@ -550,7 +550,7 @@ num_dp_ranks = dp_size × attn_dp_size                     <span class="cm"># �
     </div>
     <div class="box">
       <h5>约束三：a2a backend 强制 <code>ep = tp</code> <span class="pill src">源码</span></h5>
-      <p><code>overrides.py:1578-1589</code> 列出 <code>_A2A_EP_SPANNING_BACKENDS</code>：
+      <p><code>overrides.py:1578-1592</code> 列出 <code>_A2A_EP_SPANNING_BACKENDS</code>：
       <code>megamoe、deepep、deepep_v2、mooncake、nixl、ascend_fuseep、flashinfer、flashinfer_megamoe、mori</code>。
       <code>_a2a_ep_size()</code>（<code>:1609-1619</code>）对它们统一返回 <code>{"ep_size": view.tp_size}</code>，
       并打印「The expert parallel size is adjusted from X to the tensor parallel size」。</p>
@@ -587,7 +587,7 @@ num_dp_ranks = dp_size × attn_dp_size                     <span class="cm"># �
   <code>moe_tp == tp</code> 时 <code>_MOE_TP = _TP</code>（<code>:2923-2924</code>）。
   <code>_MOE_DP</code> 在 <code>moe_dp=1</code> 时是 8 个单例，不参与本页的通信。</p>
 
-  <p>rank 的三个坐标由 <code>tp_rank</code> 整除/取模得到（<code>runtime_context.py:118-135</code>）：</p>
+  <p>rank 的三个坐标由 <code>tp_rank</code> 整除/取模得到（<code>runtime_context.py:128-133</code>）：</p>
 <pre><code><span class="cm"># ep=4, tp=8, moe_dp=1 → moe_tp=2</span>
 moe_ep_rank = tp_rank // moe_tp   <span class="cm"># 0,0,1,1,2,2,3,3 —— 决定拿哪两个专家</span>
 moe_tp_rank = tp_rank %  moe_tp   <span class="cm"># 0,1,0,1,0,1,0,1 —— 决定拿该专家的哪半列</span></code></pre>
@@ -761,7 +761,7 @@ self.intermediate_size_per_partition = intermediate_size // self.moe_tp_size  <s
     </p>
   </div>
   <p>参数形状落在 <code>UnquantizedFusedMoEMethod.create_weights</code>：
-  <code>w13 = [num_local_experts, 2 × intermediate_size_per_partition, hidden]</code>（<code>layers/quantization/unquant.py:779-812</code>），
+  <code>w13 = [num_local_experts, 2 × intermediate_size_per_partition, hidden]</code>（<code>layers/quantization/unquant.py:796-813</code>），
   <code>w2 = [num_local_experts, hidden, intermediate_size_per_partition]</code>（同文件 <code>:815-839</code>）。
   <code>num_experts</code> 传进去的是 <code>self.num_local_experts</code>（<code>fused_moe_triton/layer.py:561-574</code>），
   所以三种配置分别得到表中三种形状，但元素总数相同。</p>
