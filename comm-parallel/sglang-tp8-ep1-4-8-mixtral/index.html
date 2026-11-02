@@ -762,7 +762,7 @@ self.intermediate_size_per_partition = intermediate_size // self.moe_tp_size  <s
   </div>
   <p>参数形状落在 <code>UnquantizedFusedMoEMethod.create_weights</code>：
   <code>w13 = [num_local_experts, 2 × intermediate_size_per_partition, hidden]</code>（<code>layers/quantization/unquant.py:796-813</code>），
-  <code>w2 = [num_local_experts, hidden, intermediate_size_per_partition]</code>（同文件 <code>:815-839</code>）。
+  <code>w2 = [num_local_experts, hidden, intermediate_size_per_partition]</code>（同文件 <code>:825-842</code>）。
   <code>num_experts</code> 传进去的是 <code>self.num_local_experts</code>（<code>fused_moe_triton/layer.py:561-574</code>），
   所以三种配置分别得到表中三种形状，但元素总数相同。</p>
 
@@ -795,7 +795,7 @@ def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
   （<code>:515-534</code>），把「只有本 rank 负责的 token 行非零」的稀疏结果加起来。
   <code>ParallelLMHead</code>（同文件 <code>:546</code>）同样切 8 份；生成时每个 rank 算 <code>[T, 4000]</code> 的 logits，
   再由 <code>LogitsProcessor</code> 做 all-gather 拼成 <code>[T, 32000]</code>
-  （<code>layers/logits_processor.py:479-488</code> 决定开关，<code>:1024-1035</code> 执行）。
+  （<code>layers/logits_processor.py:479-488</code> 决定开关，<code>:1024-1036</code> 执行）。
   这两处都不读 <code>ep</code>。</p>
 
   <h3 class="mini">3.5 KV cache：按 kv head 切，Mixtral 恰好 1 头/rank</h3>
