@@ -1,0 +1,1220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</title><!-- show-me:shell:begin -->
+<meta name="description" content="在 SGLang v0.5.23 的默认 backend（moe_a2a_backend=none）下，--tp 8 --ep 1/4/8 的 MoE 段通信完全相同：都是同一个 _TP(8) 组上的一次 all-reduce，载荷 [T,4096] BF16，约 0.94 MiB/token。ep 改的是权重排布：ep=1 每 rank 存全部 8 个专家的 1/8 列，ep=4 存 2 个专家的 1/2 列（moe_tp=2），ep=8 存 1 个完整专家；每 rank 专家参数恒为 176.16M/层。真正引入 dispatch/combine all-to-all 的是 --moe-a2a-backend deepep 等后端，而它们会把 ep 强制改成 tp，使三种写法收敛到 ep=8。附并行组构造、调用链、通信/显存对照与可拖动账本。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B">
+<meta property="og:description" content="在 SGLang v0.5.23 的默认 backend（moe_a2a_backend=none）下，--tp 8 --ep 1/4/8 的 MoE 段通信完全相同：都是同一个 _TP(8) 组上的一次 all-reduce，载荷 [T,4096] BF16，约 0.94 MiB/token。ep 改的是权重排布：ep=1 每 rank 存全部 8 个专家的 1/8 列，ep=4 存 2 个专家的 1/2 列（moe_tp=2），ep=8 存 1 个完整专家；每 rank 专家参数恒为 176.16M/层。真正引入 dispatch/combine all-to-all 的是 --moe-a2a-backend deepep 等后端，而它们会把 ep 强制改成 tp，使三种写法收敛到 ep=8。附并行组构造、调用链、通信/显存对照与可拖动账本。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+
+  /* ============ 全站共用设计变量（三篇保持一致） ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13.5px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  @media (max-width:640px){ code{overflow-wrap:anywhere} }
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+    .pciegroup{flex-wrap:wrap;min-width:0}
+    .prow .lbl{min-width:0;flex:1 0 100%}
+    .node{font-size:11.5px;padding:5px 9px}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c;white-space:nowrap}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none;float:none}
+  }
+
+  /* ---------- 流程图组件 ---------- */
+  .flow{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .flow .step{display:grid;grid-template-columns:26px minmax(0,1fr);gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52;min-width:0;overflow-wrap:anywhere}
+  .flow .step .t b{color:var(--ink)}
+  .flow .step .t .sub2{display:block;color:var(--dim);font-size:13px;margin-top:3px;overflow-wrap:anywhere}
+  .flow .step .t .where{font:11.5px var(--mono);color:var(--dim2);margin-top:4px;display:block;overflow-wrap:anywhere}
+
+  .topo{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px;margin:16px 0}
+  .prow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+  .prow .lbl{font:11.5px var(--mono);color:var(--dim2);min-width:104px}
+  .node{border:1px solid #cfd8e8;background:#f7f9ff;border-radius:8px;padding:6px 11px;
+        font:12px var(--mono);color:#1b2740;flex:none}
+  .node.hot{background:#e8eefb;border-color:#b9cdf0;font-weight:600}
+  .node.gpu{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .arrowdown{text-align:center;color:var(--dim2);font-size:14px;margin:2px 0}
+  .pciegroup{display:flex;gap:6px;padding:8px;border:1px dashed #c9d6ea;border-radius:10px;background:#fbfcff}
+
+  .stack{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .band{display:flex;gap:3px;margin:10px 0}
+  .band div{height:38px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+            font:11px var(--mono);color:#0b1220;overflow:hidden}
+  .band .dense{background:linear-gradient(180deg,#bcd0f0,#dbe7fb);flex:3}
+  .band .moe{background:linear-gradient(180deg,#8fd8c4,#c6efe3);flex:75}
+  .band .mtp{background:linear-gradient(180deg,#f3c168,#fbe0ab);flex:1}
+  /* 3 / 75 / 1 是等比条：两侧太窄放不下字，标签一律交给下方图例 */
+  .bandlegend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--dim);margin:12px 0 0}
+  .bandlegend span{display:inline-flex;align-items:center;gap:6px}
+  .bandlegend i{width:11px;height:11px;border-radius:3px;flex:none;border:1px solid var(--line)}
+  .layerzoom{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+  @media (max-width:700px){.layerzoom{grid-template-columns:1fr}}
+  .box{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px}
+  .box h5{margin:0 0 6px;font:600 12.5px var(--mono);color:#1b2740;letter-spacing:.03em}
+  .box ul{margin:0;padding-left:16px;font-size:13px;color:#3b4860}
+  .box li{margin:3px 0}
+
+  .dsa{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+  @media (max-width:700px){.dsa{grid-template-columns:1fr}}
+  .keys{display:flex;flex-wrap:wrap;gap:3px;margin:8px 0}
+  .keys i{width:11px;height:11px;border-radius:3px;background:#e2e8f4;display:block}
+  .keys i.sel{background:#1d4ed8}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:8px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+
+  .lanes3{display:grid;grid-template-columns:1fr;gap:10px;margin:16px 0}
+  .lane3{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 14px}
+  .lane3 .hd{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between}
+  .lane3 .hd .t{font:600 13px var(--mono);color:#1b2740}
+  .lane3 .hd .n{font:12.5px var(--mono);color:var(--dim)}
+  .bytes{display:flex;height:22px;border-radius:5px;overflow:hidden;margin:9px 0 4px;border:1px solid var(--line)}
+  .bytes i{display:block;height:100%}
+  .bytes .b1{background:#f0a184} .bytes .b2{background:#f5c99b} .bytes .b3{background:#a8ecc4}
+  .bytes .b4{background:#cfe3fb} .bytes .b5{background:#e6ecf8}
+
+  .spec{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .specrow{display:flex;gap:4px;align-items:center;margin:8px 0}
+  .specrow .s{flex:1;height:30px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+              font:11.5px var(--mono);color:#0b1220;border:1px solid #00000010}
+  .specrow .draft{background:#dbe7fb}
+  .specrow .verify{background:#a8ecc4}
+  .specrow .acc{background:#8fd8c4}
+  .specrow .rej{background:#f6d5cd;color:#8a3a1c}
+
+  .buckets{display:flex;gap:5px;align-items:flex-end;height:70px;margin:10px 0}
+  .buckets div{flex:1;background:linear-gradient(180deg,#7db3f0,#cfe3fb);border-radius:4px 4px 0 0;
+               position:relative}
+  .buckets div span{position:absolute;bottom:-19px;left:0;right:0;text-align:center;font:10.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 计算器 ---------- */
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:180px 1fr 104px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr 1fr;gap:6px 10px}
+    .calc .ctl label{grid-column:1/-1}.calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent)}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff;color:var(--fg)}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,1fr)}
+  .calc .row.g3{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:1fr}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:18px/1.35 var(--mono);font-weight:600;color:var(--ink)}
+  .calc .cell .v.good{color:var(--good)} .calc .cell .v.warn{color:var(--waste)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .upd{font-size:12.5px;color:var(--dim);margin-top:14px}
+  .verdictbox{margin-top:14px;border-radius:10px;padding:11px 14px;font-size:13.5px;border:1px solid}
+  .verdictbox.ok{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .verdictbox.no{background:#fff4ec;border-color:#f0d9c8;color:#9a4d06}
+
+  /* ---------- 误区 / 自测 / 链接 ---------- */
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:10px 0;margin:0}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:11px 14px;font-size:13.5px;color:#4a3a1c;margin:16px 0}
+
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+
+
+  /* ---------- 本页新增组件 ---------- */
+  .pill{display:inline-block;font:600 9.5px var(--mono);letter-spacing:.04em;border-radius:999px;
+        padding:1px 7px;vertical-align:1px;white-space:nowrap}
+  .pill.src{background:#eefbf8;border:1px solid #b7e3d8;color:#0b6b3f}
+  .pill.inf{background:#fdf7ec;border:1px solid #f0d9c8;color:#9a4d06}
+  .legend-pills{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--dim);margin:10px 0 0}
+  .legend-pills span{display:inline-flex;align-items:center;gap:6px}
+
+  .rmwrap{overflow-x:auto;padding:2px 0 6px;-webkit-overflow-scrolling:touch}
+  .rankmap{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:7px;min-width:720px}
+  .rk{border:1px solid var(--line);border-radius:9px;background:#fff;padding:8px 9px;min-width:0}
+  .rk .rr{font:700 10.5px var(--mono);color:var(--dim2);letter-spacing:.05em}
+  .rk .re{font:10px/1.5 var(--mono);color:#9a4d06;margin-top:4px;overflow-wrap:anywhere}
+  .rk .rkv{font:10px/1.5 var(--mono);color:#0b6b3f;margin-top:2px}
+  .rk.gA{border-color:#f0cdb8;background:#fffaf6}
+  .rk.gB{border-color:#bcd0f0;background:#f7f9ff}
+  .rk.whole{border-color:#b7e3d8;background:#f5fdfa}
+  .rmhead{font:600 11.5px var(--mono);color:var(--dim2);letter-spacing:.04em;margin:16px 0 4px}
+  .rmcap{font-size:12px;color:var(--dim2);margin-top:5px;line-height:1.6}
+
+  .grp{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:7px 0}
+  .grp .gl{font:11px var(--mono);color:var(--dim2);min-width:76px}
+  .grp .g{border:1px solid #cfd8e8;background:#f7f9ff;border-radius:7px;padding:2px 7px;
+          font:11px var(--mono);color:#1b2740}
+  .grp .g.tp{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .grp .g.ep{background:#fffaf6;border-color:#f0cdb8;color:#9a4d06}
+  .grp .g.mt{background:#e8eefb;border-color:#b9cdf0;color:#12489c}
+
+  .kv2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:16px 0}
+  @media (max-width:700px){.kv2{grid-template-columns:1fr}}
+  .kv2 .box h5{margin-bottom:8px}
+  .kv2 .box p{margin:0;font-size:13px;color:#3b4860}
+
+  pre .cm{color:#7d8aa3}
+  pre .hl{color:#b23a10;font-weight:600}
+  pre .gr{color:#0b6b3f}
+
+  .tblnote{font-size:12.5px;color:var(--dim2);margin:6px 0 0}
+  .tight td,.tight th{padding:8px 10px}
+  @media (max-width:600px){.tight td{padding:3px 0}}
+
+  .widewrap{overflow-x:auto}
+  .widewrap table{min-width:680px}
+  @media (max-width:600px){.widewrap table{min-width:0}}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">18 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-02</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 6 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-rail-m">18 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>comm-parallel<span class="sep">/</span>sglang-tp8-ep1-4-8-mixtral
+  </div>
+  <h1><code>--tp 8 --ep 1/4/8</code> 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</h1>
+  <p class="sub">三种写法在默认 backend 下的 MoE 归约都落在同一个 <code>_TP</code>(8) 组上；<code>--ep</code> 改的是权重怎么摆，改通信的是 <code>--moe-a2a-backend</code></p>
+  <div class="metarow">
+    <span>2026-11-02</span><span>SGLang v0.5.23</span><span>Mixtral-8x7B</span><span>TP / EP</span>
+    <span>all-reduce</span><span>all-to-all</span><span>源码走读</span>
+  </div>
+
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#sem">参数语义</a>
+    <a href="#groups">并行组</a>
+    <a href="#split">切分逐项</a>
+    <a href="#chain">调用链</a>
+    <a href="#comm">通信对照</a>
+    <a href="#mem">显存账本</a>
+    <a href="#summary">汇总表</a>
+    <a href="#myth">常见误解</a>
+    <a href="#quiz">自测</a>
+  </nav>
+
+  <div class="note">
+    <b>术语约定。</b>源码里的标识一律保留原样，便于直接 grep：<code>tp_size</code>、<code>ep_size</code>、
+    <code>moe_tp_size</code>、<code>moe_dp_size</code>、<code>_TP</code>、<code>_MOE_EP</code>、<code>_MOE_TP</code>、
+    <code>all_reduce</code>、<code>all_to_all</code>、<code>reduce_scatter</code>。命令行里的 <code>--ep</code> 是
+    <code>--ep-size / --expert-parallel-size</code> 的显式 alias（<code>arg_groups/fields/parallel.py:281-288</code>）；
+    <code>--tp</code> 在 v0.5.23 里没有单独注册，是 argparse 对 <code>--tp-size</code> 的无歧义前缀缩写。
+    「EP 组」指源码里的 <code>get_moe_ep_group()</code>，「MoE-TP 组」指 <code>get_moe_tp_group()</code>；
+    「TP 组」始终指 <code>_TP</code>，即 8 个 rank 的整组。
+  </div>
+
+  <div class="note" style="background:#f7f9ff;border-left-color:var(--accent);color:#33415c">
+    <b>源码基线。</b>SGLang 官方仓库 <code>github.com/sgl-project/sglang</code>，tag <code>v0.5.23</code>，
+    commit <code>297e54fd105e974cdf401e5b4d20253a22c16f90</code>（2026-10-28）。GitHub Releases 页面此时最新发布是
+    <code>v0.5.22</code>（2026-10-19），但 <code>v0.5.23</code> 是仓库里最新的稳定 tag，本页以该 tag 为准。
+    模型为 <code>mistralai/Mixtral-8x7B-Instruct-v0.1</code>（HF <code>config.json</code>：hidden 4096、
+    intermediate 14336、32 层、32 个 q 头、8 个 kv 头、8 个专家、top-2、vocab 32000、BF16）。
+    运行口径：单机 8 卡、<code>pp_size=1</code>、<code>dp_size=1</code>、<code>attn_dp_size=1</code>、
+    <code>moe_a2a_backend=none</code>（默认）。行号相对仓库根，例如
+    <code>python/sglang/srt/layers/moe/utils.py:890</code>。本页由读源码与算术推导产出，<b>未做运行时实测</b>；
+    每条结论标注 <span class="pill src">源码</span>（代码里能直接看到）或 <span class="pill inf">推断</span>（由代码结构推导、未实测）。
+  </div>
+
+  <div class="tldr" id="tldr">
+    <h4>速览 —— 六条结论</h4>
+    <ul>
+      <li><b>三种写法在默认 backend 下通信完全相同。</b>MoE 段最后只有一次 <code>_TP</code>(8) 上的 all-reduce，
+        注意力段也只有一次 <code>_TP</code>(8) 上的 all-reduce，载荷都是 <code>[T, 4096]</code> BF16；
+        <code>_MOE_EP</code>/<code>_MOE_TP</code> 在三种配置下要么等于 <code>_TP</code>，要么在归约前被合并回 <code>_TP</code>。
+        <span class="pill src">源码</span></li>
+      <li><b><code>--ep 1</code> 不是「专家不切」。</b>8 个 rank 各存全部 8 个专家、每个专家只存 intermediate 的 1/8
+        （1792 列）：<code>w13=[8,3584,4096]</code>、<code>w2=[8,4096,1792]</code>。
+        每个专家都切了 8 份，只是切的方向是「专家内 intermediate」。<span class="pill src">源码</span></li>
+      <li><b><code>--tp 8 --ep 4</code> 得到的是 <code>moe_tp=2</code>，不是 2 份专家副本。</b>
+        每个 rank 拿 2 个专家、每个专家的 intermediate 再切 2 份（7168）；
+        EP 组是 <code>{0,2,4,6}</code> / <code>{1,3,5,7}</code>，MoE-TP 组是 <code>{0,1}</code> / <code>{2,3}</code> / …
+        <span class="pill src">源码</span></li>
+      <li><b><code>--ep 8</code> 是每 rank 一个完整专家。</b><code>_MOE_EP</code> 直接复用 <code>_TP</code>，
+        <code>_MOE_TP</code> 退化成 8 个单例；归约走 <code>moe_expert_parallel_all_reduce</code>，但组还是同一个 <code>_TP</code>。
+        <span class="pill src">源码</span></li>
+      <li><b>每 rank 的专家参数恒定。</b>三种配置都是 176.16M 参数/层 = 5.64B/全模型，
+        因为 <code>(E/ep) × (I/moe_tp) = E×I/tp</code>，与 <code>ep</code> 无关；
+        变的是形状：<code>[8, 3584]</code> → <code>[2, 14336]</code> → <code>[1, 28672]</code>（w13 的后两维）。<span class="pill src">源码</span></li>
+      <li><b>真正出现 all-to-all 的是 a2a backend，而且它把 <code>ep</code> 强制成 <code>tp</code>。</b>
+        <code>deepep/mooncake/nixl/mori/flashinfer/megamoe</code> 等后端会把
+        <code>--ep 1/4/8</code> 三种写法<b>统一改成 <code>ep=8</code></b>；此时 MoE 段才是
+        dispatch + combine 两次 all-to-all，载荷从 14.3 KiB 降到约 4 KiB/token/层（按 rank 计）。<span class="pill src">源码</span><span class="pill inf">字节为推导</span></li>
+    </ul>
+  </div>
+
+  <h2 id="sem"><span class="n">01</span>参数语义：<code>--ep</code> 改的是哪个宽度</h2>
+  <p class="lead">先把三个宽度分开：<code>tp_size</code> 是一个 model replica 的<b>进程总数</b>，注意看源码注释 ——
+  「tp_size is the world size, not the real tensor parallel size」；注意力真正用的宽度是 <code>attn_tp_size</code>，
+  专家内部真正用的宽度是 <code>moe_tp_size</code>。</p>
+
+<pre><code><span class="cm"># python/sglang/srt/runtime_context.py:137-157（derive_parallel_widths）</span>
+attn_tp_size = tp_size / (attn_dp_size × attn_cp_size)   <span class="cm"># 注意力 TP 宽度</span>
+moe_tp_size  = tp_size / (ep_size × moe_dp_size)         <span class="cm"># 每个专家内部的 TP 宽度</span>
+world_size   = tp_size × pp_size                          <span class="cm"># 一个 replica 的进程数</span>
+num_dp_ranks = dp_size × attn_dp_size                     <span class="cm"># 调度器数量</span></code></pre>
+
+  <p>把本页的三个配置代进去（<code>pp=dp=attn_dp=attn_cp=moe_dp=1</code>）：</p>
+  <div class="widewrap">
+  <table class="tight">
+    <thead><tr><th>命令行</th><th>ep_size</th><th>moe_tp = tp//ep//moe_dp</th><th>每 rank 专家数 = E/ep</th><th>每专家 intermediate = I/moe_tp</th><th>EP 组大小</th><th>world</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>--tp 8 --ep 1</code></td><td data-label="ep_size">1</td><td data-label="moe_tp = tp//ep//…"><b>8</b></td><td data-label="每 rank 专家数 = E/ep">8</td><td data-label="每专家 intermediate …">1792</td><td data-label="EP 组大小">1（单例）</td><td data-label="world">8</td></tr>
+      <tr><td class="k"><code>--tp 8 --ep 4</code></td><td data-label="ep_size">4</td><td data-label="moe_tp = tp//ep//…"><b>2</b></td><td data-label="每 rank 专家数 = E/ep">2</td><td data-label="每专家 intermediate …">7168</td><td data-label="EP 组大小">4</td><td data-label="world">8</td></tr>
+      <tr><td class="k"><code>--tp 8 --ep 8</code></td><td data-label="ep_size">8</td><td data-label="moe_tp = tp//ep//…"><b>1</b></td><td data-label="每 rank 专家数 = E/ep">1</td><td data-label="每专家 intermediate …">14336</td><td data-label="EP 组大小">8</td><td data-label="world">8</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tblnote">E=8（专家数），I=14336（专家 intermediate），H=4096（hidden）。
+  <code>moe_tp</code> 的公式在 <code>runtime_context.py:154</code>；<code>ep_size</code> 字段在
+  <code>arg_groups/fields/parallel.py:281-288</code>，默认值 1。</p>
+
+  <div class="kv2">
+    <div class="box">
+      <h5>约束一：整除关系 <span class="pill src">源码</span><span class="pill inf">ep | tp 为推断</span></h5>
+      <p><code>FusedMoE.__init__</code> 显式断言 <code>num_experts % ep == 0</code>
+      （<code>layers/moe/fused_moe_triton/layer.py:414</code>）与
+      <code>intermediate_size % moe_tp == 0</code>（同文件 <code>:427</code>）。
+      <code>moe_tp = tp // ep</code> 是整除，组构造假设 <code>ep × moe_tp × moe_dp == tp</code>；
+      因此实际可用的整齐布局要求 <code>ep | tp</code>，但源码在默认 <code>moe_dp=1</code> 时没有为它单独写断言。若 <code>ep=3, tp=8</code>，
+      <code>moe_tp=2</code> 只覆盖 6 个 rank，<b>不要这样配</b>。</p>
+    </div>
+    <div class="box">
+      <h5>约束二：moe_dp 参与时的等式 <span class="pill src">源码</span></h5>
+      <p>只有在 <code>moe_dp_size &gt; 1</code> 时才进入这段校验：
+      <code>ep × moe_dp ≤ tp</code>，且当 <code>ep &gt; 1</code> 时要求
+      <code>ep × moe_dp == tp</code>（<code>arg_groups/parallel_hook.py:170-183</code>）。
+      另外 <code>attn_cp_size != moe_dp_size</code> 时只允许 <code>moe_dp == 1</code>（同文件 <code>:189-192</code>），
+      所以「<code>moe_dp=2</code>」不是给普通 TP 部署用的旋钮。</p>
+    </div>
+    <div class="box">
+      <h5>约束三：a2a backend 强制 <code>ep = tp</code> <span class="pill src">源码</span></h5>
+      <p><code>overrides.py:1578-1589</code> 列出 <code>_A2A_EP_SPANNING_BACKENDS</code>：
+      <code>megamoe、deepep、deepep_v2、mooncake、nixl、ascend_fuseep、flashinfer、flashinfer_megamoe、mori</code>。
+      <code>_a2a_ep_size()</code>（<code>:1609-1619</code>）对它们统一返回 <code>{"ep_size": view.tp_size}</code>，
+      并打印「The expert parallel size is adjusted from X to the tensor parallel size」。</p>
+    </div>
+    <div class="box">
+      <h5>数据并行 / world <span class="pill src">源码</span></h5>
+      <p><code>dp_size</code> 是独立的 replica 数，不是 TP 组内的一个维度：
+      <code>num_dp_ranks = dp_size × attn_dp_size</code>（<code>runtime_context.py:202-207</code>），
+      replica 之间没有 MoE 集合通信（每个 replica 一套 WORLD，见 <code>distributed/bootstrap.py:304-340</code>）。本页三个配置 <code>dp=attn_dp=1</code>，所以
+      <code>world = tp × pp = 8</code>（<code>runtime_context.py:173-178</code>），没有 DP 组。</p>
+    </div>
+  </div>
+
+  <h2 id="groups"><span class="n">02</span>并行组：8 个 rank 被切成哪些组</h2>
+  <p class="lead">组是 <code>initialize_model_parallel()</code> 按 rank 区间现算的：
+  TP 组永远是 <code>[0..7]</code>；EP 组和 MoE-TP 组随 <code>ep</code> 变，但它们的<b>并集</b>始终是这 8 个 rank。
+  三种配置的全部差异可以压缩成一张表。</p>
+
+  <div class="widewrap">
+  <table class="tight">
+    <thead><tr><th>组对象</th><th><code>ep=1</code></th><th><code>ep=4</code></th><th><code>ep=8</code></th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>_TP</code>（tensor）</td><td data-label="ep=1"><code>[0,1,2,3,4,5,6,7]</code></td><td data-label="ep=4"><code>[0..7]</code></td><td data-label="ep=8"><code>[0..7]</code></td></tr>
+      <tr><td class="k"><code>_MOE_EP</code>（专家）</td><td data-label="ep=1">8 个单例：<code>[0] [1] … [7]</code></td><td data-label="ep=4"><code>[0,2,4,6]</code>、<code>[1,3,5,7]</code></td><td data-label="ep=8"><code>[0..7]</code>（复用 <code>_TP</code>）</td></tr>
+      <tr><td class="k"><code>_MOE_TP</code>（专家内 TP）</td><td data-label="ep=1"><code>[0..7]</code>（复用 <code>_TP</code>）</td><td data-label="ep=4"><code>[0,1] [2,3] [4,5] [6,7]</code></td><td data-label="ep=8">8 个单例</td></tr>
+      <tr><td class="k"><code>_MOE_DP</code></td><td data-label="ep=1">8 个单例</td><td data-label="ep=4">8 个单例</td><td data-label="ep=8">8 个单例</td></tr>
+      <tr><td class="k"><code>_ATTN_TP</code></td><td data-label="ep=1"><code>[0..7]</code></td><td data-label="ep=4"><code>[0..7]</code></td><td data-label="ep=8"><code>[0..7]</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tblnote">构造代码：<code>distributed/parallel_state.py:2891-2919</code>（<code>_MOE_EP</code>）、
+  <code>:2921-2949</code>（<code>_MOE_TP</code>）、<code>:2862-2889</code>（<code>_MOE_DP</code>）、
+  <code>:2671-2695</code>（<code>_TP</code>）。别名规则：<code>ep == tp</code> 时 <code>_MOE_EP = _TP</code>（<code>:2894-2895</code>）；
+  <code>moe_tp == tp</code> 时 <code>_MOE_TP = _TP</code>（<code>:2923-2924</code>）。
+  <code>_MOE_DP</code> 在 <code>moe_dp=1</code> 时是 8 个单例，不参与本页的通信。</p>
+
+  <p>rank 的三个坐标由 <code>tp_rank</code> 整除/取模得到（<code>runtime_context.py:118-135</code>）：</p>
+<pre><code><span class="cm"># ep=4, tp=8, moe_dp=1 → moe_tp=2</span>
+moe_ep_rank = tp_rank // moe_tp   <span class="cm"># 0,0,1,1,2,2,3,3 —— 决定拿哪两个专家</span>
+moe_tp_rank = tp_rank %  moe_tp   <span class="cm"># 0,1,0,1,0,1,0,1 —— 决定拿该专家的哪半列</span></code></pre>
+  <p>所以 <code>ep=4</code> 的专家布局是「连续块 × 列切片」：rank 0/1 都拿专家 0、1，rank 0 拿列
+  <code>[0:7168]</code>、rank 1 拿列 <code>[7168:14336]</code>；rank 2/3 拿专家 2、3，以此类推。
+  EP 组 <code>{0,2,4,6}</code> 合起来是全部 8 个专家的<b>前半列</b>，<code>{1,3,5,7}</code> 是后半列。
+  这解释了为什么下面会出现「EP 组 4 个 rank + MoE-TP 组 2 个 rank」的混合归约。</p>
+
+  <h4 class="micro">三张 rank 卡：每张卡是一个 rank，橙字是专家内容，绿字是 KV</h4>
+  <p class="hint" style="margin-top:0">attention 切片在三种配置下完全相同（q 4 头、kv 1 头、o_proj 取 1/8），不在卡片里重复。</p>
+
+  <div class="rmhead">ep=1 · moe_tp=8 · 每 rank：8 个专家 × intermediate 的 1/8</div>
+  <div class="rmwrap">
+    <div class="rankmap">
+      <div class="rk"><div class="rr">R0</div><div class="re">E0–7 · 列 0/8</div><div class="rkv">KV h0</div></div>
+      <div class="rk"><div class="rr">R1</div><div class="re">E0–7 · 列 1/8</div><div class="rkv">KV h0</div></div>
+      <div class="rk"><div class="rr">R2</div><div class="re">E0–7 · 列 2/8</div><div class="rkv">KV h0</div></div>
+      <div class="rk"><div class="rr">R3</div><div class="re">E0–7 · 列 3/8</div><div class="rkv">KV h0</div></div>
+      <div class="rk"><div class="rr">R4</div><div class="re">E0–7 · 列 4/8</div><div class="rkv">KV h0</div></div>
+      <div class="rk"><div class="rr">R5</div><div class="re">E0–7 · 列 5/8</div><div class="rkv">KV h0</div></div>
+      <div class="rk"><div class="rr">R6</div><div class="re">E0–7 · 列 6/8</div><div class="rkv">KV h0</div></div>
+      <div class="rk"><div class="rr">R7</div><div class="re">E0–7 · 列 7/8</div><div class="rkv">KV h0</div></div>
+    </div>
+  </div>
+
+  <div class="rmhead">ep=4 · moe_tp=2 · 每 rank：2 个专家 × 每个专家的 1/2；橙底 = EP 组 {0,2,4,6}，蓝底 = EP 组 {1,3,5,7}</div>
+  <div class="rmwrap">
+    <div class="rankmap">
+      <div class="rk gA"><div class="rr">R0</div><div class="re">E0,1 · 列 0/2</div><div class="rkv">KV h0</div></div>
+      <div class="rk gB"><div class="rr">R1</div><div class="re">E0,1 · 列 1/2</div><div class="rkv">KV h0</div></div>
+      <div class="rk gA"><div class="rr">R2</div><div class="re">E2,3 · 列 0/2</div><div class="rkv">KV h0</div></div>
+      <div class="rk gB"><div class="rr">R3</div><div class="re">E2,3 · 列 1/2</div><div class="rkv">KV h0</div></div>
+      <div class="rk gA"><div class="rr">R4</div><div class="re">E4,5 · 列 0/2</div><div class="rkv">KV h0</div></div>
+      <div class="rk gB"><div class="rr">R5</div><div class="re">E4,5 · 列 1/2</div><div class="rkv">KV h0</div></div>
+      <div class="rk gA"><div class="rr">R6</div><div class="re">E6,7 · 列 0/2</div><div class="rkv">KV h0</div></div>
+      <div class="rk gB"><div class="rr">R7</div><div class="re">E6,7 · 列 1/2</div><div class="rkv">KV h0</div></div>
+    </div>
+  </div>
+  <p class="rmcap">同色 4 个 rank 是一个 EP 组：组内 <code>ep_rank</code> 从 0 到 3，各拿 2 个专家的前半列或后半列。
+  MoE-TP 组是上下相邻的两张卡（<code>{0,1}</code>、<code>{2,3}</code>…），它们持有同一批专家的两半列。</p>
+
+  <div class="rmhead">ep=8 · moe_tp=1 · 每 rank：1 个完整专家；EP 组 = TP 组</div>
+  <div class="rmwrap">
+    <div class="rankmap">
+      <div class="rk whole"><div class="rr">R0</div><div class="re">E0 · 完整</div><div class="rkv">KV h0</div></div>
+      <div class="rk whole"><div class="rr">R1</div><div class="re">E1 · 完整</div><div class="rkv">KV h0</div></div>
+      <div class="rk whole"><div class="rr">R2</div><div class="re">E2 · 完整</div><div class="rkv">KV h0</div></div>
+      <div class="rk whole"><div class="rr">R3</div><div class="re">E3 · 完整</div><div class="rkv">KV h0</div></div>
+      <div class="rk whole"><div class="rr">R4</div><div class="re">E4 · 完整</div><div class="rkv">KV h0</div></div>
+      <div class="rk whole"><div class="rr">R5</div><div class="re">E5 · 完整</div><div class="rkv">KV h0</div></div>
+      <div class="rk whole"><div class="rr">R6</div><div class="re">E6 · 完整</div><div class="rkv">KV h0</div></div>
+      <div class="rk whole"><div class="rr">R7</div><div class="re">E7 · 完整</div><div class="rkv">KV h0</div></div>
+    </div>
+  </div>
+
+  <h4 class="micro">同一张表换成组标签</h4>
+  <div class="grp"><span class="gl">ep=1</span>
+    <span class="g tp">TP [0..7]</span><span class="g ep">EP: [0] [1] … [7]</span><span class="g mt">MoE-TP = TP</span></div>
+  <div class="grp"><span class="gl">ep=4</span>
+    <span class="g tp">TP [0..7]</span><span class="g ep">EP [0,2,4,6]</span><span class="g ep">EP [1,3,5,7]</span>
+    <span class="g mt">MoE-TP [0,1] [2,3] [4,5] [6,7]</span></div>
+  <div class="grp"><span class="gl">ep=8</span>
+    <span class="g tp">TP [0..7]</span><span class="g ep">EP = TP</span><span class="g mt">MoE-TP: 8 × [r]</span></div>
+
+  <h2 id="split"><span class="n">03</span>切分逐项：哪些对象随 <code>ep</code> 变，哪些不变</h2>
+  <p class="lead">一句话版：<b>attention、KV cache、embedding/lm_head、router 全都不随 <code>ep</code> 变</b>；
+  只有专家权重的「专家维 × intermediate 维」在重新排布，且每 rank 的总预算是常数。
+  Mixtral 没有 dense MLP（所有 FFN 都是专家），所以「dense MLP」这一项在它身上是空的；同一位置在 dense 模型里走
+  <code>MergedColumnParallelLinear</code> + <code>RowParallelLinear</code>，与 <code>ep</code> 无关。</p>
+
+  <div class="widewrap">
+  <table class="tight">
+    <thead><tr><th>对象</th><th><code>--ep 1</code>（moe_tp=8）</th><th><code>--ep 4</code>（moe_tp=2）</th><th><code>--ep 8</code>（moe_tp=1）</th><th>随 ep 变？</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">attention<br><code>qkv_proj</code></td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[768, 4096]</code><br>q 4 头 · k 1 头 · v 1 头</td>
+        <td data-label="--ep 4（moe_tp=2）">同左</td><td data-label="--ep 8（moe_tp=1）">同左</td>
+        <td data-label="随 ep 变？">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">attention<br><code>o_proj</code></td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[4096, 512]</code><br>输入按 head 切 1/8</td>
+        <td data-label="--ep 4（moe_tp=2）">同左</td><td data-label="--ep 8（moe_tp=1）">同左</td>
+        <td data-label="随 ep 变？">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">dense MLP</td>
+        <td colspan="3" data-label="说明">Mixtral 无 dense MLP；dense 模型同一位置：<code>gate_up [2I/tp, H]</code>、<code>down [H, I/tp]</code>，与 <code>ep</code> 无关</td>
+        <td data-label="--ep 4（moe_tp=2）">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">专家 <code>w13</code><br><code>[E/ep, 2I/moe_tp, H]</code></td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[8, 3584, 4096]</code></td>
+        <td data-label="--ep 4（moe_tp=2）"><code>[2, 14336, 4096]</code></td>
+        <td data-label="--ep 8（moe_tp=1）"><code>[1, 28672, 4096]</code></td>
+        <td data-label="随 ep 变？"><b>是</b> <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">专家 <code>w2</code><br><code>[E/ep, H, I/moe_tp]</code></td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[8, 4096, 1792]</code></td>
+        <td data-label="--ep 4（moe_tp=2）"><code>[2, 4096, 7168]</code></td>
+        <td data-label="--ep 8（moe_tp=1）"><code>[1, 4096, 14336]</code></td>
+        <td data-label="随 ep 变？"><b>是</b> <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">专家参数/rank/层</td>
+        <td data-label="--ep 1（moe_tp=8）"><b>176.16M</b></td><td data-label="--ep 4（moe_tp=2）"><b>176.16M</b></td><td data-label="--ep 8（moe_tp=1）"><b>176.16M</b></td>
+        <td data-label="随 ep 变？">否（恒等式）<span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">router <code>gate</code></td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[8, 4096]</code> 每 rank 全量</td><td data-label="--ep 4（moe_tp=2）">同左</td><td data-label="--ep 8（moe_tp=1）">同左</td>
+        <td data-label="随 ep 变？">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">embedding</td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[4000, 4096]</code>（vocab 1/8）</td><td data-label="--ep 4（moe_tp=2）">同左</td><td data-label="--ep 8（moe_tp=1）">同左</td>
+        <td data-label="随 ep 变？">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">lm_head</td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[4000, 4096]</code> + logits all-gather</td><td data-label="--ep 4（moe_tp=2）">同左</td><td data-label="--ep 8（moe_tp=1）">同左</td>
+        <td data-label="随 ep 变？">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">KV cache</td>
+        <td data-label="--ep 1（moe_tp=8）">1 个 kv 头/rank · 16 KiB/token</td><td data-label="--ep 4（moe_tp=2）">同左</td><td data-label="--ep 8（moe_tp=1）">同左</td>
+        <td data-label="随 ep 变？">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">激活 / hidden</td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[T, 4096]</code> 全量，8 rank 各一份</td><td data-label="--ep 4（moe_tp=2）">同左</td><td data-label="--ep 8（moe_tp=1）">同左</td>
+        <td data-label="随 ep 变？">否 <span class="pill src">源码</span></td>
+      </tr>
+      <tr>
+        <td class="k">token / 专家路由</td>
+        <td data-label="--ep 1（moe_tp=8）"><code>[T, 8]</code> logits、<code>[T, 2]</code> topk，全 rank 相同；全部 8 专家命中</td>
+        <td data-label="--ep 4（moe_tp=2）">topk 映射到本地 0/1，其余 6 个专家 → <code>-1</code> 丢弃</td>
+        <td data-label="--ep 8（moe_tp=1）">topk 映射到本地 0，其余 7 个 → <code>-1</code> 丢弃</td>
+        <td data-label="随 ep 变？"><b>是</b>（本地掩码）<span class="pill src">源码</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 class="mini">3.1 attention：固定按 8 个 head 切，和 <code>ep</code> 无关</h3>
+  <p><code>MixtralAttention</code> 只读 <code>get_parallel().tp_size</code>，没有引用 <code>ep</code>：
+  <code>models/mixtral.py:137-153</code> 把 32 个 q 头除以 8 得 4 头/rank；8 个 kv 头除以 8 得 1 头/rank，
+  正好不需要复制。权重形状由 <code>QKVParallelLinear</code>（<code>layers/linear.py:1075</code>，
+  头数除法在 <code>:1121-1136</code>）和 <code>RowParallelLinear</code>（<code>:1553</code>）决定。
+  <code>o_proj</code> 在 Mixtral 里显式传 <code>reduce_results=False</code>（<code>mixtral.py:166-173</code>），
+  所以它的求和不在 linear 内完成，而是交给后面的 stage boundary（见 04 节）。</p>
+
+  <h3 class="mini">3.2 专家：每 rank 的预算恒定，变的是「几个专家 × 多宽的列」</h3>
+  <p><code>FusedMoE.__init__</code> 先算本地专家数，再算本地 intermediate 宽度：</p>
+<pre><code><span class="cm"># python/sglang/srt/layers/moe/fused_moe_triton/layer.py:404-428</span>
+self._num_global_routed = num_experts - num_shared_slots        <span class="cm"># Mixtral: 8</span>
+assert self._num_global_routed % storage_ep_size == 0            <span class="cm"># :414</span>
+self._num_local_routed = self._num_global_routed // storage_ep_size   <span class="cm"># :415</span>
+self.num_local_experts = self._num_local_routed + num_fused_shared_experts
+
+assert intermediate_size % self.moe_tp_size == 0                 <span class="cm"># :427</span>
+self.intermediate_size_per_partition = intermediate_size // self.moe_tp_size  <span class="cm"># :428</span></code></pre>
+  <p>于是每 rank 的专家参数是：</p>
+  <div class="spec" style="background:#f8fafc">
+    <p style="margin:0;font:13.5px/1.9 var(--mono);color:#1b2740;overflow-wrap:anywhere">
+      params<sub>expert</sub> = (E / ep) × 3 × H × (I / moe_tp)<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= 3 × H × I × E / tp &nbsp;&nbsp;（当 ep × moe_tp = tp）<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= 3 × 4096 × 14336 × 8 / 8 = <b>176,160,768</b>
+    </p>
+  </div>
+  <p>参数形状落在 <code>UnquantizedFusedMoEMethod.create_weights</code>：
+  <code>w13 = [num_local_experts, 2 × intermediate_size_per_partition, hidden]</code>（<code>layers/quantization/unquant.py:779-812</code>），
+  <code>w2 = [num_local_experts, hidden, intermediate_size_per_partition]</code>（同文件 <code>:815-839</code>）。
+  <code>num_experts</code> 传进去的是 <code>self.num_local_experts</code>（<code>fused_moe_triton/layer.py:561-574</code>），
+  所以三种配置分别得到表中三种形状，但元素总数相同。</p>
+
+  <p>专家 id 到 rank 的映射是<b>连续块</b>：</p>
+<pre><code><span class="cm"># python/sglang/srt/layers/moe/fused_moe_triton/layer.py:1153-1161</span>
+def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+    start_idx = self._expert_storage_rank * self._num_local_routed
+    end_idx = start_idx + self._num_local_routed
+    if start_idx &lt;= expert_id &lt; end_idx:
+        return expert_id - start_idx
+    ...
+    return -1</code></pre>
+  <p>权重加载时再按 <code>moe_tp_rank</code> 切列：<code>_load_w13</code> 用
+  <code>narrow(shard_dim, shard_size * moe_tp_rank, shard_size)</code>（<code>:856-859</code>），
+  <code>_load_w2</code> 对输入维做同样的切片（<code>:948-951</code>）。
+  于是 <code>ep=4</code> 的 rank 0/1 拿到同一对专家、不同列；<code>ep=8</code> 的 rank r 拿到专家 r 的完整权重。
+  <span class="pill src">源码</span></p>
+
+  <h3 class="mini">3.3 router：唯一整份复制的权重</h3>
+  <p><code>MixtralMoE.gate</code> 是 <code>ReplicatedLinear</code>（<code>mixtral.py:85-92</code>），
+  形状 <code>[8, 4096]</code>，每个 rank 一份，不做 TP 切分。它的输出 <code>router_logits</code> 形状
+  <code>[T, 8]</code>，在每个 rank 上<b>完全相同</b>；<code>TopK</code>（<code>layers/moe/topk.py:674</code>）在本地算出
+  <code>[T, 2]</code> 的 <code>topk_ids/topk_weights</code>，仍然完全相同。router 的重复计算量是 8×4096 的小 GEMM，
+  可以忽略；它的意义是让每个 rank 都能独立决定「这个 token 该去哪个专家」，为后面的本地掩码服务。</p>
+
+  <h3 class="mini">3.4 embedding / lm_head：vocab 维切 8 份，输入侧 all-reduce，输出侧 all-gather</h3>
+  <p><code>VocabParallelEmbedding</code> 每 rank 存 <code>32000/8 = 4000</code> 行
+  （<code>num_embeddings_per_partition</code>，<code>layers/vocab_parallel_embedding.py:327</code>），
+  forward 里对本 rank 的 embedding 结果做一次 <code>tensor_model_parallel_all_reduce</code>
+  （<code>:515-534</code>），把「只有本 rank 负责的 token 行非零」的稀疏结果加起来。
+  <code>ParallelLMHead</code>（同文件 <code>:546</code>）同样切 8 份；生成时每个 rank 算 <code>[T, 4000]</code> 的 logits，
+  再由 <code>LogitsProcessor</code> 做 all-gather 拼成 <code>[T, 32000]</code>
+  （<code>layers/logits_processor.py:479-488</code> 决定开关，<code>:1024-1035</code> 执行）。
+  这两处都不读 <code>ep</code>。</p>
+
+  <h3 class="mini">3.5 KV cache：按 kv head 切，Mixtral 恰好 1 头/rank</h3>
+  <p><code>model_config.get_num_kv_heads(tp)</code> 返回 <code>max(1, total_kv_heads // tp)</code>
+  （<code>configs/model_config.py:1700-1711</code>），Mixtral 是 <code>8 // 8 = 1</code>；
+  pool 的每 token 字节数按 <code>head_num × (head_dim + v_head_dim) × dtype</code> 计算
+  （<code>model_executor/pool_configurator.py:704-709</code>）。所以每 rank 每 token 每层是
+  <code>2 × 1 × 128 × 2 B = 512 B</code>，32 层共 <b>16 KiB/token</b>。
+  KV 也不读 <code>ep</code>；它只跟 <code>attn_tp_size</code>（本页等于 8）有关。</p>
+
+  <h3 class="mini">3.6 激活与 token 路由：没有 token 搬移，只有本地掩码 + 最后求和</h3>
+  <p>attention 是 TP，8 个 rank 各算 4 个 q 头，<code>o_proj</code> 求和后每个 rank 都拿到完整的
+  <code>[T, 4096]</code> hidden state；所以 MoE 开始时 8 个 rank 的 token 集合完全相同。
+  MoE 内部不做 dispatch：<code>StandardDispatcher.dispatch()</code>（<code>token_dispatcher/standard.py:156-286</code>）
+  只做一件事 —— 当 <code>moe_ep_size &gt; 1</code> 时，把全局 <code>topk_ids</code> 用
+  <code>local_expert_mapping</code> 映射成本地 id，非本 rank 的专家映射成 <code>-1</code>（<code>:225-278</code>），
+  runner 看到 <code>-1</code> 直接跳过。于是每个 rank 只算自己的专家，对全部 token 都「看一遍」；
+  最后靠一次 all-reduce 把各 rank 的偏和加起来。这就是默认 backend 的 EP 实现方式：
+  <b>专家切权重，不切 token</b>。</p>
+
+  <h2 id="chain"><span class="n">04</span>调用链：从 decoder layer 到那一次 all-reduce</h2>
+  <p class="lead">下面是 Mixtral 一条 forward 在 MoE 段的关键路径。缩进表示调用，右侧是文件:行号；
+  标 <span class="hl">★</span> 的是通信点。</p>
+
+<pre><code>MixtralForCausalLM.forward                         python/sglang/srt/models/mixtral.py:361
+└─ MixtralModel.forward                            models/mixtral.py:313
+   └─ MixtralDecoderLayer.forward                  models/mixtral.py:256
+      ├─ attn_boundary.prepare                     layers/layer_boundary/stage.py:165
+      ├─ MixtralAttention.forward                  models/mixtral.py:191
+      │  ├─ qkv_proj  QKVParallelLinear            models/mixtral.py:157 · layers/linear.py:1075
+      │  ├─ RadixAttention.forward                 models/mixtral.py:181（num_kv_heads=1）
+      │  └─ o_proj    RowParallelLinear            models/mixtral.py:166 · layers/linear.py:1553
+      ├─ attn_boundary.finish                      stage.py:198
+      │  └─ <span class="hl">★ all-reduce over _TP(8)</span>              layers/layer_boundary/ops.py:209-245
+      ├─ ffn_boundary.prepare                      stage.py:165
+      ├─ MixtralMoE.forward                        models/mixtral.py:112
+      │  ├─ gate  ReplicatedLinear                 models/mixtral.py:85
+      │  ├─ TopK → select_experts                  layers/moe/topk.py:674 / :2821
+      │  └─ FusedMoE.forward                       layers/moe/fused_moe_triton/layer.py:1660
+      │     ├─ StandardDispatcher.dispatch         token_dispatcher/standard.py:156
+      │     │  └─ global → local expert id map     standard.py:225-278
+      │     ├─ run_moe_core → grouped GEMM         fused_moe_triton/layer.py:1789
+      │     └─ StandardDispatcher.combine          standard.py:288（无通信）
+      └─ ffn_boundary.finish                       stage.py:198
+         └─ SumGroup.MOE_OUTPUT                    layers/layer_boundary/ops.py:244-245
+            └─ sum_post_experts_output             layers/moe/utils.py:868
+               └─ _post_experts_sum                layers/moe/utils.py:881
+                  ├─ ep=1：reduce_tp only          :895-896 → _MOE_TP = _TP
+                  ├─ ep=4：merged                  :890-891 → _TP
+                  └─ ep=8：reduce_ep only          :893-894 → _MOE_EP = _TP
+</code></pre>
+
+  <p>关键点是 <code>FusedMoE</code> 本身<b>没有</b>做这次 all-reduce。Mixtral 创建 <code>FusedMoE</code> 时没有传
+  <code>reduce_results</code>（<code>mixtral.py:100-109</code>），它的默认值是 <code>False</code>
+  （<code>fused_moe_triton/layer.py:350</code>），所以 <code>forward_impl</code> 里的
+  <code>if self.reduce_results and (moe_tp_size &gt; 1 or moe_ep_size &gt; 1)</code>（<code>:1743-1744</code>）不触发。
+  求和被推迟到 stage boundary，由 <code>sum_post_experts_output</code> 完成。三种 <code>ep</code> 的差异全部在
+  <code>_post_experts_sum</code> 的三个分支里：</p>
+
+<pre><code><span class="cm"># python/sglang/srt/layers/moe/utils.py:881-897</span>
+def _post_experts_sum(hidden_states, *, reduce_ep, reduce_tp):
+    if reduce_ep and reduce_tp and can_merge_post_experts_all_reduce():
+        return tensor_model_parallel_all_reduce(hidden_states)   <span class="cm"># ep=4 走这里：合并成一次 _TP AR</span>
+    if reduce_ep:
+        hidden_states = moe_expert_parallel_all_reduce(hidden_states)  <span class="cm"># ep=8：_MOE_EP = _TP</span>
+    if reduce_tp:
+        hidden_states = moe_tensor_model_parallel_all_reduce(hidden_states)  <span class="cm"># ep=1：_MOE_TP = _TP</span>
+    return hidden_states</code></pre>
+
+  <p><code>can_merge_post_experts_all_reduce()</code> 的条件是
+  <code>moe_ep_size &gt; 1 and moe_tp_size &gt; 1 and moe_dp_size == 1</code>（<code>:837-848</code>），
+  注释写明「the two groups are an orthogonal decomposition of _TP」。也就是说 <code>ep=4</code> 本来要分别做
+  EP(4) 和 MoE-TP(2) 两次 all-reduce，但因为两个组正交且 <code>moe_dp=1</code>，等价于一次 8-rank all-reduce，
+  于是被合并了。这是 <code>ep=4</code> 最容易被忽略的一处源码行为。</p>
+
+  <div class="note" style="background:#eefbf8;border-left-color:#b7e3d8;color:#0b3f2c">
+    <b>为什么三种分支最终都是同一个 <code>_TP</code>？</b>
+    <code>ep=1</code> 时 <code>_MOE_TP = _TP</code>（<code>parallel_state.py:2923-2924</code>）；
+    <code>ep=8</code> 时 <code>_MOE_EP = _TP</code>（<code>:2894-2895</code>）；
+    <code>ep=4</code> 时走合并分支，直接调用 <code>tensor_model_parallel_all_reduce</code> → <code>get_tp_group()</code>。
+    三个 wrapper 分别定义在 <code>distributed/communication_op.py:21-23、132-139</code>，
+    但落到的 device group 是同一个 <code>_TP</code>（8 个 rank）。<span class="pill src">源码</span>
+  </div>
+
+  <h3 class="mini">4.1 权重加载的调用链</h3>
+<pre><code>ModelRunner.load_model                            model_executor/model_runner.py:1270
+└─ load_model_with_memory_saver → DefaultModelLoader.load_model   model_loader/loader.py:996
+   ├─ _initialize_model                           loader.py:1012-1016
+   │  └─ FusedMoE.__init__ 决定 local experts / per-partition width  fused_moe_triton/layer.py:404-428
+   └─ load_weights_and_postprocess                loader.py:1028
+      └─ MixtralForCausalLM.load_weights          models/mixtral.py:392
+         ├─ qkv_proj 映射（q/k/v → 一个 qkv_proj）  mixtral.py:393-398
+         └─ expert 映射                           mixtral.py:402-407 / :440-459
+            └─ FusedMoE.weight_loader             fused_moe_triton/layer.py:1163
+               ├─ global → local id               :1153-1161
+               └─ _load_w13 / _load_w2            :788 / :881
+                  └─ narrow by moe_tp_rank        :856-859 / :948-951</code></pre>
+  <p>加载路径解释了「同一份 checkpoint，三种配置加载出不同形状」：<code>_initialize_model</code> 先按
+  <code>ep/moe_tp</code> 建好参数张量，<code>weight_loader</code> 再把 checkpoint 里的整专家权重切出本 rank 需要的那一块。
+  对未量化的 BF16 checkpoint，权重不需要重排，同一份文件可以按任意 <code>ep</code> 启动。</p>
+
+  <h2 id="comm"><span class="n">05</span>通信对照：<code>ep</code> 从 1→4→8，通信量不变</h2>
+  <p class="lead">这是本页最反直觉的一条：<b>三种配置的通信原语、通信组、字节数完全相同</b>。
+  不是「差不多」，而是落在同一个 <code>_TP</code> device group 上的一次 all-reduce。
+  下面把每个通信点拆开，先给结论表，再给证明与反例。</p>
+
+  <div class="widewrap">
+  <table class="tight">
+    <thead><tr><th>阶段</th><th>原语</th><th>组（ep=1 / 4 / 8）</th><th>载荷（每次）</th><th>次数 / token step</th><th>每 rank 字节（ring）</th></tr></thead>
+    <tbody>
+      <tr><td class="k">input embedding</td><td data-label="原语"><code>all_reduce</code></td><td data-label="组（ep=1 / 4 / 8）"><code>_TP</code> / <code>_TP</code> / <code>_TP</code></td><td data-label="载荷（每次）"><code>[T, 4096]</code> BF16</td><td data-label="次数 / token step">1</td><td data-label="每 rank 字节（ring）">14.3 KiB / token</td></tr>
+      <tr><td class="k">attention <code>o_proj</code> 求和</td><td data-label="原语"><code>all_reduce</code></td><td data-label="组（ep=1 / 4 / 8）"><code>_TP</code> / <code>_TP</code> / <code>_TP</code></td><td data-label="载荷（每次）"><code>[T, 4096]</code> BF16</td><td data-label="次数 / token step">32（每层 1）</td><td data-label="每 rank 字节（ring）">14.3 KiB × 32</td></tr>
+      <tr><td class="k">MoE 专家输出求和</td><td data-label="原语"><code>all_reduce</code></td><td data-label="组（ep=1 / 4 / 8）"><code>_MOE_TP</code>=<code>_TP</code> / 合并 <code>_TP</code> / <code>_MOE_EP</code>=<code>_TP</code></td><td data-label="载荷（每次）"><code>[T, 4096]</code> BF16</td><td data-label="次数 / token step">32（每层 1）</td><td data-label="每 rank 字节（ring）">14.3 KiB × 32</td></tr>
+      <tr><td class="k">lm_head logits</td><td data-label="原语"><code>all_gather</code></td><td data-label="组（ep=1 / 4 / 8）"><code>_TP</code> / <code>_TP</code> / <code>_TP</code></td><td data-label="载荷（每次）"><code>[T, 4000]</code> → <code>[T, 32000]</code></td><td data-label="次数 / token step">1</td><td data-label="每 rank 字节（ring）">54.7 KiB / token</td></tr>
+      <tr><td class="k">MoE token dispatch</td><td data-label="原语"><code>all_to_all</code></td><td colspan="3" data-label="说明">默认 backend 下<b>不存在</b>；<code>StandardDispatcher</code> 只做本地 id 映射</td><td data-label="载荷（每次）">0</td><td data-label="次数 / token step">0</td></tr>
+      <tr><td class="k">reduce-scatter / send-recv</td><td data-label="原语">—</td><td colspan="3" data-label="说明">本页三种配置下不存在（只出现在 attn-DP、LayerNorm-SP、PP 路径）</td><td data-label="载荷（每次）">0</td><td data-label="次数 / token step">0</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tblnote">按 token 计：每层 2 次 AR，32 层 = 64 次；加 embedding 1 次 = <b>65 次 all-reduce</b>，
+  再加 1 次 logits all-gather。总字节约 <b>0.94 MiB/token/rank</b>（BF16、Ring 公式）。
+  字节推导：载荷 <code>[1, 4096]</code> BF16 = 8192 B；8-rank ring all-reduce 每 rank
+  <code>2×(8−1)/8×8192 = 14336 B</code>；all-gather 每 rank <code>(8−1)/8×64000 = 56000 B</code>。
+  这些都在 <code>communication_op.py</code> / <code>GroupCoordinator</code> 的公共实现上，
+  <code>ep</code> 不参与任何一条。</p>
+
+  <h3 class="mini">5.1 为什么没有 token all-to-all</h3>
+  <p>因为默认 backend 的 dispatch 根本不搬 token。回看 <code>StandardDispatcher.dispatch()</code>：
+  它只处理 <code>topk_ids</code> 的本地映射（<code>standard.py:225-278</code>），然后返回
+  <code>StandardDispatchOutput</code>（<code>:282-286</code>）；<code>combine()</code> 只把
+  <code>hidden_states</code> 原样返回（<code>:288-300</code>）。整个 MoE 层没有跨 rank 的 token 交换，
+  所以 <code>_MOE_EP</code> 这个组对象在默认路径下几乎只被 <code>moe_expert_parallel_all_reduce</code>
+  （<code>communication_op.py:137-139</code>）使用；DeepEP dispatcher 的通信组来自
+  <code>tp_group.device_group</code>（<code>fused_moe_triton/layer.py:163-173</code>），EPLB 走 expert location，不用这个组。
+  这也是为什么 <code>ep=4</code> 的 EP 组虽然是 4 个 rank，通信表里却看不到 4-rank 集合通信。</p>
+
+  <h3 class="mini">5.2 一个反例：如果 <code>ep=4</code> 的合并被关掉</h3>
+  <p><code>can_merge_post_experts_all_reduce()</code> 还有两个并列条件：<code>moe_tp &gt; 1</code> 与
+  <code>moe_dp == 1</code>。假设由于某种配置（例如显式把 <code>moe_dp</code> 调大，或路径上不允许合并），
+  <code>ep=4</code> 的求和拆成 EP(4) + MoE-TP(2) 两次 all-reduce，则每 rank 字节变成
+  <code>2×(4−1)/4×P + 2×(2−1)/2×P = 1.5P + 1.0P = 2.5P</code>，而合并版是 <code>1.75P</code>，
+  <b>多 43%</b>。这就是 <code>_post_experts_sum</code> 里那个合并分支的价值。</p>
+
+  <h3 class="mini">5.3 换到 a2a backend：三种写法收敛成 <code>ep=8</code></h3>
+  <p>真正的 all-to-all 只出现在 <code>--moe-a2a-backend</code> 非 <code>none</code> 时。
+  这时配置解析会先改写 <code>ep_size</code>：<code>_a2a_ep_size()</code> 对
+  <code>_A2A_EP_SPANNING_BACKENDS</code> 里的后端返回 <code>{"ep_size": tp_size}</code>
+  （<code>arg_groups/overrides.py:1609-1619</code>）。<code>tp=8</code> 时，
+  <code>--ep 1</code>、<code>--ep 4</code>、<code>--ep 8</code> <b>全部变成 <code>ep=8</code></b>，
+  只有日志里那行 adjustment 不同。此时：</p>
+  <ul>
+    <li>dispatcher 从 <code>StandardDispatcher</code> 变成 <code>MaybeTboDeepEPDispatcher</code>
+      （<code>fused_moe_triton/layer.py:194-213</code>）。注意 Mixtral 的 <code>MixtralMoE</code> 直接 new 了
+      <code>FusedMoE</code>（<code>models/mixtral.py:100</code>），所以类仍是 <code>FusedMoE</code>，换的是 dispatcher；
+      <code>DeepEPMoE</code> 是给调用 <code>get_moe_impl_class()</code> 的模型用的子类（<code>layers/moe/ep_moe/layer.py:352-365</code>）。</li>
+    <li>每层多两次通信：dispatch + combine 的 all-to-all，分别落到
+      <code>buffer.dispatch()</code>（<code>token_dispatcher/deepep.py:668</code>）与
+      <code>buffer.combine()</code>（<code>:723</code>）。</li>
+    <li>MoE 段的主通信从 1 次 all-reduce 变成 dispatch + combine 两次 all-to-all；combine 在源 rank 上按 top-k 权重汇总专家输出。
+      是否还残留一次收尾 all-reduce，由 stage boundary 的 complete 判定决定（<code>moe/utils.py:761-794</code>），本页不展开。</li>
+  </ul>
+  <p>载荷估算（理想均衡、只计 token 数据、BF16）：每 token 被送到 <code>top_k=2</code> 个专家，
+  平均 <code>2/8</code> 落在某个 rank；dispatch 出 + combine 回，按 rank 计
+  <code>2 × (2/8) × 4096 × 2 B = 4 KiB/token/层</code>，对比 all-reduce 的 14.3 KiB，
+  约 <b>1/3.5</b>。32 层加起来，整条 forward 的通信量从约 0.94 MiB/token 降到约 0.63 MiB/token。
+  <span class="pill inf">推导</span></p>
+  <p>但这不是「<code>ep</code> 越大越省」的故事：a2a 下只有一个 <code>ep=8</code> 布局，
+  <code>--ep 4</code> 根本没有机会生效；而且 all-to-all 有固定延迟、需要 handle 同步、
+  decode 低延迟模式还会 padding，小 batch 下未必比一次 8-rank all-reduce 快。收益要在
+  「专家数多、top-k 远小于 EP 宽度、跨机 NVLink/RDMA 可用」时才成立。<span class="pill inf">推断</span></p>
+
+  <div class="widewrap">
+  <table class="tight">
+    <thead><tr><th>模式</th><th>MoE 段通信</th><th>组</th><th>每 token 每层每 rank</th><th>整条 forward 约</th><th>出现条件</th></tr></thead>
+    <tbody>
+      <tr><td class="k">默认 <code>none</code>，ep=1/4/8</td><td data-label="MoE 段通信">1 × <code>all_reduce</code></td><td data-label="组"><code>_TP</code>(8)</td><td data-label="每 token 每层每 rank">14.3 KiB</td><td data-label="整条 forward 约">0.94 MiB/token</td><td data-label="出现条件">本页三个配置</td></tr>
+      <tr><td class="k"><code>deepep</code>，ep 被强制为 8</td><td data-label="MoE 段通信">dispatch + combine 两次 <code>all_to_all</code></td><td data-label="组"><code>tp_group.device_group</code> / EP 组</td><td data-label="每 token 每层每 rank">约 4 KiB</td><td data-label="整条 forward 约">约 0.63 MiB/token</td><td data-label="出现条件"><code>--moe-a2a-backend deepep</code></td></tr>
+      <tr><td class="k">mooncake / nixl / mori / flashinfer / megamoe</td><td data-label="MoE 段通信">同上（实现不同）</td><td data-label="组">同上</td><td data-label="每 token 每层每 rank">取决于后端</td><td data-label="整条 forward 约">取决于后端</td><td data-label="出现条件">非 <code>none</code> 的 a2a backend</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tblnote">表中的 0.94 / 0.63 MiB 是「token 载荷」估算：含 32 层 attention AR、32 层 MoE 段、
+  embedding AR 与最终 logits AG，不含 NCCL 头、同步、低延迟 padding。真实数字要用 profiler 量，本页未实测。</p>
+
+  <h3 class="mini">5.4 那 reduce-scatter / send-recv 在哪里</h3>
+  <p>它们不在本页三种配置里，但理解边界有用：<code>reduce_scatter</code> 出现在 attention-DP
+  （<code>dp_attention.py</code> 的 <code>reduce_scatterv</code>）和 LayerNorm-SP
+  （<code>layers/linear.py:1774</code> 的 <code>row_parallel_gbar_matmul</code>）路径；
+  <code>send/recv</code> 出现在 PP 的 <code>send_tensor_dict</code>/<code>recv_tensor_dict</code>
+  （<code>parallel_state.py:1783-1898</code>）与 mooncake/nixl 这类 RDMA dispatcher。
+  只要 <code>attn_dp_size=1</code>、<code>pp_size=1</code>、默认 backend，这三类原语都不会出现。</p>
+
+  <h3 class="mini">5.5 瓶颈：<code>ep</code> 变了，哪一段真的动了</h3>
+  <p><b>默认 backend 的瓶颈与 <code>ep</code> 无关。</b>每层 2 次 all-reduce（attention 后、MoE 后）是同步点：
+  decode 小 batch 下是固定延迟，prefill 大 batch 下是带宽，两者都只随 <code>tp</code>、<code>T</code> 与网络变化。
+  <code>ep</code> 只改 grouped GEMM 的 M/N 形状与每 rank 的专家数，不改变这两个同步点。
+  <span class="pill src">源码</span><span class="pill inf">延迟/带宽判断为推断</span></p>
+  <p><b><code>ep=8</code> 的新瓶颈是负载均衡，不是通信。</b>每 rank 只有 1 个专家，路由热点会直接变成 rank 间的
+  straggler；<code>ep=1</code> 的每 rank 都参与全部专家，计算天然均衡，但每 rank 的 grouped GEMM 要处理 8 个
+  小 N 的专家。这是「通信相同、性能不一定相同」的来源。<span class="pill inf">推断</span></p>
+  <p><b>a2a 把 MoE 段载荷降到约 1/3.5，但引入新的固定开销。</b>dispatch/combine 的 kernel 启动、
+  handle 同步、decode 低延迟模式的 padding，以及跨机 RDMA 的带宽，都会变成瓶颈的一部分；
+  收益大小取决于 <code>top_k / ep_size</code> 这个比值与网络拓扑。换句话说，真正的分水岭是
+  <code>--moe-a2a-backend</code> 的选择，而不是 <code>--ep</code> 的数字。<span class="pill inf">推断</span></p>
+
+  <h2 id="mem"><span class="n">06</span>显存账本：<code>ep</code> 不改变每 rank 的权重字节</h2>
+  <p class="lead">Mixtral-8x7B 全模型约 46.7B 参数（专家 45.1B、attention 1.34B、embedding+lm_head 0.26B）。
+  BF16 下每 rank 约 11.68 GB 权重，三种 <code>ep</code> 相同；KV 每 token 16 KiB，也相同。
+  <code>ep</code> 改的是「这 11.68 GB 里，哪些是整专家、哪些是切片」。</p>
+
+  <div class="widewrap">
+  <table class="tight">
+    <thead><tr><th>每 rank</th><th><code>ep=1</code></th><th><code>ep=4</code></th><th><code>ep=8</code></th></tr></thead>
+    <tbody>
+      <tr><td class="k">专家权重</td><td data-label="ep=1">5.637B 参数 / 11.27 GB</td><td data-label="ep=4">5.637B / 11.27 GB</td><td data-label="ep=8">5.637B / 11.27 GB</td></tr>
+      <tr><td class="k">attention（qkv+o）</td><td data-label="ep=1">167.8M / 0.34 GB</td><td data-label="ep=4">167.8M / 0.34 GB</td><td data-label="ep=8">167.8M / 0.34 GB</td></tr>
+      <tr><td class="k">embedding + lm_head</td><td data-label="ep=1">32.8M / 65.5 MB</td><td data-label="ep=4">32.8M / 65.5 MB</td><td data-label="ep=8">32.8M / 65.5 MB</td></tr>
+      <tr><td class="k">router（每层全量）</td><td data-label="ep=1">1.05M / 2.1 MB</td><td data-label="ep=4">1.05M / 2.1 MB</td><td data-label="ep=8">1.05M / 2.1 MB</td></tr>
+      <tr><td class="k"><b>权重合计</b></td><td data-label="ep=1"><b>5.84B / 11.68 GB</b></td><td data-label="ep=4"><b>5.84B / 11.68 GB</b></td><td data-label="ep=8"><b>5.84B / 11.68 GB</b></td></tr>
+      <tr><td class="k">KV（32K context）</td><td data-label="ep=1">512 MiB / 序列</td><td data-label="ep=4">512 MiB / 序列</td><td data-label="ep=8">512 MiB / 序列</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tblnote">按 BF16（2 B/参数）与 <code>46.7B / 8</code> 估算；KV 为
+  <code>16 KiB/token × 32768 = 512 MiB</code>。实际还有 activation、CUDA graph、通信 buffer 与碎片，
+  这里只列静态权重与 KV。</p>
+
+  <h4 class="micro">可拖动的账本：改 tp / ep / 专家数，看形状与字节怎么变</h4>
+  <div class="calc" id="calc">
+    <div class="ctl"><label for="c-tp">tp_size</label><input id="c-tp" type="range" min="1" max="16" step="1" value="8"><span id="c-tp-v">8</span></div>
+    <div class="ctl"><label for="c-ep">ep_size</label><input id="c-ep" type="range" min="1" max="16" step="1" value="4"><span id="c-ep-v">4</span></div>
+    <div class="ctl"><label for="c-e">num_experts</label><input id="c-e" type="range" min="4" max="128" step="4" value="8"><span id="c-e-v">8</span></div>
+    <div class="ctl"><label for="c-i">intermediate</label><input id="c-i" type="range" min="512" max="18432" step="512" value="14336"><span id="c-i-v">14336</span></div>
+    <div class="ctl"><label for="c-l">layers</label><input id="c-l" type="range" min="8" max="64" step="1" value="32"><span id="c-l-v">32</span></div>
+    <div class="ctl"><label for="c-ctx">context</label><input id="c-ctx" type="range" min="1024" max="131072" step="1024" value="32768"><span id="c-ctx-v">32K</span></div>
+
+    <div class="glabel">并行宽度</div>
+    <div class="row g3">
+      <div class="cell"><div class="k">moe_tp = tp // ep</div><div class="v" id="o-mt">2</div><div class="d">每专家再切几份</div></div>
+      <div class="cell"><div class="k">每 rank 专家数 = E // ep</div><div class="v" id="o-nl">2</div><div class="d">整专家还是切片</div></div>
+      <div class="cell"><div class="k">world_size = tp</div><div class="v" id="o-world">8</div><div class="d">本 replica 的 rank 数</div></div>
+    </div>
+
+    <div class="glabel">每 rank 的专家形状</div>
+    <div class="row g2">
+      <div class="cell"><div class="k">w13</div><div class="v" id="o-w13" style="font-size:14px">[2, 14336, 4096]</div><div class="d">[E/ep, 2·I/moe_tp, H]</div></div>
+      <div class="cell"><div class="k">w2</div><div class="v" id="o-w2" style="font-size:14px">[2, 4096, 7168]</div><div class="d">[E/ep, H, I/moe_tp]</div></div>
+    </div>
+
+    <div class="glabel">每 rank 字节</div>
+    <div class="row g3">
+      <div class="cell"><div class="k">专家参数（每层）</div><div class="v" id="o-ep">176.16M</div><div class="d" id="o-epg">每层 · 0.35 GB BF16</div></div>
+      <div class="cell"><div class="k">全部权重</div><div class="v" id="o-tot">11.68 GB</div><div class="d">BF16，含 attention/embed/router</div></div>
+      <div class="cell"><div class="k">KV @ context</div><div class="v" id="o-kv">0.50 GiB</div><div class="d" id="o-kvd">1 kv head/rank · 16 KiB/token</div></div>
+    </div>
+
+    <div class="verdictbox ok" id="o-verdict">ep 只改形状：每 rank 专家参数量 = 3·H·I·E/tp，与 ep 无关。</div>
+    <div class="upd">固定 Mixtral 形状：hidden=4096、kv_heads=8、head_dim=128、vocab=32000。
+    拖动 ep 时，专家参数量保持不变，变化的是 <code>[E/ep, 2I/(tp/ep), H]</code> 这个形状。</div>
+  </div>
+
+  <h2 id="summary"><span class="n">07</span>汇总表：三种配置的真实差异</h2>
+  <div class="widewrap">
+  <table class="tight">
+    <thead><tr><th>维度</th><th><code>--tp 8 --ep 1</code></th><th><code>--tp 8 --ep 4</code></th><th><code>--tp 8 --ep 8</code></th></tr></thead>
+    <tbody>
+      <tr><td class="k">moe_tp / EP 组</td><td data-label="--tp 8 --ep 1">8 / 8 个单例</td><td data-label="--tp 8 --ep 4">2 / <code>{0,2,4,6}</code>、<code>{1,3,5,7}</code></td><td data-label="--tp 8 --ep 8">1 / <code>_TP</code>(8)</td></tr>
+      <tr><td class="k">参数切分</td><td data-label="--tp 8 --ep 1">8 专家 × 1/8 列；attention/KV/embed 同 TP8</td><td data-label="--tp 8 --ep 4">2 专家 × 1/2 列；其余同左</td><td data-label="--tp 8 --ep 8">1 专家整份；其余同左</td></tr>
+      <tr><td class="k">每 rank 专家显存</td><td data-label="--tp 8 --ep 1">11.27 GB</td><td data-label="--tp 8 --ep 4">11.27 GB</td><td data-label="--tp 8 --ep 8">11.27 GB</td></tr>
+      <tr><td class="k">MoE 段通信</td><td data-label="--tp 8 --ep 1">1×AR over <code>_MOE_TP</code>=<code>_TP</code></td><td data-label="--tp 8 --ep 4">1×AR over <code>_TP</code>（合并）</td><td data-label="--tp 8 --ep 8">1×AR over <code>_MOE_EP</code>=<code>_TP</code></td></tr>
+      <tr><td class="k">通信量 / token</td><td data-label="--tp 8 --ep 1">0.94 MiB</td><td data-label="--tp 8 --ep 4">0.94 MiB</td><td data-label="--tp 8 --ep 8">0.94 MiB</td></tr>
+      <tr><td class="k">计算均衡</td><td data-label="--tp 8 --ep 1">最好：每 rank 都参与全部专家</td><td data-label="--tp 8 --ep 4">中等：2 个专家/rank</td><td data-label="--tp 8 --ep 8">最差：1 个专家/rank，热专家集中到单卡</td></tr>
+      <tr><td class="k">量化 / EPLB 粒度</td><td data-label="--tp 8 --ep 1">只能按 1/8 列切，per-expert scale 不完整</td><td data-label="--tp 8 --ep 4">2 个完整专家的 1/2 列</td><td data-label="--tp 8 --ep 8">整专家，适合 per-expert scale / EPLB / a2a</td></tr>
+      <tr><td class="k">适用场景</td><td data-label="--tp 8 --ep 1">不想引入 EP 语义；要求计算完全均衡；小 TP</td><td data-label="--tp 8 --ep 4">想增大 grouped GEMM 的 N、减少每 rank 专家数，但仍保持一次 AR</td><td data-label="--tp 8 --ep 8">大 EP 集群 + DeepEP/Mooncake/NIXL 等 a2a 后端</td></tr>
+      <tr><td class="k">依据</td><td data-label="--tp 8 --ep 1"><span class="pill src">源码</span><span class="pill inf">均衡/场景为推断</span></td><td data-label="--tp 8 --ep 4"><span class="pill src">源码</span><span class="pill inf">收益为推断</span></td><td data-label="--tp 8 --ep 8"><span class="pill src">源码</span><span class="pill inf">适配为推断</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tblnote">「通信量 / token」是 32 层 + embedding + logits 的合计估算，三种配置相同；
+  详细拆解见 05 节。这里不把「<code>ep=4</code> 更快/更慢」写成结论，因为 grouped GEMM 的 M/N 形状变化
+  对 kernel 的影响取决于后端与 batch，本页未实测。</p>
+
+  <h2 id="myth"><span class="n">08</span>常见误解</h2>
+  <div class="myth">
+    <div class="w">误解 1：<code>--ep 1</code> 表示专家不切分，每个 rank 有一份完整专家。</div>
+    <div class="r"><b>纠正：</b>每个 rank 有全部 8 个专家的 <b>1/8 列</b>（<code>w13=[8,3584,4096]</code>）。
+    「不切专家」只在 <code>tp=1</code> 时成立；<code>tp=8</code> 时切的是每个专家的 intermediate 维。
+    <code>ep</code> 和 <code>moe_tp</code> 是同一根预算的两个乘数：<code>ep × moe_tp = tp</code>。</div>
+  </div>
+  <div class="myth">
+    <div class="w">误解 2：<code>--tp 8 --ep 4</code> 是 2 份 EP 副本，专家权重复制 2 份。</div>
+    <div class="r"><b>纠正：</b>默认 <code>moe_dp=1</code> 时它是 <code>moe_tp=2</code>：4 个 ep rank 各拿 2 个专家，
+    每个专家的列再切 2 份。要得到「2 个 EP 副本」需要显式 <code>--moe-data-parallel-size 2</code>，
+    而当前校验要求配套 <code>attn_cp_size=2</code>（<code>parallel_hook.py:189-192</code>），
+    用户给的命令没有这个 flag。</div>
+  </div>
+  <div class="myth">
+    <div class="w">误解 3：<code>ep</code> 越大，通信越多（或越少）。</div>
+    <div class="r"><b>纠正：</b>默认 backend 下三种 <code>ep</code> 的通信<b>完全相同</b>：同一个 <code>_TP</code>(8)、
+    同一次 all-reduce、同样的载荷。真正改变通信模式的是 <code>--moe-a2a-backend</code>；
+    而它会先把 <code>ep</code> 强制成 <code>tp</code>，所以三种写法在 a2a 后端下只有一种布局。</div>
+  </div>
+  <div class="myth">
+    <div class="w">误解 4：<code>--ep 4 --moe-a2a-backend deepep</code> 会得到 4 路 EP。</div>
+    <div class="r"><b>纠正：</b><code>_a2a_ep_size()</code> 会把 <code>ep_size</code> 从 4 改成 8
+    （<code>overrides.py:1609-1619</code>），日志里会有一行 adjustment。<code>deepep</code> 的组宽就是
+    <code>tp_size</code>。</div>
+  </div>
+  <div class="myth">
+    <div class="w">误解 5：既然通信一样，<code>ep</code> 就完全没有意义。</div>
+    <div class="r"><b>纠正：</b>通信一样不代表布局一样。整专家（<code>ep=tp</code>）是 a2a 后端、per-expert
+    量化 scale、EPLB 专家迁移、弹性 EP 的前提；<code>ep=1</code> 的细粒度列切分则在计算均衡上更好。
+    选择 <code>ep</code> 是在<b>权重粒度 / 负载均衡 / 后端兼容性</b>之间选，不是在选择通信量。</div>
+  </div>
+
+  <h2 id="quiz"><span class="n">09</span>自测</h2>
+  <details>
+    <summary>Q1：<code>--tp 8 --ep 4</code> 的 rank 0 和 rank 1 各持有哪些专家权重？</summary>
+    <div class="ans"><b>答：</b>两者都持有专家 0、1；rank 0 是每个专家 intermediate 的 <code>[0:7168]</code>，
+    rank 1 是 <code>[7168:14336]</code>。rank 2/3 换成专家 2、3，以此类推。
+    它们同属一个 MoE-TP 组 <code>{0,1}</code>，归约时两半列相加。</div>
+  </details>
+  <details>
+    <summary>Q2：三种配置里，MoE 后的 all-reduce 分别由哪个函数发起？落在哪个组？</summary>
+    <div class="ans"><b>答：</b><code>ep=1</code> 走 <code>moe_tensor_model_parallel_all_reduce</code>
+    （<code>_MOE_TP</code>，等于 <code>_TP</code>）；<code>ep=4</code> 走合并分支的
+    <code>tensor_model_parallel_all_reduce</code>（<code>_TP</code>）；<code>ep=8</code> 走
+    <code>moe_expert_parallel_all_reduce</code>（<code>_MOE_EP</code>，等于 <code>_TP</code>）。
+    三个 wrapper 不同，device group 相同。</div>
+  </details>
+  <details>
+    <summary>Q3：为什么 <code>ep=4</code> 的 EP 组是 <code>{0,2,4,6}</code> 而不是 <code>{0,1,2,3}</code>？</summary>
+    <div class="ans"><b>答：</b>组构造按 <code>moe_tp</code> 步长取 rank：
+    <code>for moe_tp_idx in range(moe_tp): range(st, en, moe_tp)</code>（<code>parallel_state.py:2897-2908</code>）。
+    <code>moe_tp=2</code> 时偶数 rank 组成一个 EP 组、奇数 rank 组成另一个；
+    这样每个 EP 组内的 rank 共享同一个 <code>moe_tp_rank</code>，各自持有不同专家块的同一列切片。</div>
+  </details>
+  <details>
+    <summary>Q4：如果只把 <code>--ep 8</code> 改成 <code>--ep 4</code>，哪一项通信字节会变？</summary>
+    <div class="ans"><b>答：</b>都不变。MoE 段仍是每层一次 8-rank all-reduce、<code>[T,4096]</code> BF16；
+    attention、embedding、logits 也不受影响。变化的是每 rank 的专家形状（<code>[1,28672]</code> → <code>[2,14336]</code>）、
+    EP 组/MoE-TP 组对象，以及负载均衡与量化粒度。</div>
+  </details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/dflash-pp-adaptation/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</b></span></a><a class="sm-pn-a sm-next" href="../../comm-parallel/a2a-ar-ag-sglang/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html"><span class="sm-more-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-more-m">40 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html"><span class="sm-more-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html"><span class="sm-more-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-more-m">9 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html"><span class="sm-more-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-more-m">12 分钟<i aria-hidden="true"></i>2026-09-20</span></a><a class="sm-more-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><span class="sm-more-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-15</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p>本页由读源码与算术推导产出，<b>未做运行时实测</b>。行号对应 SGLang tag <code>v0.5.23</code>
+      （commit <code>297e54fd105e974cdf401e5b4d20253a22c16f90</code>），模型配置来自
+      <code>mistralai/Mixtral-8x7B-Instruct-v0.1</code> 的 <code>config.json</code>。
+      显存与通信字节是按源码公式推导的解析值，不是 profiler 数字；a2a 的 4 KiB/token/层是理想均衡估算，
+      不含 handle、同步与低延迟 padding。</p>
+    <p>主要阅读路径：<code>python/sglang/srt/arg_groups/{fields/parallel.py, parallel_hook.py, overrides.py, fields/exec_.py}</code>、
+      <code>runtime_context.py</code>、<code>distributed/{parallel_state.py, communication_op.py, bootstrap.py}</code>、
+      <code>layers/moe/fused_moe_triton/layer.py</code>、<code>layers/moe/token_dispatcher/{standard.py, deepep.py}</code>、
+      <code>layers/moe/{utils.py, topk.py, ep_moe/layer.py}</code>、<code>layers/layer_boundary/{stage.py, ops.py, exit.py}</code>、
+      <code>layers/{linear.py, vocab_parallel_embedding.py, logits_processor.py}</code>、
+      <code>models/{mixtral.py, llama.py}</code>、<code>model_loader/loader.py</code>、<code>configs/model_config.py</code>。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+</div>
+<script>
+(function(){
+  var H=4096, KVH=8, HD=128, V=32000;
+  var ids=["c-tp","c-ep","c-e","c-i","c-l","c-ctx"];
+  var out={mt:document.getElementById("o-mt"),nl:document.getElementById("o-nl"),world:document.getElementById("o-world"),
+    w13:document.getElementById("o-w13"),w2:document.getElementById("o-w2"),ep:document.getElementById("o-ep"),
+    epg:document.getElementById("o-epg"),tot:document.getElementById("o-tot"),kv:document.getElementById("o-kv"),
+    kvd:document.getElementById("o-kvd"),verdict:document.getElementById("o-verdict")};
+  function fmtP(n){
+    if(n>=1e9)return (n/1e9).toFixed(2)+"B";
+    if(n>=1e6)return (n/1e6).toFixed(2)+"M";
+    if(n>=1e3)return (n/1e3).toFixed(1)+"K";
+    return String(n);
+  }
+  function fmtG(n){return (n/1e9).toFixed(2)+" GB";}
+  function fmtCtx(n){return n>=1024?(n/1024).toFixed(0)+"K":String(n);}
+  function upd(){
+    var tp=+document.getElementById("c-tp").value, ep=+document.getElementById("c-ep").value;
+    var E=+document.getElementById("c-e").value, I=+document.getElementById("c-i").value;
+    var L=+document.getElementById("c-l").value, ctx=+document.getElementById("c-ctx").value;
+    document.getElementById("c-tp-v").textContent=tp;
+    document.getElementById("c-ep-v").textContent=ep;
+    document.getElementById("c-e-v").textContent=E;
+    document.getElementById("c-i-v").textContent=I;
+    document.getElementById("c-l-v").textContent=L;
+    document.getElementById("c-ctx-v").textContent=fmtCtx(ctx);
+    var mt=Math.max(1,Math.floor(tp/ep));
+    var nl=Math.max(0,Math.floor(E/ep));
+    var ip=Math.floor(I/mt);
+    var pExpLayer=nl*3*H*ip;
+    var pExp=pExpLayer*L;
+    var pAttn=L*(H*(H+2*KVH*HD)+H*H)/tp;
+    var pEmb=2*V*H/tp;
+    var pRouter=E*H*L;
+    var pTot=pExp+pAttn+pEmb+pRouter;
+    var kvHead=Math.max(1,Math.floor(KVH/tp));
+    var kvB=2*kvHead*HD*L*ctx*2;
+    out.mt.textContent=mt;
+    out.nl.textContent=nl;
+    out.world.textContent=tp;
+    out.w13.textContent="["+nl+", "+(2*ip)+", "+H+"]";
+    out.w2.textContent="["+nl+", "+H+", "+ip+"]";
+    out.ep.textContent=fmtP(pExpLayer);
+    out.epg.textContent="每层 · "+fmtG(pExpLayer*2);
+    out.tot.textContent=fmtG(pTot*2);
+    out.kv.textContent=(kvB/Math.pow(1024,3)).toFixed(2)+" GiB";
+    out.kvd.textContent=kvHead+" kv head/rank · "+((2*kvHead*HD*L*2)/1024).toFixed(0)+" KiB/token";
+    var bad=(tp%ep!==0)||(E%ep!==0)||(I%mt!==0)||(ep>tp);
+    out.verdict.className="verdictbox "+(bad?"no":"ok");
+    if(bad){
+      out.verdict.textContent="当前组合不是源码保证的整齐布局：要求 ep | tp、ep | E、moe_tp | I（moe_tp=tp//ep）。";
+    }else{
+      out.verdict.textContent="ep 只改形状：每 rank 专家参数量 = 3·H·I·E/tp = "+fmtP(3*H*I*E/tp)+"，与 ep 无关。";
+    }
+  }
+  ids.forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener("input",upd);});
+  upd();
+})();
+</script>
+</body>
+</html>

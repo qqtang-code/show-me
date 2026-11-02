@@ -1,0 +1,33 @@
+{
+  "title": "--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B",
+  "slug": "sglang-tp8-ep1-4-8-mixtral",
+  "category": "comm-parallel",
+  "date": "2026-11-02",
+  "tags": ["SGLang", "MoE", "专家并行", "TP8", "EP", "all-reduce", "all-to-all", "Mixtral", "并行组", "moe_tp", "源码走读"],
+  "one_liner": "在 SGLang v0.5.23 的默认 backend（moe_a2a_backend=none）下，--tp 8 --ep 1/4/8 的 MoE 段通信完全相同：都是同一个 _TP(8) 组上的一次 all-reduce，载荷 [T,4096] BF16，约 0.94 MiB/token。ep 改的是权重排布：ep=1 每 rank 存全部 8 个专家的 1/8 列，ep=4 存 2 个专家的 1/2 列（moe_tp=2），ep=8 存 1 个完整专家；每 rank 专家参数恒为 176.16M/层。真正引入 dispatch/combine all-to-all 的是 --moe-a2a-backend deepep 等后端，而它们会把 ep 强制改成 tp，使三种写法收敛到 ep=8。附并行组构造、调用链、通信/显存对照与可拖动账本。",
+  "artifact": "index.html",
+  "extra_files": ["notes.md"],
+  "session_ref": "",
+  "cwd": "/Users/qqtang/Desktop/research/show-me",
+  "sources": [
+    "SGLang 官方仓库 github.com/sgl-project/sglang，tag v0.5.23，commit 297e54fd105e974cdf401e5b4d20253a22c16f90（2026-10-28）；GitHub Releases 页面最新发布为 v0.5.22（2026-10-19）",
+    "python/sglang/srt/arg_groups/fields/parallel.py（tp_size/dp_size/attn_dp_size/moe_dp_size/ep_size 字段与默认值）、arg_groups/parallel_hook.py（moe_dp>1 时的 ep*moe_dp==tp 等约束）、arg_groups/overrides.py（_A2A_EP_SPANNING_BACKENDS 与 _a2a_ep_size 强制 ep=tp）、arg_groups/fields/exec_.py（moe_a2a_backend 默认 none）",
+    "python/sglang/srt/runtime_context.py:137-157（moe_tp = tp//ep//moe_dp、attn_tp = tp//(attn_dp*attn_cp)）、:118-135（moe_ep_rank/moe_tp_rank 由 tp_rank 整除/取模）、:173-207（world_size 与 num_dp_ranks）",
+    "python/sglang/srt/distributed/parallel_state.py:2862-2949（_MOE_DP/_MOE_EP/_MOE_TP 构造与 ep==tp、moe_tp==tp 的别名）、:2671-2695（_TP）、:2792-2828（_ATTN_TP）、:254/673/1211/1363/1374（GroupCoordinator 与 all_reduce/all_to_all_single/all_gather）",
+    "python/sglang/srt/layers/moe/fused_moe_triton/layer.py:390-428（moe_ep_size/moe_tp_size、num_local_experts、intermediate_size_per_partition）、:561-574（create_weights）、:1153-1161（global→local expert id）、:856-859/:948-951（按 moe_tp_rank 切列）、:1660-1746（forward/forward_impl 与 reduce_results 条件）、:175-193（dispatcher 选择）",
+    "python/sglang/srt/layers/quantization/unquant.py:779-839（w13=[E/ep,2I/moe_tp,H]、w2=[E/ep,H,I/moe_tp]）",
+    "python/sglang/srt/layers/moe/token_dispatcher/standard.py:156-286（dispatch 只做本地 expert id 映射、无 token 搬移）、:288-300（combine 无通信）；token_dispatcher/deepep.py:668/:723（buffer.dispatch/combine 的 all-to-all）",
+    "python/sglang/srt/layers/moe/utils.py:837-909（can_merge_post_experts_all_reduce、post_experts_all_reduce、_post_experts_sum、post_experts_reduction_group）",
+    "python/sglang/srt/layers/layer_boundary/{stage.py:165-230, ops.py:219-245, exit.py:150-170}（MoE 输出求和被推迟到 stage boundary，SumGroup.MOE_OUTPUT）",
+    "python/sglang/srt/models/mixtral.py:85-92（ReplicatedLinear gate）、:100-109（FusedMoE）、:137-173（attention 按 tp 切 head，reduce_results=False）、:256-274（decoder layer）、:392-459（load_weights 与 expert mapping）",
+    "python/sglang/srt/layers/{linear.py:1075/1121-1136/1553/1744-1824, vocab_parallel_embedding.py:327/515-534/546, logits_processor.py:479-488/1024-1035}；configs/model_config.py:1700-1711（get_num_kv_heads）；model_executor/pool_configurator.py:704-709（每 token KV 字节）；models/llama.py:85-115（dense MLP 的 MergedColumn+RowParallel 参考路径）",
+    "模型配置：huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1 的 config.json（hidden 4096、intermediate 14336、32 层、32 q 头、8 kv 头、8 experts、top-2、vocab 32000、BF16）",
+    "显存与通信字节（11.68 GB/rank、16 KiB/token KV、0.94/0.63 MiB/token）由上述源码公式与 config 算术推导，非运行时实测"
+  ],
+  "visibility": "public-ok",
+  "redactions": [
+    "本地 checkout 的绝对路径（正文只保留仓库相对路径）",
+    "HuggingFace 镜像域名（正文只写模型 id 与 config.json）"
+  ],
+  "enriched": "2026-11-02"
+}
