@@ -961,6 +961,7 @@ two_level_reducescatter(rank = (m, i), partial):    <span class="cm">// partial:
      图表 · 分层集合通信为什么只省下通信项
      lieflat-charts · F7 STACKED RUNGS · MONO · 数据见图表下方来源行
      ═════════════════════════════════════════════════════════════════ -->
+<div class="chartcard-slot"><!-- 站点 build_index.py 只在祖先 div 的 class 含 card 时把 figure 的 h2 当图表标题 -->
 <figure class="chartcard">
 <style>
 .chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;margin:0;min-width:0;box-sizing:border-box;
@@ -998,9 +999,9 @@ two_level_reducescatter(rank = (m, i), partial):    <span class="cm">// partial:
 </style>
 
 <h2>省下的全是通信：通信降 8.35 / 13.68 ms，合计跟着降 7.07 / 12.54 ms</h2>
-<div class="csub">每步 GPU 活跃时间构成（ms，同一基线、柱高 ∝ 毫秒）·
+<div class="csub">每步 GPU 活跃时间构成（ms，同一基线、长度 ∝ 毫秒）·
   <span class="ck" style="background:#1C1C1A"></span><b>通信</b> = AllGather + ReduceScatter（实测）·
-  <span class="ck" style="background:#B0AFA9"></span><b>其他</b> = 合计 − 通信（派生，标 *，未单测）·
+  <span class="ck" style="background:#6A6963"></span><b>其他</b> = 合计 − 通信（派生，标 *，未单测）·
   场景 A / B × 改造前后 · 并发 5，每轮每 rank 平均</div>
 <div class="cwrap"><svg id="tp16hc" viewBox="0 0 960 300" preserveAspectRatio="xMidYMid meet" role="img"></svg></div>
 <div class="csrc">数据来源：TP16 分层集合通信验证记录（并发 5 · 每轮每 rank 平均）· 其他 = 合计 − 通信（派生值）· 单层 = 16 卡一次 AllGather / ReduceScatter，两层 = 机内 + 跨机</div>
@@ -1157,32 +1158,10 @@ two_level_reducescatter(rank = (m, i), partial):    <span class="cm">// partial:
     g.clear(); g.setOption(opt);
   });
 
-  /* ── 10 · 卡片骨架（生成新图时照抄这个结构） ──────────────
-     <div class="card [dark] [wide]">
-       <h2>结论式标题</h2>
-       <div class="sub">副标题 · 图例说明 · 时间范围</div>
-       <div class="ch" id="xx"></div>  或  <svg id="xx" viewBox="0 0 400 320">
-       <div class="src">图型名 · 系列名 · 数据来源（全大写）</div>
-     </div>                                                        */
-  const CARD_CSS = `
-  :root{--bg:${PAPER};--dark:${DARK.bg};--ink:${INK};--muted:${MUTED};--faint:${FAINT};--grid:${GRID}}
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--ink);padding:40px;-webkit-font-smoothing:antialiased}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px;max-width:1400px;margin:0 auto}
-  .card{background:var(--bg);border-radius:${SHAPE.cardRadius}px;padding:${SHAPE.cardPad}}
-  .card.dark{background:var(--dark);color:${PAPER}}
-  .card.dark .sub{color:${MUTED}}
-  .card.dark .src{color:${DARK.faint}}
-  .card.wide{grid-column:1/-1}
-  h2{font-weight:${FONT.title.weight};font-size:${FONT.title.size}px;letter-spacing:${FONT.title.spacing};margin-bottom:3px}
-  .sub{font-size:${FONT.sub.size}px;color:var(--muted);margin-bottom:14px}
-  .src{font-size:${FONT.src.size}px;color:var(--faint);margin-top:10px;letter-spacing:${FONT.src.spacing};font-weight:${FONT.src.weight}}
-  .ch{height:320px}
-  svg text{font-family:'Inter',sans-serif}` + MOTION.css;
 
   global.MONO = { INK, PAPER, MUTED, FAINT, GRID, L, LAD, DARK,
     FONT, SHAPE, MOTION, tipLight, tipDark,
-    rnd, pol, sect, blob, el, txt, tip, obsReveal, eReveal, keep, CARD_CSS };
+    rnd, pol, sect, blob, el, txt, tip, obsReveal, eReveal, keep };
 })(typeof window !== 'undefined' ? window : globalThis);
 
 </script>
@@ -1473,6 +1452,7 @@ two_level_reducescatter(rank = (m, i), partial):    <span class="cm">// partial:
 
 </script>
 </figure>
+</div>
 
 </div>
   <p class="tnote">上图走 <b>Mono 单色系统</b>：深色斜纹是两个集合通信（实测），浅色是其余 kernel 时间（派生 = 合计 − 通信，标 *）；
@@ -1481,15 +1461,21 @@ two_level_reducescatter(rank = (m, i), partial):    <span class="cm">// partial:
   <p>再把这个变化摊到「每轮 GPU 活跃总时长」上看，两边的对账就很干净：</p>
   <table>
     <thead>
-      <tr><th>场景</th><th class="num">通信项</th><th class="num">非通信项（派生 = 合计 − 通信）</th><th class="num">合计</th></tr>
+      <tr><th>场景</th><th class="num">两个算子的 kernel 时间（实测）</th><th class="num">其余 GPU 活跃时间（派生）</th><th class="num">全部 GPU 活跃时间（实测）</th></tr>
     </thead>
     <tbody>
-      <tr><td data-label="场景">2K · C5</td><td class="num" data-label="通信项">37.79 → 29.44（<b>−8.35</b>）</td><td class="num" data-label="非通信项">30.58 → 31.86（+1.28）</td><td class="num" data-label="合计">68.37 → 61.30（−7.07）</td></tr>
-      <tr><td data-label="场景">64K · C5</td><td class="num" data-label="通信项">34.45 → 20.77（<b>−13.68</b>）</td><td class="num" data-label="非通信项">35.64 → 36.78（+1.14）</td><td class="num" data-label="合计">70.09 → 57.55（−12.54）</td></tr>
+      <tr><td data-label="场景">2K · C5</td><td class="num" data-label="通信 kernel">37.79 → 29.44（<b>−8.35</b>）</td><td class="num" data-label="其余活跃">30.58 → 31.86（+1.28）</td><td class="num" data-label="全部活跃">68.37 → 61.30（−7.07）</td></tr>
+      <tr><td data-label="场景">64K · C5</td><td class="num" data-label="通信 kernel">34.45 → 20.77（<b>−13.68</b>）</td><td class="num" data-label="其余活跃">35.64 → 36.78（+1.14）</td><td class="num" data-label="全部活跃">70.09 → 57.55（−12.54）</td></tr>
     </tbody>
   </table>
-  <p class="tnote">读法：非通信项几乎不动（+1.28 / +1.14 ms），通信项下降的量基本等于合计下降的量。
+  <p class="tnote">读法：其余活跃时间几乎不动（+1.28 / +1.14 ms），通信项下降的量基本等于全部活跃时间下降的量。
   <b>这就是「收益全部来自通信」的算术证据</b> —— 如果两级拆解顺手也改了计算排布，这一栏会明显偏离。</p>
+  <p class="tnote"><b>两个分母不要混用。</b>上表的「全部 GPU 活跃时间」不是占比那一栏的分母：
+  54.11% 的分母是<b>同一窗口内所有 kernel 时间之和</b>，「GPU 活跃」是活跃区间的<b>并集</b>（重叠只算一次），
+  所以 <span class="mono">37.79 ÷ 68.37 = 55.3%</span>，与 54.11% 差 1.2 个百分点。由占比反算：
+  <span class="mono">37.79 ÷ 54.11% = 69.84</span> → <span class="mono">29.44 ÷ 46.90% = 62.78</span>（Δ −7.06）、
+  <span class="mono">34.45 ÷ 46.17% = 74.62</span> → <span class="mono">20.77 ÷ 33.40% = 62.19</span>（Δ −12.43）。
+  两个分母的降幅与活跃时间的降幅（−7.07 / −12.54）几乎相同 —— 这是「只动了通信项」的第二条证据。</p>
 
   <h3 class="mini">6.3 端到端：同一个镜像、同一组 P 容器、同一批请求</h3>
   <p>代表点表按「同镜像发布原配方 ／ D 分层通信」排列，匹配测试使用同一对 P 容器、同一请求目录、同样的缓存命中与并发；
@@ -1591,7 +1577,8 @@ two_level_reducescatter(rank = (m, i), partial):    <span class="cm">// partial:
     <div>
       <div class="k">占比能不能单独看</div>
       <div class="v">不能</div>
-      <div class="d">54.11% → 46.90% 的分母（总 kernel 时间）也在从 68.37 降到 61.30，比率会掩盖绝对量。</div>
+      <div class="d">分母（全部 kernel 累计时间，由占比反算 ≈69.8 → 62.2 ms）也在降，比率会掩盖绝对量；
+        且这个分母 ≠「GPU 活跃」68.37，两者不能混。</div>
     </div>
   </div>
   <p class="tnote">第三条只对 2K 档成立。64K 档按同样算法应得 13.68 ÷ 3.19 = 4.29 ms，而实测 TPOT P50 只动了 1.49 ms ——
