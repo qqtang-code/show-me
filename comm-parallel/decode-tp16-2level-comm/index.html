@@ -1,0 +1,1819 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</title><!-- show-me:shell:begin -->
+<meta property="og:type" content="article">
+<meta property="og:title" content="D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」">
+<meta property="og:description" content="4 机 32 卡 1P1D 部署里，decode 端 TP16 必然横跨两台机，于是每层都要跨机同步两次、每次只搬 12–48 KB。把 16 卡全组 AllGather／ReduceScatter 拆成「同位置 rank 跨机配对 1 轮 + 机内 8 卡集合通信 7 轮」，串行轮数从 15 降到 8：D 端每验证轮通信 37.79→29.44 ms（−22.11%）与 34.45→20.77 ms（−39.72%）。端到端只动 TPOT——2,048/1,024 档 21.41→18.67 ms，把唯一的未通过项翻成通过，达标并发从 &lt;5 到 8；代价是短输入档 TTFT P50 变差 +65%／+20%，而 900 秒会话回放里收益只剩 +2.26%。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/comm-parallel/decode-tp16-2level-comm/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/comm-parallel/decode-tp16-2level-comm/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<meta name="description" content="4 机 32 卡 1P1D 部署里，decode 端 TP16 必然横跨两台机，于是每层都要跨机同步两次、每次只搬 12–48 KB。把 16 卡全组 AllGather／ReduceScatter 拆成「同位置 rank 跨机配对 1 轮 + 机内 8 卡集合通信 7 轮」，串行轮数从 15 降到 8：D 端每验证轮通信 37.79→29.44 ms（−22.11%）与 34.45→20.77 ms（−39.72%）。端到端只动 TPOT——2,048/1,024 档 21.41→18.67 ms，把唯一的未通过项翻成通过，达标并发从 &lt;5 到 8；代价是短输入档 TTFT P50 变差 +65%／+20%，而 900 秒会话回放里收益只剩 +2.26%。">
+<style>
+  /* ============ 全站共用设计变量（三篇保持一致） ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#ffffff; --panel2:#f8fafc; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --waste:#c2410c; --waste-bg:#fff4ec; --good:#0f766e; --good-bg:#eefbf8;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:15.5px;line-height:1.72;
+    padding:40px 20px 80px;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  .sub{color:var(--dim);margin:0 0 12px;font-size:14px}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+  .setup{
+    margin:0 0 20px;padding:16px 20px;border:1px solid var(--line);border-radius:12px;
+    background:var(--panel);font-size:14px;color:var(--dim)
+  }
+  .setup b{color:var(--ink)}
+  code,.mono{font-family:var(--mono);font-size:.93em}
+  .setup code{background:#f2f3f0;padding:1px 5px;border-radius:4px}
+
+  h2{font-size:19px;margin:40px 0 6px;letter-spacing:-.01em;color:var(--ink);
+     padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .lead{color:var(--dim)}
+  b{color:var(--ink)}
+
+  /* ---------- 导航 / 速览 ---------- */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}
+    .nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+  [id]{scroll-margin-top:20px}
+
+  /* ---------- algorithm comparison ---------- */
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:22px 0 0}
+  @media (max-width:760px){.cols{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px 18px 20px}
+  .card.bad{border-color:#f0d9c8;background:var(--waste-bg)}
+  .card.ok{border-color:#c9ece6;background:var(--good-bg)}
+  .card h3{margin:0 0 3px;font-size:15px}
+  .card.bad h3{color:var(--waste)}
+  .card.ok h3{color:var(--good)}
+  .card .algo{font-family:var(--mono);font-size:12px;color:var(--ink3,#657389);margin-bottom:14px}
+
+  .rankrow{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px}
+  .rankrow .who{min-width:26px;color:var(--dim2);text-align:right;font-family:var(--mono);flex:none;white-space:nowrap}
+  .bar{height:14px;border-radius:3px;flex:1 1 auto;min-width:0}
+  .bar.p{background:#f0a184;border:1px solid #d98363}
+  .rankrow .note{color:var(--dim2);font-family:var(--mono);font-size:11px;flex:none}
+  .rankrow .note.wide{flex:1 1 auto;min-width:0;font-family:inherit;font-size:12px;line-height:1.5;margin-left:0}
+
+  .flowarrow{text-align:center;color:var(--dim2);font-size:13px;margin:9px 0 4px}
+  .target{
+    display:flex;align-items:center;justify-content:center;gap:10px;
+    border:1px dashed #c9ccc6;border-radius:8px;padding:9px;background:#fff;
+    font-size:12.5px;font-family:var(--mono);color:var(--dim)
+  }
+  .card.bad .target{border-color:#e5c3ac}
+  .card.ok .target{border-color:#a9ded4}
+  .verdict{margin-top:15px;padding-top:13px;border-top:1px solid #0000000f;font-size:14px}
+  .verdict .big{font-size:21px;font-family:var(--mono);font-weight:600;letter-spacing:-.02em}
+  .card.bad .verdict .big{color:var(--waste)}
+  .card.ok .verdict .big{color:var(--good)}
+  .verdict .dim{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
+  .chunkstrip{display:flex;gap:2px;margin:9px 0 13px}
+  .chunkstrip div{flex:1;height:16px;border-radius:3px;border:1px solid #00000012}
+
+  /* ---------- 表格 ---------- */
+  table{border-collapse:collapse;width:100%;margin:16px 0 0;font-size:14px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3}
+  th{font-weight:600;font-size:11.5px;color:#4d5b73;font-family:var(--mono);letter-spacing:.04em;background:#f4f7fc}
+  td.num,th.num{font-family:var(--mono);text-align:right}
+  tr.hi td{background:#fffdf3}
+  tr.hi td:first-child{box-shadow:inset 3px 0 0 #eab308}
+  .tnote{font-size:13.5px;color:var(--dim);margin-top:14px}
+
+  @media (max-width:560px){
+    table, table tbody, table tr, table td{display:block;width:100%}
+    table thead{display:none}
+    table tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    table tr.hi{background:#fffdf3;border-color:#eddfae}
+    table tr.hi td:first-child{box-shadow:none}
+    table td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}
+    table td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    table td:first-child{display:block;text-align:left;font-size:15px;font-weight:600;
+      border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    table td:first-child::before{content:none;float:none}
+  }
+  .sav{font-family:var(--mono);font-weight:600}
+  .sav.zero{color:var(--waste)} .sav.mid{color:#a16207} .sav.max{color:var(--good)}
+
+  /* ---------- 公式块 ---------- */
+  .eq{margin:18px 0;padding:18px 20px;border-radius:12px;background:var(--panel);border:1px solid var(--line);
+      font-family:var(--mono);font-size:13.5px;line-height:2.05;overflow-x:auto;color:#28374f}
+  .eq .lbl{color:var(--dim2)}
+  .eq .v{font-weight:600}
+  .eq .hl{background:#eefbf8;padding:1px 5px;border-radius:4px;color:var(--good);font-weight:600}
+  .eq hr{border:0;border-top:1px solid var(--line);margin:12px 0}
+  .kicker{display:inline-block;font-size:12px;font-family:var(--mono);background:#eef2f9;color:#3f4c63;
+          padding:3px 9px;border-radius:100px;margin-bottom:2px}
+
+  /* ---------- Amdahl ---------- */
+  .amd{display:flex;align-items:stretch;gap:0;margin:20px 0 6px;border-radius:10px;overflow:hidden;
+       border:1px solid var(--line);height:52px}
+  .amd > div{display:flex;align-items:center;justify-content:center;font-size:12.5px;font-family:var(--mono);
+    color:#fff;min-width:0;padding:0 8px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .seg-ar-old{background:#c2410c}
+  .seg-rest{background:#94a3b8}
+  .amd-legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--dim);margin-top:10px}
+  .swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+  .bound{margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
+  .bound div{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:14px 16px}
+  .bound .k{font-size:12px;color:var(--dim2);font-family:var(--mono)}
+  .bound .v{font-size:20px;font-family:var(--mono);font-weight:600;letter-spacing:-.02em;margin-top:3px}
+  .bound .d{font-size:12.5px;color:var(--dim);margin-top:3px}
+  .v.good{color:var(--good)} .v.waste{color:var(--waste)}
+
+  ul{margin:10px 0;padding-left:20px}
+  li{margin:7px 0}
+
+  /* ---------- 交互计算器 ---------- */
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:150px 1fr 92px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:1fr 1fr;gap:6px 10px}
+    .calc .ctl label{grid-column:1/-1}
+    .calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent)}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff;color:var(--fg)}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;
+                margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,1fr)}
+  .calc .row.g3{grid-template-columns:repeat(3,1fr)}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:1fr}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:19px/1.35 var(--mono);font-weight:600;color:var(--ink)}
+  .calc .cell .v.good{color:var(--good)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .upd{font-size:12.5px;color:var(--dim);margin-top:14px}
+
+  /* ---------- 误区 / 自测 / 链接 ---------- */
+  .myth{border:1px solid var(--line);border-left:3px solid var(--waste);border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:#b23a10;font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+  .links{list-style:none;padding:0;margin:14px 0 0}
+  .links li{border-bottom:1px solid var(--line);padding:11px 0;margin:0}
+  .links a{color:var(--accent);text-decoration:none;font-size:14px}
+  .links a:hover{text-decoration:underline}
+  .links .why{color:var(--dim2);font-size:12.5px;display:block;margin-top:2px}
+
+  /* ---------- 页脚 ---------- */
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);
+         font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+<style>
+  /* ============ 本页新增组件（不改动上面的共用块） ============ */
+
+  /* 术语约定 */
+  .kbox{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;
+       background:var(--panel);padding:12px 16px;margin:18px 0 0;font-size:12.5px;color:var(--dim);line-height:1.7}
+  .kbox b{color:var(--ink)}
+  .kbox code{background:#f2f3f0;padding:1px 5px;border-radius:4px}
+
+  /* KPI 卡 */
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(166px,1fr));gap:12px;margin:18px 0 0}
+  .kpi{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:13px 15px}
+  .kpi .k{font:11.5px var(--mono);color:var(--dim2)}
+  .kpi .v{font:20px/1.32 var(--mono);font-weight:600;letter-spacing:-.02em;color:var(--ink);margin-top:3px}
+  .kpi .v.good{color:var(--good)} .kpi .v.waste{color:var(--waste)}
+  .kpi .d{font-size:11.5px;color:var(--dim);margin-top:5px;line-height:1.55}
+
+  /* 机器 / 卡布局 */
+  .topo{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:18px 0 0}
+  @media (max-width:700px){.topo{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .mach{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px;min-width:0}
+  .mach .h{font:11.5px var(--mono);color:var(--dim2);display:flex;justify-content:space-between;gap:6px;
+           margin-bottom:8px;flex-wrap:wrap}
+  .mach .h b{color:var(--ink);font-weight:600}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:3px}
+  .cards i{height:15px;border-radius:3px;background:#e7ecf4;border:1px solid #d5dceb;display:block}
+  .mach.p .cards i{background:#e3ecfb;border-color:#c7d8f6}
+  .mach.d .cards i{background:#e4f3ea;border-color:#bfe0cd}
+
+  /* 16 槽快照条 */
+  .snap{margin:4px 0 0}
+  .snap .row{display:grid;grid-template-columns:132px minmax(0,1fr);gap:10px;align-items:center;margin:7px 0}
+  @media (max-width:640px){.snap .row{grid-template-columns:minmax(0,1fr);gap:4px}}
+  .snap .lbl{font:11px var(--mono);color:var(--dim2);text-align:right;line-height:1.45;
+             white-space:normal;overflow-wrap:anywhere}
+  @media (max-width:640px){.snap .lbl{text-align:left;white-space:normal}}
+  .slots{display:grid;grid-template-columns:repeat(16,minmax(0,1fr));gap:2px;min-width:0}
+  .slots i{height:16px;border-radius:2px;background:#f2f5fa;border:1px solid #e5eaf2;display:block}
+  .slots i.a{background:#c9daf8;border-color:#a8c1ee}
+  .slots i.b{background:#f7d8c4;border-color:#e6b899}
+  .slots i.both{background:linear-gradient(90deg,#c9daf8 0 50%,#f7d8c4 50% 100%);border-color:#b9c8de}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--dim);margin:12px 0 0}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:5px;
+            vertical-align:-1px;border:1px solid #d8dfea}
+
+  /* 轮次链 */
+  .chain{margin:4px 0 0}
+  .chain .lab{display:flex;justify-content:space-between;gap:10px;font:11.5px var(--mono);
+              color:var(--dim2);margin:14px 0 5px;flex-wrap:wrap}
+  .chain .lab b{color:var(--ink)}
+  .chain .strip{display:flex;gap:2px;height:22px;min-width:0}
+  .chain .seg{min-width:0;border-radius:3px;background:#cbd8ea;border:1px solid #b4c5dd;flex:1 1 0}
+  .chain .seg.x{background:#f0b48f;border-color:#db966c}
+
+  /* 图框 */
+  .fig{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:20px 0 0}
+  .fig .ftitle{font:600 12.5px var(--mono);color:var(--dim2);letter-spacing:.02em;margin:0 0 12px}
+  .fig .fcap{font-size:12.5px;color:var(--dim);margin-top:12px;line-height:1.62}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:18px;min-width:0}
+  @media (max-width:780px){.two{grid-template-columns:1fr}}
+
+  /* 伪代码 */
+  .pq{margin:16px 0 0;padding:16px 18px;border-radius:10px;background:#0d1526;color:#dbe4f2;
+      font:12.5px/1.85 var(--mono);overflow-x:auto;white-space:pre;border:1px solid #1c2942}
+  .pq .cm{color:#7f92ad} .pq .kw{color:#8fb8ff} .pq .hl{color:#63d6a6}
+
+  /* 阶段表里的箭头单元格 */
+  .nw{white-space:nowrap}
+  td.arrow{font-family:var(--mono);color:var(--dim2);text-align:center}
+  .slots i.p{background:repeating-linear-gradient(45deg,#dbe6f5 0 4px,#eef3fa 4px 8px);border-color:#c3d3e8}
+  .slots i.f{background:#0b6b3f;border-color:#095c36}
+</style>
+
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">23 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-04</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 7 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-rail-m">18 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>comm-parallel<span class="sep">/</span>decode-tp16-2level-comm
+  </div>
+  <h1>D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</h1>
+  <p class="sub">4 机 32 卡 · 1P1D · D 端 <span class="mono">TP16</span> 横跨两台机 · 隐宽 <span class="mono">6,144</span>、每 rank <span class="mono">1–4</span> 行时生效</p>
+  <div class="metarow">
+    <span>2026-11-04</span><span>集合通信</span><span>AllGather</span><span>ReduceScatter</span>
+    <span>TP16</span><span>PD 分离</span><span>投机解码</span><span>SLO</span>
+  </div>
+
+  <p class="lead">这一版改的不是「少搬字节」，而是把 16 卡全组集合通信的依赖链从 15 轮压到 8 轮，
+  并把跨机段从「2 跳串行」变成「8 对并行」。收益因此高度集中在 TPOT 一处，
+  而 TTFT 在短输入档上是变差的 —— 这两件事必须一起讲。</p>
+
+  <nav class="nav">
+    <a href="#tldr">速览</a>
+    <a href="#setup">部署约束</a>
+    <a href="#motiv">动机</a>
+    <a href="#method">方法</a>
+    <a href="#why">为什么起作用</a>
+    <a href="#calc">算一算</a>
+    <a href="#evidence">证据链</a>
+    <a href="#limits">代价与边界</a>
+    <a href="#myth">常见误解</a>
+    <a href="#quiz">自测</a>
+  </nav>
+
+  <div class="kbox">
+    <b>术语约定</b>：<code>rank</code>、<code>AllGather</code>、<code>ReduceScatter</code>、<code>TP</code>/<code>DP</code>/<code>PP</code>/<code>CP</code>、
+    <code>verification round</code>（一次投机验证轮次，产出一批被验证的候选 token）按部署侧原文保留。
+    <b>机内</b> = 一台机 8 卡之间走机内高速互连；<b>跨机</b> = 两台机之间走 IB 链路。
+    本页出现的「耗时」除非特别说明，都是 GPU <b>kernel 时间</b>（含到达不齐与依赖等待），
+    与端到端 TTFT / TPOT 是两套口径。<br>
+    <b>沿用团队自己的叫法</b>：这条路径叫「D 端分层通信」、表格行名「分层 BF16」；
+    机制词是「同位置 rank 跨机配对」「机内八卡集合通信」「跨机全组 AllGather／ReduceScatter」；
+    它要解的问题叫「decode 通信墙」「D 侧跨机 AR 墙」；基线叫「镜像原路径 / 原生路径」。
+    <b>两个坑</b>：①「分层」在团队文档里至少三个所指 —— P 端 PP 的层划分（18/21/21/18）、本条通信分层、
+    分级 KV 缓存 —— 本页只在第二种意义上用它；②团队 9 月做过一版「机内分层 AllReduce」，实测无收益、路线作废，
+    与本页这条不是同一件事（见 <a href="#myth">08 节</a>）。
+  </div>
+
+  <div class="tldr" id="tldr">
+    <h4>速览 · 30 秒</h4>
+    <ul>
+      <li><b>1 · 改的是依赖链长度。</b>原来一次 16 卡 <code>AllGather</code>／<code>ReduceScatter</code> 要 15 轮才走完，
+        拆成两级后是「1 轮跨机（8 对 rank 并行）+ 7 轮机内」= 8 轮。字节数几乎不变，轮数少了 47%。</li>
+      <li><b>2 · 它是一条形状门。</b>只在 BF16 隐宽 <code>6,144</code>、每 rank <code>1–4</code> 行时改走两级路径，其余形状仍走镜像原路径。
+        这条门不是拍的：团队在这条链上的惯例是先做「形状 × 原生/自研」算子对照、只给获益形状开准入、其余保持原生。</li>
+      <li><b>3 · 收益落在两个算子身上。</b>D 端每验证轮的 <code>AllGather</code>+<code>ReduceScatter</code> 由
+        <b>37.79 → 29.44 ms</b>（−22.11%，2K 冷前缀）与 <b>34.45 → 20.77 ms</b>（−39.72%，64K/85% 共享前缀）；
+        占全部 kernel 时间的比例 54.11% → 46.90%、46.17% → 33.40%。</li>
+      <li><b>4 · 端到端只动 TPOT。</b>2,048／1,024 档 TPOT P50 <b>21.41 → 18.67 ms</b>，把这一格从「唯一未通过项就是它」翻成通过；
+        达标并发从不到 5 提到 8，该档可用总 TPS 634.76 → <b>1,069.27</b>。</li>
+      <li><b>5 · 代价同样成立。</b>短输入档 TTFT P50 变差（首测 +65.35%、复测 +19.96%），P90 反而变好；
+        <code>AllReduce</code> 完全没动；trace 里残留的长 <code>AllGather</code> 是早到 rank 在等，不是算子本身慢。</li>
+    </ul>
+  </div>
+
+  <h2 id="setup"><span class="n">01</span>先看部署：这条 D 端为什么天生跨机</h2>
+
+  <p><b>一句话答案</b>：16 卡的单组并行度超过了单机 8 卡，所以 D 端的<code>TP16</code>组必然横跨两台机；
+  而 decode 每步的批量小到每个 rank 只有 1–4 行，于是每一次集合通信都是「小消息 + 远链路」，
+  TPOT 的瓶颈就只能落在通信的固定开销上。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>角色</th><th>机器 / 卡</th><th>并行策略</th><th>关键配置</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="mono" data-label="角色">P（prefill）</td>
+        <td class="nw" data-label="机器 / 卡">2 机 / 16 卡</td>
+        <td class="mono" data-label="并行策略">TP4 × PP4 + CP4</td>
+        <td data-label="关键配置">层分配 <span class="mono">18/21/21/18</span>（合计 <b>78</b> 层）；CP 通信走 FP4；8K chunk；分级 KV 缓存</td>
+      </tr>
+      <tr class="hi">
+        <td class="mono" data-label="角色">D（decode）</td>
+        <td class="nw" data-label="机器 / 卡">2 机 / 16 卡</td>
+        <td class="mono" data-label="并行策略">TP16 + Attention DP4</td>
+        <td data-label="关键配置">全部 78 层；<b>EP1</b>（无专家并行，所以没有 all2all）；稀疏 KV 分池（GPU 主池 480K token、每请求热集 16K、逻辑槽<b>配置上限</b> 1.44M = 480K×3，实测逻辑池 70–74 万）；投机解码 3 步、top-k 1、draft 4</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="topo">
+    <div class="mach p">
+      <div class="h"><b>P 机 A</b><span>8 卡</span></div>
+      <div class="cards"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="mach p">
+      <div class="h"><b>P 机 B</b><span>8 卡</span></div>
+      <div class="cards"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="mach d">
+      <div class="h"><b>D 机 C</b><span>8 卡</span></div>
+      <div class="cards"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="mach d">
+      <div class="h"><b>D 机 D</b><span>8 卡</span></div>
+      <div class="cards"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+  </div>
+  <p class="tnote">P 与 D 各占两台机。D 侧的 <b>TP16 组 = 机 C 的 ranks 0–7 + 机 D 的 ranks 8–15</b>，
+  所以 D 端每一层 MLP/MoE 的张量并行集合通信都要跨一次机界 —— 这不是偶发路径，是主路径。<br>
+  <b>而 attention 不跨机</b>：D 端是 <span class="mono">attn_tp4 × attn_dp4 = TP16</span>，
+  4 个 DP 组各 4 个 rank，每组整体落在一台机内（每 rank 16 头；代价是 MLA KV 在组内复制 4 份）。
+  跨机的只有 MLP/MoE 那一段 gather。</p>
+
+  <h3 class="mini">三条派生事实（都能从上表算出来）</h3>
+  <div class="kpis">
+    <div class="kpi">
+      <div class="k">每 rank 一次通信搬多少</div>
+      <div class="v">12–48 KB</div>
+      <div class="d">1–4 行 × 6,144 宽 × BF16 2 B。窄端就是这么小。</div>
+    </div>
+    <div class="kpi">
+      <div class="k">一次验证轮次携带多少 token</div>
+      <div class="v">≈ 3.2</div>
+      <div class="d">68.37 ms ÷ 21.41 ms = 3.19；与「3 个投机步 + 1」的上界 4 一致。</div>
+    </div>
+    <div class="kpi">
+      <div class="k">每轮有多少次这类集合通信</div>
+      <div class="v">≈ 156</div>
+      <div class="d">78 层 × 2（前向 AllGather + 反向 ReduceScatter），派生值。</div>
+    </div>
+    <div class="kpi">
+      <div class="k">单次调用的平均 kernel 时间</div>
+      <div class="v">242 μs</div>
+      <div class="d">37.79 ms ÷ 156。而 trace 里一次「快」的调用只有 32.7–42.5 μs。</div>
+    </div>
+  </div>
+  <p class="tnote">最后两格是全文的钥匙：<b>平均 242 μs、最快 33 μs</b>，中间那 6–7 倍不是带宽，
+  是排队与等待。所以这一轮要动的量是「链有多长」，不是「搬了多少」。</p>
+
+  <h3 class="mini">行的来源：并发决定行数</h3>
+  <p>一次验证轮次的 token 数 <span class="mono">S = 5 × 在途并发</span> —— 每请求每轮验
+  <b>draft 4 个位置 + 1 个 bonus</b>，共 5 个位置。按 <code>TP16</code> 切开就是每 rank 的行数：
+  <span class="mono">S = 16–64</span> 对应 <span class="mono">1–4</span> 行，
+  也就是<b>在途并发大约 3–13 档</b>。这条推导有两处用处：</p>
+  <ul>
+    <li>它把门和前沿对上了：本轮 14 组里的<b>达标并发取值全部落在 1–12</b>（最高一档 12），
+      而 4 行的上沿是并发 12.8 —— 门与达标前沿落在同一档附近。反过来，扫参里 C16 的测点（5 行）已经掉出门外、
+      走的是原路径，它们也正好都是未通过的点。<b>这是观察，不是因果</b>，但值得继续追。</li>
+    <li>它解释了为什么这条优化只对 decode 有意义：prefill 的一次 forward 动辄上千行，
+      同样的两级拆解在那里是带宽问题，不是轮数问题。</li>
+  </ul>
+  <h2 id="motiv"><span class="n">02</span>动机：三个观测把矛头指向两个集合通信</h2>
+
+  <p><b>一句话答案</b>：D 端每跑一步都要跨机同步 78 层 × 2 次，而每次只搬 12–48 KB ——
+  这是一个纯延迟问题；恰好这一档 SLO 唯一没过的那一项就是 TPOT P50，
+  而 TPOT 就是「每轮时间 ÷ 每轮 token 数」，所以拿下通信的固定开销，就等于直接拿下 SLO。</p>
+
+  <h3 class="mini">观测 1 · 占比：两个算子吃掉一半以上的 kernel 时间</h3>
+  <p>在同一发布镜像、同一组 P 容器上补采两份 trace（2K 冷前缀、64K／85% 共享前缀，端到端并发 5），
+  D 端 16 个 rank、每 rank 6 个原生验证轮次，共 64 份 rank trace。按「通信 kernel 时间之和 ÷ 全部 kernel 时间之和」算：</p>
+
+  <table>
+    <thead>
+      <tr><th>场景（并发 5）</th><th class="num">AllGather+ReduceScatter 占比</th><th class="num">全部通信占 GPU 活跃时间</th></tr>
+    </thead>
+    <tbody>
+      <tr><td data-label="场景">2,048／1,024，冷前缀</td><td class="num" data-label="两个算子占比">54.11%</td><td class="num" data-label="全部通信占比">57.67%</td></tr>
+      <tr><td data-label="场景">65,536／1,024，85% 共享前缀</td><td class="num" data-label="两个算子占比">46.17%</td><td class="num" data-label="全部通信占比">51.61%</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">观测 2 · 形态：小到不该被带宽解释</h3>
+  <p>窄端形状是「每 rank 1–4 行、宽 6,144、BF16」，一份 12–48 KB。这个量级在机内链路上是微秒级的事，
+  但 trace 里一次<b>快的</b>机内 8 卡 <code>AllGather</code> 实测也要 <b>32.7–42.5 μs</b>；
+  按 242 μs 的平均值算，绝大多数调用还远高于此。也就是说单次调用的耗时里，传输占不到 5%，
+  剩下是 kernel 启动、同步与到达不齐 —— 前者只与「调用次数」有关，后者只与「链有多长」有关。</p>
+
+  <h3 class="mini">观测 3 · SLO：只差一项，而且是 TPOT</h3>
+  <p>2,048／1,024 冷前缀这一档的阈值是 TTFT P50 1,789 ms / P90 3,500 ms、TPOT P50 20.69 ms / P90 37.20 ms、ITL P95 70 ms。
+  发布原配方在并发 5 上：TTFT、ITL、成功率全部通过，<b>唯一未通过项是 TPOT P50 = 21.41 ms（阈值 20.69）</b>。</p>
+  <p>这一步把动机锁死了：既然 TPOT = 每轮时间 ÷ 每轮 token 数，而在途并发固定时 token 数由投机解码决定、
+  不会因为改通信而变化，那么<b>把每轮时间里的通信固定开销削掉 8 ms，TPOT 就掉 8 ÷ 3.2 ≈ 2.5 ms</b> —— 刚好够跨过阈值。
+  事后实测 21.41 → 18.67 ms（−2.74），与这条估算对得上（见 <a href="#recon">对账</a>）。</p>
+
+  <h3 class="mini">这条链上其实已经改过一轮</h3>
+  <p>「镜像原路径」不是从来就有的：更早的版本里，<span class="mono">attn_dp &lt; tp_size</span> 时的
+  MLP 同步走的是 <b>gloo CPU 组</b> —— 把每层都要做一次的跨机集合通信放到 CPU 上做。
+  团队先把这一跳换成了 NCCL 全组集合通信，本轮的分层通信是在那之上做的第二层。
+  这点很要紧：<b>本轮对比的基线已经是「改过一轮的 NCCL 路径」</b>，不是 CPU 组那种显而易见的坏路径；
+  还能再省 22%–40%，说明原路径的问题在<b>分解方式</b>，不在实现质量。</p>
+  <p>同族文档对这件事还有另一种量法：D 端 16 卡跨双机、每步 MoE-gather 跨 16 rank，
+  另一处实测把 decode 通信记到了 <b>58%</b> 的量级（与本节 trace 的 54.11% 同量级、不同测点）。
+  团队把这条结构性劣势写成一句话：对手是 <span class="mono">TP8×PP2</span>、TP 组全在节点内、归约走机内，
+  而自己是 <span class="mono">TP16</span> 跨双机 —— 这就是「D 侧跨机 AR 墙」。</p>
+
+  <h3 class="mini">为什么不能换别的杠杆</h3>
+  <ul>
+    <li><b>P 端已经压过一轮</b>：<code>CP4</code> 的通信走 FP4、8K chunk、分级 KV 缓存 —— 本轮保留不动。</li>
+    <li><b>D 端的 attention 不发生跨机通信</b>：<code>attn_tp4 × attn_dp4 = TP16</code>，4 个 DP 组各 4 rank、
+      每组整体落在单机内（每 rank 16 头；代价是 MLA KV 在组内复制 4 份）。这一层已经把通信压在机内了。</li>
+    <li><b>剩下的就是 MLP／MoE 那条 <code>TP16</code> 路径</b>：每层一次前向 <code>AllGather</code>、一次反向 <code>ReduceScatter</code>，
+      形状固定、频率最高、且正好全部跨机。可动的只剩「这次集合通信怎么分解」。</li>
+    <li><b>降批量不在选项里</b>：并发本身就是被测的量，降并发等于放弃吞吐。</li>
+  </ul>
+
+  <div class="eq">
+    <span class="kicker">假设</span> 每轮时间 ≈ 计算项 + 集合通信轮数 × 单轮固定开销<br>
+    <span class="kicker">可检验</span> 若假设成立，缩小轮数应当<b>只在通信项</b>上体现，计算项纹丝不动；
+    且算子级（16 rank、1／2 行）的最大 rank 耗时应当同比例下降<br>
+    <span class="kicker">若不成立</span> 即字节是瓶颈 —— 那么两级方案的多一次 stage 边界只会更慢
+  </div>
+
+  <h2 id="method"><span class="n">03</span>方法：把 16 卡全组集合通信拆成两级</h2>
+
+  <p><b>一句话答案</b>：给每个 rank 找一个「同位置的跨机搭档」（机 C 的第 i 张卡 ↔ 机 D 的第 i 张卡），
+  把原来 15 轮的全组集合通信改成「跨机配对 1 轮 + 机内 8 卡集合通信 7 轮」，
+  8 对配对同时进行，跨机只走一跳。</p>
+
+  <h3 class="mini">第一层：形状门与回退</h3>
+  <p>两级路径不是无条件启用的。它只在窄端形状命中时接管，其余形状照走镜像原路径。
+  这条门的来历有据可查：团队在这条链上做自研通信的惯例是<b>先跑「形状 × 原生/自研」算子对照，
+  只给明显获益的形状开准入，未获益形状保持原生，接入后再做服务级 A/B</b>（同族的机内 IPC AllGather 就是按这套筛的：
+  9 个形状里只准入 3 个，其余「保持原生」）。11.4 的「隐宽 6,144 + 1–4 行」就是这套流程筛出来的准入形状集合。
+  为什么要这么小心，见 <a href="#why">04 节</a>。</p>
+
+  <div class="pq"><span class="cm">// 集合通信入口的分流</span>
+<span class="kw">if</span> dtype == BF16 <span class="kw">and</span> hidden_width == 6144 <span class="kw">and</span> 1 &lt;= rows_per_rank &lt;= 4
+    <span class="hl">two_level_allgather</span>(16 ranks, shard)        <span class="cm">// 8 轮：1 跨机 + 7 机内</span>
+    <span class="hl">two_level_reducescatter</span>(16 ranks, partial)    <span class="cm">// 8 轮：7 机内 + 1 跨机</span>
+<span class="kw">else</span>
+    original_path(16 ranks, x)                     <span class="cm">// 镜像原路径，一行不改</span></div>
+
+  <h3 class="mini">第二层：AllGather 怎么拆</h3>
+  <p>先把 16 份数据按机器分成两半：机 C 持有 <span class="mono">s<sub>0</sub>…s<sub>7</sub></span>、
+  机 D 持有 <span class="mono">s<sub>8</sub>…s<sub>15</sub></span>，同位置的两张卡
+  <span class="mono">(C, i)</span> 与 <span class="mono">(D, i)</span> 结成一个搭档。
+  AllGather 的窄端在入口 —— 每个 rank 手里只有自己那一份 —— 所以跨机放在第一段。
+  「8 对」指的是 8 组 rank 之间的点对点交换，不等于 8 条独立物理链路（见 04 节量 2）。</p>
+
+  <div class="pq"><span class="cm">// AllGather：窄端在入口 → 跨机在前</span>
+two_level_allgather(rank = (m, i), shard):          <span class="cm">// shard: [rows_i × 6144] BF16</span>
+    <span class="cm"># stage 1  跨机，1 轮，8 对并行</span>
+    peer = sendrecv(shard, partner=(m^1, i))        <span class="cm">// 每对互搬 1 份 = 12–48 KB</span>
+    <span class="cm"># stage 2  机内，7 轮，NVLink</span>
+    full = allgather_local(my_machine, [shard, peer])  <span class="cm">// 8 卡 × 2 份 = 16 份</span>
+    <span class="kw">return</span> full                                  <span class="cm">// [Σrows × 6144]</span></div>
+
+  <div class="fig">
+    <div class="ftitle">同一个 rank 眼里的三级快照（以搭档 i = 0 为例，16 个槽 = 16 份数据）</div>
+    <div class="snap">
+      <div class="row">
+        <div class="lbl">起点 · (C,0)</div>
+        <div class="slots"><i class="a"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="row">
+        <div class="lbl">起点 · (D,0)</div>
+        <div class="slots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="b"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="row">
+        <div class="lbl">跨机配对后</div>
+        <div class="slots"><i class="a"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="b"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="row">
+        <div class="lbl">机内 8 卡 AllGather 后</div>
+        <div class="slots"><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="b"></i><i class="b"></i><i class="b"></i><i class="b"></i><i class="b"></i><i class="b"></i><i class="b"></i><i class="b"></i></div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i style="background:#c9daf8;border-color:#a8c1ee"></i>由机 C 的 rank 产出</span>
+      <span><i style="background:#f7d8c4;border-color:#e6b899"></i>由机 D 的 rank 产出</span>
+    </div>
+    <p class="fcap">三个阶段对应三类开销：第一段只有 1 次跨机往返（8 对搭档同时做，互不阻塞），
+    第二段是 7 轮机内 NVLink 累加式拼接。原路径则是 15 轮一路走到底，
+    其中 2 轮要跨机 —— 而且这 2 轮串在链中间，任何一轮慢，后面全部等着。</p>
+  </div>
+
+  <h3 class="mini">第三层：ReduceScatter 的顺序是反的</h3>
+  <p>同样的两级，但顺序反过来：先在机内做 8 卡 <code>ReduceScatter</code> 把宽张量收窄，
+  再跨机配对把那 1 份部分和相加。<b>原因是窄端位置不同</b>：
+  <code>ReduceScatter</code> 的窄端在出口（最后每个 rank 只要自己那一份），所以跨机放到最后一段。</p>
+
+  <div class="pq"><span class="cm">// ReduceScatter：窄端在出口 → 跨机在后</span>
+two_level_reducescatter(rank = (m, i), partial):    <span class="cm">// partial: [Σrows × 6144] 部分和</span>
+    <span class="cm"># stage 1  机内，7 轮，NVLink</span>
+    mine = reducescatter_local(my_machine, partial) <span class="cm">// 8 卡先归约，再收窄到 1 份</span>
+    <span class="cm"># stage 2  跨机，1 轮，8 对并行</span>
+    peer = sendrecv(mine, partner=(m^1, i))        <span class="cm">// 每对互搬 1 份 = 12–48 KB</span>
+    <span class="kw">return</span> mine + peer                             <span class="cm">// 16 卡完整归约的 1 份</span></div>
+
+  <div class="fig">
+    <div class="ftitle">ReduceScatter 的三级快照（16 个槽 = 输出要收窄到的 16 份）</div>
+    <div class="snap">
+      <div class="row">
+        <div class="lbl">起点 · 宽张量</div>
+        <div class="slots"><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i><i class="p"></i></div>
+      </div>
+      <div class="row">
+        <div class="lbl">机内 RS 后 · (C,0)</div>
+        <div class="slots"><i class="p"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="row">
+        <div class="lbl">跨机配对后 · (C,0)</div>
+        <div class="slots"><i class="f"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i style="background:repeating-linear-gradient(45deg,#dbe6f5 0 4px,#eef3fa 4px 8px);border-color:#c3d3e8"></i>仍是部分和，尚未跨机</span>
+      <span><i style="background:#0b6b3f;border-color:#095c36"></i>16 卡完整归约</span>
+    </div>
+    <p class="fcap">如果 <code>ReduceScatter</code> 也先跨机，那么第一段就要在两台机之间互搬<b>完整的宽张量</b>
+    （16–64 行，是窄端的 16 倍），机间链路立刻成为瓶颈 —— 那个方案在本轮的数据上不成立。
+    文档给的门是「窄端 1–4 行」而不是「宽端 16–64 行」，与这个顺序一致
+    （推断：文档没有逐行写出实现顺序，这里是从门的形状反推）。</p>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>集合通信</th><th>阶段 1</th><th>阶段 2</th><th class="num">轮数</th><th class="num">跨机段搬多少</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="mono" data-label="集合通信">AllGather</td>
+        <td data-label="阶段 1">跨机配对（1 轮，8 对并行）</td>
+        <td data-label="阶段 2">机内 8 卡 AllGather（7 轮，NVLink）</td>
+        <td class="num" data-label="轮数">15 → <b>8</b></td>
+        <td class="num" data-label="跨机段">1 份（12–48 KB）</td>
+      </tr>
+      <tr>
+        <td class="mono" data-label="集合通信">ReduceScatter</td>
+        <td data-label="阶段 1">机内 8 卡 ReduceScatter（7 轮，NVLink）</td>
+        <td data-label="阶段 2">跨机配对（1 轮，8 对并行）</td>
+        <td class="num" data-label="轮数">15 → <b>8</b></td>
+        <td class="num" data-label="跨机段">1 份（12–48 KB）</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="tnote">两段的分工是「跨机只搬 1 份，多跳的累加全交给 NVLink」。
+  注意每份的字节数在配对两端可以不同 —— 各 rank 行数本身不等（1–4 行），配对是点对点，不要求对称。</p>
+
+  <h3 class="mini">数值上发生了什么</h3>
+  <ul>
+    <li><b>AllGather 逐位一致</b>：它只拼接、不做算术，换顺序不改变任何 bit。这一条在 16 rank 算子对照里直接验证过。</li>
+    <li><b>ReduceScatter 不再逐位一致</b>：两级求和是 <span class="mono">(A+B)+(C+D)</span>，
+      原路径是链式 <span class="mono">(((A+B)+C)+D)</span>，BF16 下加法不满足结合律，结果会在最低几位上分叉。
+      实测最大 <b>NRMSE 0.419%</b>，参考值是同一组 BF16 输入以 FP64 累加。</li>
+    <li><b>所以端到端另做验收</b>：因为归约顺序变了，除了 SLO，还必须验完整输出比对、1M 长输入与 D 端自动回收 ——
+      这一步不能省，压测通过 ≠ 输出没变。</li>
+  </ul>
+  <h2 id="why"><span class="n">04</span>为什么起作用：三个可算的量</h2>
+
+  <p><b>一句话答案</b>：把这次集合通信看成一个有 15 个串行环节的链条，两级拆解把环节数降到 8 个，
+  同时把「要跨机的环节」从 2 个（一条链上顺序出现）改成 1 个（8 对搭档同时进行）。
+  省下来的东西不是字节，是<b>串行环节数</b>与<b>跨机环节的并发度</b>。</p>
+
+  <h3 class="mini">量 1 · 串行轮数：15 → 8</h3>
+  <p><b>先说口径</b>：原路径 16 个 rank 究竟用哪种算法（ring / tree / 混合）、几轮，文档没有写 ——
+  这是本页最主要的推断值，下表按最常见的<b>环形</b>算：N−1 = 15 轮。
+  两级拆解是 1 + (8−1) = 8 轮。若「机内一轮」记为 1 个单位、「跨机一跳」记为 k 个单位，
+  则原路径 <span class="mono">13 + 2k</span>、两级 <span class="mono">7 + k</span>，比值：</p>
+
+  <div class="eq">
+    <span class="lbl">rounds</span>  原路径 = 13 + 2k　两级 = 7 + k<br>
+    <span class="lbl">ratio</span>   (7 + k) / (13 + 2k)<br>
+    <span class="lbl">k = 1</span>   8 / 15 = <span class="hl">53.3%</span>（−46.7%）　
+    <span class="lbl">k = 5</span>  12 / 23 = <span class="hl">52.2%</span>（−47.8%）　
+    <span class="lbl">k = 10</span>  17 / 33 = <span class="hl">51.5%</span>（−48.5%）
+  </div>
+
+  <p>注意这个结果<b>对 k 不敏感</b>：k 从 1 变到 10，预测变化只从 −46.7% 走到 −48.5%。
+  原因很直白 —— 两种方案里跨机跳都只占少数环节，比值主要由「13+7」这组机内环节决定。
+  于是得到一个可以拿去和实测对的预测：<b>算子级耗时应该下降 47% 左右，而不是 90%、也不是 20%</b>。
+  16 rank 算子对照在 1／2 行上测到 <b>−37% ~ −47%</b>（中位最大 rank 耗时）——
+  方向与量级都对，略低于模型上界，差额来自多出来的那一次 stage 边界（见「量 3」）。
+  即使原路径不是环形、15 这个数要改，结构性的那条结论也不变：<b>轮数变少、跨机跳变少</b>，
+  实测区间 −37% ~ −47% 不依赖 15 这个具体取值。</p>
+
+  <h3 class="mini">量 2 · 跨机环节的并发度：2 条链 → 8 对并行</h3>
+  <p>这条更隐蔽。按 ranks 0–7 在机 C、8–15 在机 D 的放置，环上只有 <b>2 条边</b>跨机，
+  其余 13 条都在机内。也就是说：环形算法在任何时刻只用得上 2 条机间链路，
+  而且这 2 次跨机还被串在链的中间 —— 任何一次跨机往返变慢，后面的所有环节都要等。</p>
+  <p>两级方案的第一段是 8 对搭档各自点对点交换：<b>8 个跨机配对同时发起</b>，一次往返结束。
+  跨机环节从「链上出现两次、每次 2 条链路」变成「链上出现一次、8 个配对同时走」。</p>
+  <p class="tnote"><b>但「8 对」不等于「8 条链路」。</b>这台部署的启动配置里只暴露了 <b>4 条机间 HCA</b>，
+  所以最可能是 2 对 rank 共享 1 条 HCA —— 物理层面的并发度提升是 <b>2 → 4 条</b>，不是 2 → 8。
+  真正的大头仍然是量 1 的轮数。（推断：HCA 条数取自同族部署的启动配置；11.4 这一轮的 D 启动命令未随文档披露。）</p>
+
+  <h3 class="mini">量 3 · 字节账：几乎没省，反而多了一次 stage</h3>
+  <p>把两边的「份」数逐项列出来，就能看出这次优化<b>不是</b>省字节 ——
+  这也是它和常见的「1-stage → 2-stage AllReduce」那类改动最本质的区别（那类改动省的是 4 倍字节，见文末延伸阅读）。</p>
+
+  <table>
+    <thead>
+      <tr><th>项</th><th class="num">原路径</th><th class="num">两级</th><th>怎么变</th></tr>
+    </thead>
+    <tbody>
+      <tr class="hi"><td data-label="项">串行轮数</td><td class="num" data-label="原路径">15</td><td class="num" data-label="两级"><b>8</b></td><td data-label="怎么变">−47%，这是收益的主项</td></tr>
+      <tr><td data-label="项">链上跨机环节</td><td class="num" data-label="原路径">2（顺序）</td><td class="num" data-label="两级">1（8 对并行）</td><td data-label="怎么变">环节数减半；物理链路 2 → 4 条</td></tr>
+      <tr><td data-label="项">跨机段字节（每对）</td><td class="num" data-label="原路径">1 份 × 2 跳</td><td class="num" data-label="两级">1 份 × 1 跳</td><td data-label="怎么变">份数不变，跳数减半</td></tr>
+      <tr><td data-label="项">机内字节</td><td class="num" data-label="原路径">13 份</td><td class="num" data-label="两级">14 份</td><td data-label="怎么变">+8%，NVLink 上可忽略</td></tr>
+      <tr><td data-label="项">集合通信调用次数</td><td class="num" data-label="原路径">1</td><td class="num" data-label="两级">2</td><td data-label="怎么变">多一次启动 + 同步，纯成本</td></tr>
+    </tbody>
+  </table>
+  <p class="tnote">最后一行是代价项：每层多一次 stage 边界，就意味着多一次 kernel 启动与一次跨 rank 同步。
+  在窄端 12–48 KB 时这份成本远小于省下的轮数；窄端变大，它才开始变得重要 —— 这也是形状门存在的原因。
+  门的上沿「4 行」对应在途并发约 12.8，与本轮达标并发的最大值（12）落在同一档；
+  而扫参里 C16 的测点（5 行）确实都在门外、走的是原路径。把它读成「门是按准入形状筛出来的、恰好与前沿同界」
+  比读成「门是为这一轮扫参量身裁的」更稳。</p>
+
+  <h2 id="calc"><span class="n">05</span>算一算：轮数模型给什么预测</h2>
+
+  <p>下面这个小工具只做一件事：按「轮数 × 单位耗时」的一阶模型，算出两级拆解在给定 k 下应当带来多少变化。
+  它算不出实测值 —— 真实 kernel 时间还含到达不齐与依赖等待 —— 但足够判断「47% 这个量级是不是合理」。</p>
+
+  <div class="calc" id="calcbox">
+    <div class="glabel">输入</div>
+    <div class="ctl">
+      <label for="ck">跨机一跳 / 机内一轮 的耗时比 k</label>
+      <input id="ck" type="range" min="1" max="20" step="1" value="5">
+      <span id="ckv">5×</span>
+    </div>
+    <div class="ctl">
+      <label for="cr">每 rank 行数（形状门上沿 = 4）</label>
+      <input id="cr" type="range" min="1" max="64" step="1" value="2">
+      <span id="crv">2 行</span>
+    </div>
+
+    <div class="glabel">模型输出</div>
+    <div class="row g3">
+      <div class="cell"><span class="k">原路径 · 15 轮</span><span class="v" id="oFlat">23</span><span class="d" id="oFlatD">13 机内 + 2 跨机</span></div>
+      <div class="cell"><span class="k">两级 · 8 轮</span><span class="v good" id="oHier">12</span><span class="d" id="oHierD">7 机内 + 1 跨机</span></div>
+      <div class="cell"><span class="k">模型预测变化</span><span class="v good" id="oDelta">−47.8%</span><span class="d">单次集合通信耗时</span></div>
+    </div>
+
+    <div class="chain">
+      <div class="lab"><span>原路径：7 机内 · 1 跨机 · 6 机内 · 1 跨机</span><b id="cFlatL">23 单位</b></div>
+      <div class="strip" id="cFlat"></div>
+      <div class="lab"><span>两级（AllGather 顺序）：1 跨机 · 7 机内</span><b id="cHierL">12 单位</b></div>
+      <div class="strip" id="cHier"></div>
+    </div>
+
+    <div class="row g2" style="margin-top:16px">
+      <div class="cell"><span class="k">跨机段每次搬</span><span class="v" id="oBytes">24 KB</span><span class="d" id="oBytesD">2 行 × 6,144 × 2 B</span></div>
+      <div class="cell"><span class="k">形状门</span><span class="v" id="oGate">生效</span><span class="d" id="oGateD">rows = 2 ≤ 4，走两级</span></div>
+    </div>
+    <div class="upd">两段色块的宽度按「单位耗时」等比：机内一段 = 1，跨机一段 = k。拖动 k 会改变两段的比例，
+    也会改变两侧总长度之比 —— 这就是「省的是环节数」的直观含义。</div>
+  </div>
+  <h2 id="evidence"><span class="n">06</span>证据链：算子 → trace → 端到端 → 前沿</h2>
+
+  <p><b>一句话答案</b>：四层证据方向一致 —— 算子级 −37% 到 −47%、trace 级通信项 −22% 到 −40%、
+  端到端 TPOT −5% 到 −13%、SLO 前沿从「并发 5 不过」推到「并发 8 达标」，
+  而且每一层的相对大小都能用上一节的模型解释。</p>
+
+  <h3 class="mini">6.1 算子级：单次集合通信自己变快了多少</h3>
+  <p>先在 16 rank 上做算子对照（不进服务、不带调度），只看一次集合通信的最大 rank 耗时中位数：</p>
+  <table>
+    <thead><tr><th>项</th><th>结果</th><th>怎么读</th></tr></thead>
+    <tbody>
+      <tr><td data-label="项">1／2 行，中位最大 rank 耗时</td><td data-label="结果"><b>−37% ~ −47%</b></td><td data-label="怎么读">与轮数模型的上界（−47%）吻合，略低于上界</td></tr>
+      <tr><td data-label="项">AllGather 数值</td><td data-label="结果"><b>逐位一致</b></td><td data-label="怎么读">只换顺序不做算术，可当恒等变换用</td></tr>
+      <tr><td data-label="项">分层 ReduceScatter 数值</td><td data-label="结果">最大 <b>NRMSE 0.419%</b></td><td data-label="怎么读">参考为同一组 BF16 输入以 FP64 累加；同族另一批算例为 0.3718%，同一套定义</td></tr>
+    </tbody>
+  </table>
+  <p class="tnote"><b>可核到什么程度</b>：这一节只有「一个区间 + 三条数值结论」，16 rank 那张对照表的行级明细
+  （形状 × 原生/分层耗时）没有随文档披露。能对上的只有同族实验的<b>口径</b>：8 rank 的 IPC AllGather 对照用
+  「31 次样本中位数 + 取最慢 rank」，逐字节一致判据覆盖 144 个算例（含特殊 BF16 位模式）；
+  另一批 352 个通信 rank 算例的最大 NRMSE 为 0.3718%，NRMSE 定义为「差值 L2 ÷ FP64 参考 L2」——
+  与本节 0.419% 同一套。所以这个区间可信，但它背后的行数 × 隐宽矩阵看不到。</p>
+
+  <h3 class="mini">6.2 trace 级：两个算子加起来省了多少</h3>
+  <p>D 端 16 个 rank 全覆盖，每 rank 捕获 6 个原生验证轮次，共 64 份 rank trace；前后两组的验证批次分布一致，
+  并发 5，每个配方每场景发 10 条诊断请求，D 实际在途达到 5 时开始采集。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>场景</th>
+        <th class="num">AllGather+RS 每轮平均</th>
+        <th class="num">变化</th>
+        <th class="num">占全部 kernel</th>
+        <th class="num">全部通信占 GPU 活跃</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td data-label="场景">2,048／1,024 · 冷前缀 · C5</td>
+        <td class="num" data-label="每轮平均">37.79 → <b>29.44</b> ms</td>
+        <td class="num sav mid" data-label="变化">−22.11%</td>
+        <td class="num" data-label="占 kernel">54.11% → 46.90%</td>
+        <td class="num" data-label="占 GPU 活跃">57.67% → 51.36%</td>
+      </tr>
+      <tr>
+        <td data-label="场景">65,536／1,024 · 85% 共享 · C5</td>
+        <td class="num" data-label="每轮平均">34.45 → <b>20.77</b> ms</td>
+        <td class="num sav max" data-label="变化">−39.72%</td>
+        <td class="num" data-label="占 kernel">46.17% → 33.40%</td>
+        <td class="num" data-label="占 GPU 活跃">51.61% → 38.76%</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="chartcard-slot">
+<!-- ═════════════════════════════════════════════════════════════════
+     图表 · 分层集合通信为什么只省下通信项
+     lieflat-charts · F7 STACKED RUNGS · MONO · 数据见图表下方来源行
+     ═════════════════════════════════════════════════════════════════ -->
+<figure class="chartcard">
+<style>
+.chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;margin:0;min-width:0;box-sizing:border-box;
+  color:#1C1C1A;font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;text-align:left}
+.chartcard *{box-sizing:border-box}
+.chartcard h2{margin:0 0 3px;padding:0;border:0;font-size:16.5px;font-weight:700;letter-spacing:-.02em;
+  line-height:1.45;color:#1C1C1A}
+.chartcard .csub{margin:0 0 14px;font-size:11.5px;line-height:1.65;color:#8F8E88}
+.chartcard .csub b{font-weight:700;color:#6A6963}
+.chartcard .ck{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:-1px;margin:0 4px 0 1px}
+.chartcard .cwrap{overflow-x:auto;overflow-y:hidden}
+.chartcard svg{width:100%;min-width:0;max-height:330px;display:block;margin:0 auto}
+.chartcard svg text{font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.chartcard .csrc{margin-top:10px;font-size:9.5px;line-height:1.65;color:#C6C5BF;letter-spacing:.08em;font-weight:500}
+.chartcard .csrc + .csrc{margin-top:2px}
+.chartcard .csrc b{font-weight:700;color:#B0AFA9;letter-spacing:.08em}
+/* MONO.MOTION.css（原样，无 :root / body 规则） */
+.pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+@keyframes pop{from{transform:scale(0)}to{transform:none}}
+.fade{animation:fade .9s ease both}
+@keyframes fade{from{opacity:0}}
+.draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+@keyframes draw{to{stroke-dashoffset:0}}
+@media (prefers-reduced-motion:reduce){
+  .pop,.fade{animation:none}
+  .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+}
+@media (max-width:640px){
+  .chartcard{padding:22px 20px 16px}
+  .chartcard h2{font-size:15.5px}
+  .chartcard .csub{font-size:11px}
+}
+
+</style>
+
+<h2>省下的全是通信：通信降 8.35 / 13.68 ms，合计跟着降 7.07 / 12.54 ms</h2>
+<div class="csub">每步 GPU 活跃时间构成（ms，同一基线、柱高 ∝ 毫秒）·
+  <span class="ck" style="background:#1C1C1A"></span><b>通信</b> = AllGather + ReduceScatter（实测）·
+  <span class="ck" style="background:#B0AFA9"></span><b>其他</b> = 合计 − 通信（派生，标 *，未单测）·
+  场景 A / B × 改造前后 · 并发 5，每轮每 rank 平均</div>
+<div class="cwrap"><svg id="tp16hc" viewBox="0 0 960 300" preserveAspectRatio="xMidYMid meet" role="img"></svg></div>
+<div class="csrc">数据来源：TP16 分层集合通信验证记录（并发 5 · 每轮每 rank 平均）· 其他 = 合计 − 通信（派生值）· 单层 = 16 卡一次 AllGather / ReduceScatter，两层 = 机内 + 跨机</div>
+<div class="csrc"><b>F7 STACKED RUNGS</b> · MONO · LIEFLAT CHARTS（PolyForm Noncommercial 1.0）· 数值单位 ms</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   MONO TOKENS — 风格的唯一正本
+   所有 mono 图表（Chart.js / ECharts / 手写 SVG）共享这一份。
+   任何文件里出现与本文件冲突的颜色、字体、动画参数，以本文件为准。
+   用法：内联 mono-tokens，全部挂在 window.MONO 上；
+   也可以直接把本文件内容内联进单文件 HTML（开源分发时推荐内联）。
+   ═══════════════════════════════════════════════════════════════ */
+(function (global) {
+  'use strict';
+
+  /* ── 1 · 色板 ──────────────────────────────────────────────
+     纸灰底 + 炭黑墨。没有彩色。明度即数据：最重要 = 最黑。   */
+  const INK   = '#1C1C1A';   // 墨：主数据、标题、强调
+  const PAPER = '#F0EFEB';   // 纸：页面底色 = 浅卡底色（卡片无边框，靠留白分卡）
+  const MUTED = '#8F8E88';   // 次级文字、副标题
+  const FAINT = '#C6C5BF';   // 来源行、辅助刻度
+  const GRID  = '#DEDDD6';   // 网格线、发丝线
+
+  // 7 级灰阶 ladder：多系列时按重要性从黑到浅分配
+  const L   = ['#1C1C1A', '#4A4944', '#6A6963', '#8F8E88', '#B0AFA9', '#C6C5BF', '#D8D7D1'];
+  // 5 级简版（waffle 等少系列场景）
+  const LAD = ['#1C1C1A', '#4A4944', '#8F8E88', '#B0AFA9', '#D8D7D1'];
+
+  // 暗卡（dark card）专用：底 #1C1C1A，其上的"墨"反转为纸色
+  const DARK = {
+    bg: '#1C1C1A',
+    ink: '#F0EFEB',          // 暗卡上的主数据色
+    muted: '#8F8E88',
+    faint: '#55554F',        // 暗卡来源行
+    grid: '#2E2D29',         // 暗卡网格 / 发丝线
+    gridSoft: '#2A2925',
+    ladder: ['#F0EFEB', '#DCDAD2', '#C9C7BD', '#B3B0A4', '#8F8E88', '#6A6963', '#4A4944'],
+  };
+
+  /* ── 2 · 字体 ────────────────────────────────────────────── */
+  const FONT = {
+    family: 'Inter',
+    // Google Fonts 引入行（放 <head>）：
+    link: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap',
+    title:    { size: 16.5, weight: 700, spacing: '-.02em' },  // 卡内 h2
+    titleBig: { size: 19,   weight: 700, spacing: '-.02em' },  // 独立大图 h2
+    sub:      { size: 11.5, weight: 400 },                     // 副标题（图例说明写在这里）
+    src:      { size: 9.5,  weight: 500, spacing: '.08em' },   // 来源行，全大写
+    value:    { weight: 800 },                                 // 图内数值一律 800
+    axis:     { size: 9.5,  weight: 600 },                     // 轴标签
+    // SVG 内最小字号下限：半宽卡 6.5px，通栏/大图 5.5px。低于下限改 hover 出。
+    minHalf: 6.5, minWide: 5.5,
+  };
+
+  /* ── 3 · 形状 ────────────────────────────────────────────── */
+  const SHAPE = {
+    cardRadius: 24,          // 卡片圆角
+    cardPad: '28px 28px 20px',
+    barRadius: 99,           // 柱端胶囊圆角（竖柱只圆上端，横柱只圆外端）
+    tooltipRadius: 12,
+  };
+
+  /* ── 4 · 动画性格 ────────────────────────────────────────
+     快进快停，quarticOut / cubicOut，不弹跳（elasticOut 只给波浪入场）。 */
+  const MOTION = {
+    enter: 900,              // 常规入场 ms
+    enterSlow: 1200,         // 大元素 / 关系图
+    easing: 'quarticOut',
+    staggerDot: 12,          // 点阵逐个延迟 ms（8–15 区间）
+    staggerBar: 100,         // 条形逐根延迟 ms（80–130 区间）
+    // CSS 动画类（手写 SVG 用）：pop 缩放入场 / fade 淡入 / draw 描线
+    css: `
+  .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+  @keyframes pop{from{transform:scale(0)}to{transform:none}}
+  .fade{animation:fade .9s ease both}
+  @keyframes fade{from{opacity:0}}
+  .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (prefers-reduced-motion:reduce){
+    .pop,.fade{animation:none}
+    .draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}
+  }`,
+  };
+
+  /* ── 5 · Tooltip ─────────────────────────────────────────
+     浅卡用黑底纸字，暗卡用纸底黑字。ECharts 直接展开这两个对象。 */
+  const tipLight = { backgroundColor: INK, borderWidth: 0, padding: [10, 14],
+    textStyle: { color: PAPER, fontFamily: 'Inter', fontSize: 12 } };
+  const tipDark  = { backgroundColor: PAPER, borderWidth: 0, padding: [10, 14],
+    textStyle: { color: INK, fontFamily: 'Inter', fontSize: 12 } };
+
+  /* ── 6 · 确定性伪随机 ────────────────────────────────────
+     演示数据一律用它，不用 Math.random()——刷新必须长一样，
+     否则截图 / 录屏 / 回归对比全部失效。                       */
+  const rnd = (i, k) => Math.abs(((i * 73856093) ^ (k * 19349663)) % 1000) / 1000;
+
+  /* ── 7 · 几何 ────────────────────────────────────────────── */
+  const D2R = Math.PI / 180;
+  const pol = (cx, cy, r, deg) => [cx + r * Math.cos(deg * D2R), cy + r * Math.sin(deg * D2R)];
+  // 环形扇区 path（cornerRadius 自己在调用处用 ECharts sector 或手动倒角）
+  const sect = (cx, cy, r0, r1, a0, a1) => {
+    const big = a1 - a0 > 180 ? 1 : 0;
+    const [xa, ya] = pol(cx, cy, r1, a0), [xb, yb] = pol(cx, cy, r1, a1);
+    const [xc, yc] = pol(cx, cy, r0, a1), [xd, yd] = pol(cx, cy, r0, a0);
+    return `M${xa} ${ya} A${r1} ${r1} 0 ${big} 1 ${xb} ${yb} L${xc} ${yc} A${r0} ${r0} 0 ${big} 0 ${xd} ${yd} Z`;
+  };
+  // 手绘感圆（editorial 系气泡用）：圆周叠两个慢波 + 噪声，seed 定形
+  const blob = (x, y, r, seed) => {
+    const n = Math.max(14, Math.round(r * 1.6)), pts = [];
+    for (let t = 0; t < n; t++) {
+      const a = t / n * Math.PI * 2;
+      const w = 1 + .055 * Math.sin(a * 2 + seed * 7) + .04 * Math.sin(a * 3 + seed * 13)
+              + (rnd(seed + t, 3) - .5) * .03;
+      pts.push([x + Math.cos(a) * r * w, y + Math.sin(a) * r * w]);
+    }
+    let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let t = 0; t < n; t++) {
+      const p = pts[t], q = pts[(t + 1) % n];
+      d += ` Q${p[0].toFixed(1)} ${p[1].toFixed(1)} ${((p[0]+q[0])/2).toFixed(1)} ${((p[1]+q[1])/2).toFixed(1)}`;
+    }
+    return d + ' Z';
+  };
+
+  /* ── 8 · SVG 快捷 ────────────────────────────────────────── */
+  const NS = 'http://www.w3.org/2000/svg';
+  const el  = (p, t, a) => { const n = document.createElementNS(NS, t);
+    for (const k in a) n.setAttribute(k, a[k]); p.appendChild(n); return n; };
+  const txt = (p, a, s) => { const n = el(p, 'text', a); n.textContent = s; return n; };
+  const tip = (n, s) => { const t = document.createElementNS(NS, 'title');
+    t.textContent = s; n.appendChild(t); };
+
+  /* ── 9 · 统一 reveal：滚入视野才播，点击重播 ──────────────
+     带 timer 登记（keep），重播前清干净，防动画叠加。          */
+  const timers = {};
+  const keep = (id, t) => { (timers[id] = timers[id] || []).push(t); };
+  const obsReveal = (id, fn) => {
+    const n = document.getElementById(id);
+    const go = () => {
+      (timers[id] || []).forEach(clearInterval); timers[id] = [];
+      if (n.tagName === 'svg' || n.tagName === 'SVG') n.innerHTML = '';
+      fn(n);
+    };
+    const io = new IntersectionObserver(es => {
+      if (es[0].isIntersecting) { go(); io.disconnect(); }
+    }, { threshold: .3 });
+    io.observe(n);
+    n.style.cursor = 'pointer';
+    n.addEventListener('click', go);
+  };
+  // ECharts 版 reveal
+  const eReveal = (id, opt) => obsReveal(id, elDom => {
+    const g = echarts.getInstanceByDom(elDom) || echarts.init(elDom);
+    g.clear(); g.setOption(opt);
+  });
+
+  /* ── 10 · 卡片骨架（生成新图时照抄这个结构） ──────────────
+     <div class="card [dark] [wide]">
+       <h2>结论式标题</h2>
+       <div class="sub">副标题 · 图例说明 · 时间范围</div>
+       <div class="ch" id="xx"></div>  或  <svg id="xx" viewBox="0 0 400 320">
+       <div class="src">图型名 · 系列名 · 数据来源（全大写）</div>
+     </div>                                                        */
+  const CARD_CSS = `
+  :root{--bg:${PAPER};--dark:${DARK.bg};--ink:${INK};--muted:${MUTED};--faint:${FAINT};--grid:${GRID}}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--ink);padding:40px;-webkit-font-smoothing:antialiased}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px;max-width:1400px;margin:0 auto}
+  .card{background:var(--bg);border-radius:${SHAPE.cardRadius}px;padding:${SHAPE.cardPad}}
+  .card.dark{background:var(--dark);color:${PAPER}}
+  .card.dark .sub{color:${MUTED}}
+  .card.dark .src{color:${DARK.faint}}
+  .card.wide{grid-column:1/-1}
+  h2{font-weight:${FONT.title.weight};font-size:${FONT.title.size}px;letter-spacing:${FONT.title.spacing};margin-bottom:3px}
+  .sub{font-size:${FONT.sub.size}px;color:var(--muted);margin-bottom:14px}
+  .src{font-size:${FONT.src.size}px;color:var(--faint);margin-top:10px;letter-spacing:${FONT.src.spacing};font-weight:${FONT.src.weight}}
+  .ch{height:320px}
+  svg text{font-family:'Inter',sans-serif}` + MOTION.css;
+
+  global.MONO = { INK, PAPER, MUTED, FAINT, GRID, L, LAD, DARK,
+    FONT, SHAPE, MOTION, tipLight, tipDark,
+    rnd, pol, sect, blob, el, txt, tip, obsReveal, eReveal, keep, CARD_CSS };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+/* ────────────────────────────────────────────────────────────────
+   分层集合通信 · 每步 GPU 时间构成
+   lieflat-charts · F7 STACKED RUNGS（basics-gallery · "Where each
+   region's revenue sits"）· Mono 灰阶 · 横档梯子 + 两段明度
+   数据：comm / total 为实测；other = total − comm（派生，标 *）
+   ──────────────────────────────────────────────────────────────── */
+(() => {
+  'use strict';
+  const M = window.MONO;
+  if (!M) return;
+  const INK = M.INK, PAPER = M.PAPER, MUTED = M.MUTED, L = M.L;
+  const el = M.el, txt = M.txt, tip = M.tip, rnd = M.rnd;
+
+  /* ── 数据（ms；每轮每 rank 平均，并发 5） ───────────────────── */
+  const DATA = [
+    { key: 'A', name: '场景 A · 2K 冷前缀',
+      bars: [
+        { ph: '改造前', comm: 37.79, total: 68.37 },
+        { ph: '改造后', comm: 29.44, total: 61.30 }
+      ] },
+    { key: 'B', name: '场景 B · 64K / 85% 共享前缀',
+      bars: [
+        { ph: '改造前', comm: 34.45, total: 70.09 },
+        { ph: '改造后', comm: 20.77, total: 57.55 }
+      ] }
+  ];
+  /* 派生项：合计 − 通信；全程按派生值标注，绝不冒充实测 */
+  DATA.forEach(g => g.bars.forEach(b => { b.other = +(b.total - b.comm).toFixed(2); }));
+
+  /* ── 色位（单一 Mono 色系） ─────────────────────────────────
+     深 = 通信（主角，实测）· 浅 = 其他（次要，派生）
+     其余只用 Mono 灰阶：标题/数值 INK，阶段名 L2，刻度 L4，网格 GRID */
+  const SHADE = { comm: INK, other: L[2] };
+
+  const MINUS = '\u2212', NB = '\u00A0';
+  const f2 = v => v.toFixed(2);
+  const sd = v => (v > 0 ? '+' : MINUS) + Math.abs(v).toFixed(2);
+  const dlt = (a, b) => +(b - a).toFixed(2);
+
+  /* ── 两种幅面 ─────────────────────────────────────────────────
+     wide：960×300 四根竖柱（980 内容列）；rows：420×292 四行横条（窄屏）
+     两个幅面共用同一套编码：长度 = ms、明度 = 分量、同一 0 基线。 */
+  const MODES = {
+    wide: {
+      W: 960, H: 300, BASE: 252, PX: 2.7, PITCH: 4.0, HW: 20,
+      BX: [205, 345, 605, 745], GC: [275, 675],
+      AXIS_X: 118, GX0: 132, GX1: 828,
+      F: { total: 13, seg: 10, phase: 10, group: 11.5, tick: 8.5, delta: 9, unit: 8 },
+      titleY: 18, phaseDY: 21, deltaY: 289
+    },
+    rows: {
+      W: 340, H: 302,
+      X0: 78, PX: 2.95, PITCH: 4.2, HB: 26, LBL_X: 70, TOT_X: 338,
+      AXIS_Y: 276,
+      ROWS: [[56, 100], [186, 230]],    // 每个场景两行（前 / 后）
+      HEAD_Y: [24, 160], DELTA_Y: [126, 256],
+      F: { total: 14.5, seg: 12.5, phase: 12, group: 13.5, tick: 10, delta: 10.5, hdr: 10 },
+      deltaX: 78
+    }
+  };
+
+  const fx = (animate, d) => animate
+    ? { class: 'fade', style: `animation-delay:${d.toFixed(3)}s` }
+    : {};
+  /* 段内标签：光晕 + 入场延迟写在同一个 style 上 */
+  const halo = (animate, d, extra) => ({
+    class: animate ? 'fade' : '',
+    style: extra + (animate ? `animation-delay:${d.toFixed(3)}s` : '')
+  });
+
+  /* 竖柱：横档梯子，2 ms 一档；段顶/柱顶画在精确值上 */
+  const ladderV = (s, Lx, x, yBot, yTop, shade, i, seg, animate, d0) => {
+    const ys = [];
+    for (let y = yBot; y > yTop + 0.8; y -= Lx.PITCH) ys.push(y);
+    ys.push(yTop);
+    ys.forEach((y, k) => {
+      const w = Lx.HW - 1.6 + rnd(k + 1 + seg * 17, i * 11 + seg + 3) * 3.2;
+      el(s, 'line', Object.assign({
+        x1: x - w, y1: +y.toFixed(2), x2: x + w, y2: +y.toFixed(2),
+        stroke: shade, 'stroke-width': 1,
+        opacity: (.52 + rnd(k + 2 + seg * 23, i * 5 + seg + 7) * .48).toFixed(2)
+      }, fx(animate, d0 + i * .09 + k * .012)));
+    });
+  };
+
+  /* 横条：竖档梯子，2 ms 一档；段末画在精确值上 */
+  const ladderH = (s, Lx, x0, x1, yc, shade, i, seg, animate, d0) => {
+    const xs = [];
+    for (let x = x0; x < x1 - 0.8; x += Lx.PITCH) xs.push(x);
+    xs.push(x1);
+    xs.forEach((x, k) => {
+      const h = Lx.HB - 3 + rnd(k + 1 + seg * 19, i * 13 + seg + 2) * 3;
+      el(s, 'line', Object.assign({
+        x1: +x.toFixed(2), y1: yc - h / 2, x2: +x.toFixed(2), y2: yc + h / 2,
+        stroke: shade, 'stroke-width': 1,
+        opacity: (.52 + rnd(k + 2 + seg * 29, i * 7 + seg + 5) * .48).toFixed(2)
+      }, fx(animate, d0 + i * .09 + k * .012)));
+    });
+  };
+
+  /* 每对柱/行的三个增量（全部由上面的实测/派生值相减而来） */
+  const deltaLine = (s, Lx, x, y, anchor, gi, animate, d) => {
+    const [b0, b1] = DATA[gi].bars;
+    const t = txt(s, Object.assign({
+      x, y, 'font-size': Lx.F.delta, 'font-weight': 600, fill: MUTED, 'text-anchor': anchor
+    }, fx(animate, d)), '');
+    [
+      ['Δ通信' + NB, MUTED, 600], [sd(dlt(b0.comm, b1.comm)), INK, 800],
+      [NB + '·' + NB + 'Δ其他' + NB, MUTED, 600], [sd(dlt(b0.other, b1.other)), INK, 800],
+      [NB + '·' + NB + 'Δ合计' + NB, MUTED, 600], [sd(dlt(b0.total, b1.total)), INK, 800]
+    ].forEach(([str, fill, w]) => {
+      const ts = el(t, 'tspan', { fill: fill, 'font-weight': w });
+      ts.textContent = str;
+    });
+  };
+
+  /* ── 幅面一：960×300，四根堆叠竖柱 ──────────────────────────── */
+  const drawWide = (s, Lx, animate) => {
+    /* 标尺：0 / 20 / 40 / 60 ms，同一基线，不截断 */
+    [0, 20, 40, 60].forEach(v => {
+      const y = Lx.BASE - v * Lx.PX;
+      el(s, 'line', Object.assign({
+        x1: Lx.GX0 - 5, y1: y, x2: Lx.GX0, y2: y, stroke: M.GRID, 'stroke-width': .8
+      }, fx(animate, .05)));
+      txt(s, Object.assign({
+        x: Lx.AXIS_X, y: y + 3, 'font-size': Lx.F.tick, 'font-weight': 600, fill: L[4],
+        'text-anchor': 'end'
+      }, fx(animate, .05)), v);
+    });
+    el(s, 'line', Object.assign({
+      x1: Lx.GX0, y1: Lx.BASE, x2: Lx.GX1, y2: Lx.BASE, stroke: M.GRID, 'stroke-width': .9
+    }, fx(animate, .05)));
+    txt(s, Object.assign({
+      x: Lx.GX0, y: Lx.BASE - 60 * Lx.PX - 11, 'font-size': Lx.F.unit, 'font-weight': 600,
+      fill: L[4], 'letter-spacing': '.12em'
+    }, fx(animate, .05)), '毫秒');
+
+    DATA.forEach((g, gi) => {
+      txt(s, Object.assign({
+        x: Lx.GC[gi], y: Lx.titleY, 'font-size': Lx.F.group, 'font-weight': 800, fill: INK,
+        'text-anchor': 'middle'
+      }, fx(animate, gi * .12)), g.name);
+    });
+
+    let n = 0;
+    DATA.forEach((g, gi) => {
+      g.bars.forEach(b => {
+        const i = n++, x = Lx.BX[i];
+        const yComm = Lx.BASE - b.comm * Lx.PX;
+        const yTop = Lx.BASE - b.total * Lx.PX;
+
+        ladderV(s, Lx, x, yComm - 2.0, yTop, SHADE.other, i, 1, animate, .20);
+        ladderV(s, Lx, x, Lx.BASE, yComm, SHADE.comm, i, 0, animate, .10);
+
+        const midComm = Lx.BASE - b.comm * Lx.PX / 2;
+        const midOther = Lx.BASE - (b.comm + b.total) / 2 * Lx.PX;
+
+        const lo = txt(s, Object.assign({
+          x: x + Lx.HW + 9, y: midOther + 3.2, 'font-size': Lx.F.seg, 'font-weight': 800,
+          fill: L[2]
+        }, fx(animate, .55 + i * .08)), f2(b.other) + '*');
+        tip(lo, `${g.key} · ${b.ph} — 其他（合计 − 通信，派生）${f2(b.other)} ms`);
+
+        const lc = txt(s, Object.assign({
+          x: x + Lx.HW + 9, y: midComm + 3.2, 'font-size': Lx.F.seg, 'font-weight': 800,
+          fill: INK
+        }, fx(animate, .6 + i * .08)), f2(b.comm));
+        tip(lc, `${g.key} · ${b.ph} — 通信（实测）${f2(b.comm)} ms`);
+
+        const lt = txt(s, Object.assign({
+          x: x, y: yTop - 10, 'font-size': Lx.F.total, 'font-weight': 800, fill: INK,
+          'text-anchor': 'middle'
+        }, fx(animate, .7 + i * .08)), f2(b.total));
+        tip(lt, `${g.key} · ${b.ph} — 合计 ${f2(b.total)} ms（通信 ${f2(b.comm)} + 其他 ${f2(b.other)}）`);
+
+        txt(s, Object.assign({
+          x: x, y: Lx.BASE + Lx.phaseDY, 'font-size': Lx.F.phase, 'font-weight': 700, fill: L[2],
+          'text-anchor': 'middle', 'letter-spacing': '.08em'
+        }, fx(animate, .1 + i * .08)), b.ph);
+      });
+    });
+
+    DATA.forEach((g, gi) => {
+      deltaLine(s, Lx, Lx.GC[gi], Lx.deltaY, 'middle', gi, animate, .82 + gi * .1);
+    });
+  };
+
+  /* ── 幅面二：420×292，四行横条（窄屏） ───────────────────────── */
+  const drawRows = (s, Lx, animate) => {
+    /* 每条长度 ∝ ms：0 / 20 / 40 / 60 刻度落在同一基线上 */
+    const axisEnd = Lx.X0 + 70 * Lx.PX + 8;
+    el(s, 'line', Object.assign({
+      x1: Lx.X0 - 8, y1: Lx.AXIS_Y, x2: axisEnd, y2: Lx.AXIS_Y,
+      stroke: M.GRID, 'stroke-width': .9
+    }, fx(animate, .05)));
+    [0, 20, 40, 60].forEach(v => {
+      const x = Lx.X0 + v * Lx.PX;
+      el(s, 'line', Object.assign({
+        x1: x, y1: Lx.AXIS_Y, x2: x, y2: Lx.AXIS_Y + 4, stroke: M.GRID, 'stroke-width': .8
+      }, fx(animate, .05)));
+      txt(s, Object.assign({
+        x: x, y: Lx.AXIS_Y + 15, 'font-size': Lx.F.tick, 'font-weight': 600, fill: L[4],
+        'text-anchor': 'middle'
+      }, fx(animate, .05)), v);
+    });
+    txt(s, Object.assign({
+      x: Lx.TOT_X, y: 10, 'font-size': Lx.F.hdr, 'font-weight': 600, fill: L[3],
+      'text-anchor': 'end', 'letter-spacing': '.08em'
+    }, fx(animate, .05)), '合计（ms）');
+
+    let n = 0;
+    DATA.forEach((g, gi) => {
+      txt(s, Object.assign({
+        x: 0, y: Lx.HEAD_Y[gi], 'font-size': Lx.F.group, 'font-weight': 800, fill: INK
+      }, fx(animate, gi * .12)), g.name);
+
+      g.bars.forEach((b, bj) => {
+        const i = n++, yc = Lx.ROWS[gi][bj];
+        const xCommEnd = Lx.X0 + b.comm * Lx.PX;
+        const xEnd = Lx.X0 + b.total * Lx.PX;
+
+        ladderH(s, Lx, xCommEnd + 2.0, xEnd, yc, SHADE.other, i, 1, animate, .20);
+        ladderH(s, Lx, Lx.X0, xCommEnd, yc, SHADE.comm, i, 0, animate, .10);
+
+        /* 段内标签：纸/墨互换 + 同色光晕，窄段也不会被裁 */
+        const haloS = `paint-order:stroke;stroke:${PAPER};stroke-width:3px;`;
+        const haloC = `paint-order:stroke;stroke:${PAPER};stroke-width:3px;`;
+        const lo = txt(s, Object.assign({
+          x: Lx.X0 + (b.comm + b.other / 2) * Lx.PX, y: yc + 4,
+          'font-size': Lx.F.seg, 'font-weight': 800, fill: INK, 'text-anchor': 'middle'
+        }, halo(animate, .55 + i * .08, haloS)), f2(b.other) + '*');
+        tip(lo, `${g.key} · ${b.ph} — 其他（合计 − 通信，派生）${f2(b.other)} ms`);
+
+        const lc = txt(s, Object.assign({
+          x: Lx.X0 + b.comm * Lx.PX / 2, y: yc + 4,
+          'font-size': Lx.F.seg, 'font-weight': 800, fill: INK, 'text-anchor': 'middle'
+        }, halo(animate, .6 + i * .08, haloC)), f2(b.comm));
+        tip(lc, `${g.key} · ${b.ph} — 通信（实测）${f2(b.comm)} ms`);
+
+        const lt = txt(s, Object.assign({
+          x: Lx.TOT_X, y: yc + 4.5, 'font-size': Lx.F.total, 'font-weight': 800, fill: INK,
+          'text-anchor': 'end'
+        }, fx(animate, .7 + i * .08)), f2(b.total));
+        tip(lt, `${g.key} · ${b.ph} — 合计 ${f2(b.total)} ms（通信 ${f2(b.comm)} + 其他 ${f2(b.other)}）`);
+
+        txt(s, Object.assign({
+          x: Lx.LBL_X, y: yc + 4.5, 'font-size': Lx.F.phase, 'font-weight': 700, fill: L[2],
+          'text-anchor': 'end', 'letter-spacing': '.04em'
+        }, fx(animate, .1 + i * .08)), b.ph);
+      });
+
+      deltaLine(s, Lx, Lx.deltaX, Lx.DELTA_Y[gi], 'start', gi, animate, .82 + gi * .1);
+    });
+  };
+
+  let lastMode = null, raf = 0;
+  const draw = (svg, animate) => {
+    const mode = (svg.clientWidth || window.innerWidth) < 620 ? 'rows' : 'wide';
+    const Lx = MODES[mode];
+    svg.setAttribute('viewBox', `0 0 ${Lx.W} ${Lx.H}`);
+    svg.dataset.mode = mode;
+    lastMode = mode;
+    const s = svg;
+    const tt = el(s, 'title', {});
+    tt.textContent = '分层集合通信改造前后：每步 GPU 活跃时间构成（毫秒）';
+    (mode === 'rows' ? drawRows : drawWide)(s, Lx, animate);
+  };
+
+  M.obsReveal('tp16hc', svg => draw(svg, true));
+
+  /* 幅面切换：只在跨过断点时重画，不做动画 */
+  const sync = () => {
+    raf = 0;
+    const svg = document.getElementById('tp16hc');
+    if (!svg) return;
+    const mode = (svg.clientWidth || window.innerWidth) < 620 ? 'rows' : 'wide';
+    if (mode === lastMode) return;
+    lastMode = mode;
+    svg.innerHTML = '';
+    draw(svg, false);
+  };
+  window.addEventListener('resize', () => { if (!raf) raf = requestAnimationFrame(sync); });
+})();
+
+</script>
+</figure>
+
+</div>
+  <p class="tnote">上图走 <b>Mono 单色系统</b>：深色斜纹是两个集合通信（实测），浅色是其余 kernel 时间（派生 = 合计 − 通信，标 *）；
+  颜色只用来区分这两项，不表示好坏。四根柱子共用同一基线，柱高按毫秒线性映射。</p>
+
+  <p>再把这个变化摊到「每轮 GPU 活跃总时长」上看，两边的对账就很干净：</p>
+  <table>
+    <thead>
+      <tr><th>场景</th><th class="num">通信项</th><th class="num">非通信项（派生 = 合计 − 通信）</th><th class="num">合计</th></tr>
+    </thead>
+    <tbody>
+      <tr><td data-label="场景">2K · C5</td><td class="num" data-label="通信项">37.79 → 29.44（<b>−8.35</b>）</td><td class="num" data-label="非通信项">30.58 → 31.86（+1.28）</td><td class="num" data-label="合计">68.37 → 61.30（−7.07）</td></tr>
+      <tr><td data-label="场景">64K · C5</td><td class="num" data-label="通信项">34.45 → 20.77（<b>−13.68</b>）</td><td class="num" data-label="非通信项">35.64 → 36.78（+1.14）</td><td class="num" data-label="合计">70.09 → 57.55（−12.54）</td></tr>
+    </tbody>
+  </table>
+  <p class="tnote">读法：非通信项几乎不动（+1.28 / +1.14 ms），通信项下降的量基本等于合计下降的量。
+  <b>这就是「收益全部来自通信」的算术证据</b> —— 如果两级拆解顺手也改了计算排布，这一栏会明显偏离。</p>
+
+  <h3 class="mini">6.3 端到端：同一个镜像、同一组 P 容器、同一批请求</h3>
+  <p>代表点表按「同镜像发布原配方 ／ D 分层通信」排列，匹配测试使用同一对 P 容器、同一请求目录、同样的缓存命中与并发；
+  每个点 25 条请求。注意 <b>原配方那一列在首测与复测里是同一组数</b>（基线只测一次，优化版测两次）。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="nw">输入／输出</th><th class="num nw">轮次</th>
+        <th class="num">TPOT P50 (ms)</th><th class="num">TPOT P90 (ms)</th>
+        <th class="num">总 TPS</th><th>SLO：原配方 → 分层</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="hi">
+        <td class="mono nw" data-label="输入／输出">2,048／1,024</td><td class="num nw" data-label="轮次">首测</td>
+        <td class="num" data-label="TPOT P50">21.41 → <b>18.67</b>（−12.76%）</td>
+        <td class="num" data-label="TPOT P90">24.43 → 21.26（−12.98%）</td>
+        <td class="num" data-label="总 TPS">634.76 → 712.67（+12.27%）</td>
+        <td data-label="SLO"><b>未通过 → 通过</b></td>
+      </tr>
+      <tr>
+        <td class="mono nw" data-label="输入／输出">65,536／1,024</td><td class="num nw" data-label="轮次">首测</td>
+        <td class="num" data-label="TPOT P50">23.01 → 21.52（−6.47%）</td>
+        <td class="num" data-label="TPOT P90">25.01 → 22.48（−10.12%）</td>
+        <td class="num" data-label="总 TPS">12,219.69 → 13,283.73（+8.71%）</td>
+        <td data-label="SLO">通过 → 通过</td>
+      </tr>
+      <tr>
+        <td class="mono nw" data-label="输入／输出">196,608／1,024</td><td class="num nw" data-label="轮次">首测</td>
+        <td class="num" data-label="TPOT P50">25.79 → 24.54（−4.81%）</td>
+        <td class="num" data-label="TPOT P90">30.28 → 26.65（−12.01%）</td>
+        <td class="num" data-label="总 TPS">29,716.47 → 31,882.63（+7.29%）</td>
+        <td data-label="SLO">通过 → 通过</td>
+      </tr>
+      <tr>
+        <td class="mono nw" data-label="输入／输出">2,048／1,024</td><td class="num nw" data-label="轮次">复测</td>
+        <td class="num" data-label="TPOT P50">21.41 → <b>18.89</b>（−11.75%）</td>
+        <td class="num" data-label="TPOT P90">24.43 → 20.66（−15.41%）</td>
+        <td class="num" data-label="总 TPS">634.76 → 742.49（+16.97%）</td>
+        <td data-label="SLO">未通过 → 通过</td>
+      </tr>
+      <tr>
+        <td class="mono nw" data-label="输入／输出">65,536／1,024</td><td class="num nw" data-label="轮次">复测</td>
+        <td class="num" data-label="TPOT P50">23.01 → 20.25（−12.00%）</td>
+        <td class="num" data-label="TPOT P90">25.01 → 22.59（−9.67%）</td>
+        <td class="num" data-label="总 TPS">12,219.69 → 13,448.86（+10.06%）</td>
+        <td data-label="SLO">通过 → 通过</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini">6.4 前沿：达标并发与吞吐</h3>
+  <p>整轮共 125 个测点、3,590 条正式请求，14 个（输入／输出 × 命中率）组里 <b>13 组</b>拿到达标并发。
+  每档先测 C1／2／4／8，再扩并发并复核边界；同一并发的各次复核必须全部通过 SLO 才算达标。</p>
+  <p class="tnote"><b>口径提醒</b>：团队 SLO 表定义的四门是「TTFT P50/P95 + TPOT P50/P90」；
+  而这张 125 点表判的是 TTFT P50/<b>P90</b>（第二个门用了更松的分位）。本页引用的阈值一律按 125 点表口径。
+  这不影响「TPOT P50 是唯一未通过项」这一判断，但会让「全部通过」这句话比标准口径看起来更强。</p>
+
+  <table>
+    <thead>
+      <tr><th>输入／输出</th><th class="num">目标命中</th><th class="num">达标并发</th><th class="num">最高达标总 TPS</th><th class="num">每卡 TPS</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="mono" data-label="输入／输出">2,048／384</td><td class="num" data-label="命中">0%</td><td class="num" data-label="达标并发">3</td><td class="num" data-label="总 TPS">954.36</td><td class="num" data-label="每卡">29.82</td></tr>
+      <tr><td class="mono" data-label="输入／输出">2,048／1,024</td><td class="num" data-label="命中">0%</td><td class="num" data-label="达标并发"><b>8</b></td><td class="num" data-label="总 TPS">1,069.27</td><td class="num" data-label="每卡">33.41</td></tr>
+      <tr><td class="mono" data-label="输入／输出">16,384／384</td><td class="num" data-label="命中">0%</td><td class="num" data-label="达标并发">1</td><td class="num" data-label="总 TPS">2,132.06</td><td class="num" data-label="每卡">66.63</td></tr>
+      <tr><td class="mono" data-label="输入／输出">16,384／1,024</td><td class="num" data-label="命中">0%</td><td class="num" data-label="达标并发"><b>未达标</b></td><td class="num" data-label="总 TPS">—</td><td class="num" data-label="每卡">—</td></tr>
+      <tr><td class="mono" data-label="输入／输出">65,536／384</td><td class="num" data-label="命中">75%</td><td class="num" data-label="达标并发">4</td><td class="num" data-label="总 TPS">25,244.65</td><td class="num" data-label="每卡">788.90</td></tr>
+      <tr><td class="mono" data-label="输入／输出">65,536／384</td><td class="num" data-label="命中">85%</td><td class="num" data-label="达标并发">4</td><td class="num" data-label="总 TPS">26,176.54</td><td class="num" data-label="每卡">818.02</td></tr>
+      <tr><td class="mono" data-label="输入／输出">65,536／1,024</td><td class="num" data-label="命中">75%</td><td class="num" data-label="达标并发">7</td><td class="num" data-label="总 TPS">17,060.93</td><td class="num" data-label="每卡">533.15</td></tr>
+      <tr><td class="mono" data-label="输入／输出">65,536／1,024</td><td class="num" data-label="命中">85%</td><td class="num" data-label="达标并发">7</td><td class="num" data-label="总 TPS">18,218.60</td><td class="num" data-label="每卡">569.33</td></tr>
+      <tr><td class="mono" data-label="输入／输出">196,608／384</td><td class="num" data-label="命中">75%</td><td class="num" data-label="达标并发">6</td><td class="num" data-label="总 TPS">68,074.75</td><td class="num" data-label="每卡">2,127.34</td></tr>
+      <tr><td class="mono" data-label="输入／输出">196,608／384</td><td class="num" data-label="命中">85%</td><td class="num" data-label="达标并发">12</td><td class="num" data-label="总 TPS">111,761.96</td><td class="num" data-label="每卡">3,492.56</td></tr>
+      <tr><td class="mono" data-label="输入／输出">196,608／1,024</td><td class="num" data-label="命中">75%</td><td class="num" data-label="达标并发">6</td><td class="num" data-label="总 TPS">34,152.12</td><td class="num" data-label="每卡">1,067.25</td></tr>
+      <tr><td class="mono" data-label="输入／输出">196,608／1,024</td><td class="num" data-label="命中">85%</td><td class="num" data-label="达标并发">7</td><td class="num" data-label="总 TPS">38,921.91</td><td class="num" data-label="每卡">1,216.31</td></tr>
+      <tr><td class="mono" data-label="输入／输出">524,288／384</td><td class="num" data-label="命中">75%</td><td class="num" data-label="达标并发">4</td><td class="num" data-label="总 TPS">57,413.47</td><td class="num" data-label="每卡">1,794.17</td></tr>
+      <tr><td class="mono" data-label="输入／输出">524,288／384</td><td class="num" data-label="命中">85%</td><td class="num" data-label="达标并发">7</td><td class="num" data-label="总 TPS">93,525.82</td><td class="num" data-label="每卡">2,922.68</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="mini" id="recon">6.5 四条对账：把数字互相钉住</h3>
+  <div class="bound">
+    <div>
+      <div class="k">通信降幅到底落在哪</div>
+      <div class="v">85% / 92%</div>
+      <div class="d">通信省的 8.35 / 13.68 ms 中，有 7.07 / 12.54 ms 出现在总时长上，其余回到非通信项。</div>
+    </div>
+    <div>
+      <div class="k">非通信项是否被牵连</div>
+      <div class="v">+1.28 / +1.14</div>
+      <div class="d">30.58 → 31.86、35.64 → 36.78，属 trace 粒度上的重排，方向与「只动通信」一致。</div>
+    </div>
+    <div>
+      <div class="k">TPOT 能不能从 profile 推出来</div>
+      <div class="v">2.74 ms</div>
+      <div class="d">8.35 ms ÷ 3.19 token/轮 = 2.62 ms；实测 TPOT P50 动了 2.74 ms，差 0.12 ms（4.4%）。</div>
+    </div>
+    <div>
+      <div class="k">占比能不能单独看</div>
+      <div class="v">不能</div>
+      <div class="d">54.11% → 46.90% 的分母（总 kernel 时间）也在从 68.37 降到 61.30，比率会掩盖绝对量。</div>
+    </div>
+  </div>
+  <p class="tnote">第三条只对 2K 档成立。64K 档按同样算法应得 13.68 ÷ 3.19 = 4.29 ms，而实测 TPOT P50 只动了 1.49 ms ——
+  两组数字对不上，见下一节。这说明 profile 只能用来解释时间组成，不能拿去做端到端外推（文档本身也是这么写的）。</p>
+
+  <h2 id="limits"><span class="n">07</span>代价与边界：它换掉了什么</h2>
+
+  <p><b>一句话答案</b>：收益集中在 TPOT，代价落在短输入档的 TTFT P50；它没有动 <code>AllReduce</code>，
+  也没能让 16K／1K 那一档达标；在更接近线上分布的 900 秒会话回放里，收益从 +12% 缩到 +2.3%。</p>
+
+  <h3 class="mini">7.1 短输入档的 TTFT 变差，长输入档变好</h3>
+  <table>
+    <thead><tr><th>输入／输出</th><th class="num">TTFT P50</th><th class="num">TTFT P90</th><th>怎么读</th></tr></thead>
+    <tbody>
+      <tr><td class="mono" data-label="输入／输出">2,048／1,024（首测）</td><td class="num waste" data-label="TTFT P50">+65.35%</td><td class="num" data-label="TTFT P90">−7.04%</td><td data-label="怎么读">中位数变差、长尾变好</td></tr>
+      <tr><td class="mono" data-label="输入／输出">2,048／1,024（复测）</td><td class="num waste" data-label="TTFT P50">+19.96%</td><td class="num" data-label="TTFT P90">−17.93%</td><td data-label="怎么读">同上，幅度更小</td></tr>
+      <tr><td class="mono" data-label="输入／输出">65,536／1,024</td><td class="num" data-label="TTFT P50">+16.65% / +1.78%</td><td class="num" data-label="TTFT P90">−1.60% / −0.95%</td><td data-label="怎么读">基本持平，略差</td></tr>
+      <tr><td class="mono" data-label="输入／输出">196,608／1,024</td><td class="num good" data-label="TTFT P50">−20.38%</td><td class="num" data-label="TTFT P90">+0.01%</td><td data-label="怎么读">中位数明显变好、长尾不动</td></tr>
+    </tbody>
+  </table>
+  <p>长输入档 TTFT 变好是容易解释的（推断）：输入越长，D 端队列越长，TPOT 变快直接减少排队时间，
+  于是首 token 反而更早。短输入档相反 —— 队列几乎不存在，TTFT 由「第一个 decode step」决定，
+  而两级路径在这一步上多了一次 stage 边界与一次额外调用，正落在关键路径上。
+  文档没有给出这个方向的解释，这里只把两组事实并列。</p>
+
+  <h3 class="mini">7.2 唯一没达标的档位与口径差异</h3>
+  <p>14 组里唯一没拿到达标并发的是 <b>16,384／1,024</b>：逐档表里它只在 C ≤ 2 通过（C2 总 TPS 1,823.55），
+  再往上 TTFT P50 就超过 1,715 ms 的阈值。汇总表把它记为「未达标」，
+  说明前沿判定与逐档单点通过不是同一套规则 —— 读这种表时要把两套口径分开看。</p>
+
+  <h3 class="mini">7.3 AllReduce 一行没动</h3>
+  <p>两次采集里，每个 rank 在 6 个验证轮次内都记录了 <b>48 次 AllReduce</b>（= 8 次/轮），
+  走的是原有 TP 归约路径。它是下一步的候选：既然两级拆解能把 15 轮压到 8 轮，
+  同样的思路对 <code>AllReduce</code> 是否也成立，取决于它现在的分解方式与消息形状 —— 本页不下结论。</p>
+
+  <h3 class="mini">7.4 残留的长 AllGather：是等待，不是传输</h3>
+  <p>优化后 trace 里仍能看到一块 <b>1.613 ms</b> 的机内 <code>AllGather</code>（rank 0）。同一验证轮次、同一调用序号下：
+  <b>rank 0–3 比 rank 4–7 提前约 1.58 ms 进入</b>，八个 rank 几乎同时结束；而 rank 4–7 的这次调用只持续 <b>32.7–42.5 μs</b>。
+  也就是说那块长条几乎全是早到 rank 在等 —— 下一个杠杆是「到达时间」（负载分配与前序跨机配对依赖），
+  不是集合通信算子本身。</p>
+
+  <h3 class="mini">7.5 会话回放：收益从 +12% 缩到 +2.3%</h3>
+  <p>代表点是固定长度 + 固定并发，天然偏向「通信项占比高」的形态。换成更接近线上的混合负载：
+  回放同一组五条多轮任务轨迹 900 秒，根并发 8，两轮都用同一发布镜像、同样的 KV 缓存策略。</p>
+
+  <table>
+    <thead>
+      <tr><th>D 通信</th><th class="num">完成请求</th><th class="num">HTTP 峰值并发</th><th class="num">命中率</th><th class="num">TTFT P50</th><th class="num">TPOT P50</th><th class="num">总 TPS</th></tr>
+    </thead>
+    <tbody>
+      <tr><td data-label="D 通信">发布原配方</td><td class="num" data-label="完成请求">177</td><td class="num" data-label="峰值并发">9</td><td class="num" data-label="命中率">95.20%</td><td class="num" data-label="TTFT P50">1,402.20</td><td class="num" data-label="TPOT P50">26.85</td><td class="num" data-label="总 TPS">21,453.46</td></tr>
+      <tr><td data-label="D 通信">分层 BF16</td><td class="num" data-label="完成请求">178</td><td class="num" data-label="峰值并发">10</td><td class="num" data-label="命中率">95.01%</td><td class="num" data-label="TTFT P50">1,840.29</td><td class="num" data-label="TPOT P50">25.83</td><td class="num" data-label="总 TPS">21,938.23</td></tr>
+    </tbody>
+  </table>
+  <p class="tnote">相对同镜像原配方：TTFT P50 <b>+31.24%</b>、TPOT P50 −3.77%、TPOT P90 +3.10%、总 TPS <b>+2.26%</b>、命中率 −0.19 个百分点。
+  固定时间回放里会话轮次会随服务速度变化，所以这张表比的是整个窗口，不是同一条请求。
+  结论：<b>代表点的 +8% ~ +12% 不能直接外推到线上</b>，混合负载下这条优化的量级是「个位数百分比、且 TTFT 明显变差」。</p>
+
+  <h3 class="mini">7.6 三件必须一起验收的事</h3>
+  <ul>
+    <li><b>数值</b>：归约顺序变了，AllGather 逐位一致但 ReduceScatter 不是 —— 端到端必须验完整输出，不能只看 SLO。</li>
+    <li><b>长输入与回收</b>：1M 输入档与 D 端自动回收单独验收，因为两级路径改变了每层的同步点。</li>
+    <li><b>门的覆盖范围</b>：每 rank 行数超过 4（在途并发约 13 以上）就退回原路径。要推向更高并发，门必须先重新划。</li>
+    <li><b>CUDA graph</b>：decode 走 CUDA graph，换集合通信实现必须在图捕获下工作。同族部署已经踩过这个坑：
+      某一版在 decode graph 内换实现后退化成 eager，慢约 2×，因此被默认关闭。11.4 的实现方式未披露，
+      但这必然是接入时的主要工程风险。</li>
+  </ul>
+
+  <h2 id="myth"><span class="n">08</span>常见误解</h2>
+
+  <div class="myth">
+    <div class="w">「分层通信省的是字节。」</div>
+    <div class="r"><b>不是。</b>跨机段每对仍然只搬 1 份（12–48 KB），份数一模一样；省的是串行轮数（15 → 8）
+      与跨机环节的并发度（2 条链 → 8 对并行）。真要省字节，两级拆解反而让机内份数从 13 涨到 14。</div>
+  </div>
+  <div class="myth">
+    <div class="w">「只要是「分层」，就一定会更快。」</div>
+    <div class="r"><b>团队自己的反例就摆在那儿。</b>9 月他们试过一版<b>机内</b>分层 AllReduce（把跨 socket 的流量拆开），
+      实测 PIX 与 SYS 带宽无差异、<b>无收益，路线作废</b>。所以本轮的收益来源不是「分层」这个形式，
+      而是「把跨机环节从多跳压成 1 跳」—— 机内分层没有可省的跨机跳，自然没有收益。
+      这也是本页坚持说「两级」而不是「hierarchical」的原因：同名不同命。</div>
+  </div>
+  <div class="myth">
+    <div class="w">「8 对 rank 配对 = 8 条独立链路，跨机带宽直接 ×8。」</div>
+    <div class="r"><b>只有 4 条机间 HCA。</b>8 个配对要共享这 4 条，最可能是 2 对共用 1 条。
+      物理链路的并发提升是 2 → 4 条，不是一个数量级；所以这一节的收益不能记在「带宽变宽」上，
+      要记在「环节数变少」上。</div>
+  </div>
+  <div class="myth">
+    <div class="w">「这是通信库按消息大小自动选的算法。」</div>
+    <div class="r"><b>不是自动的。</b>文档写得很清楚：一组形状（隐宽 6,144、每 rank 1–4 行）走新的两级路径，
+      <b>其余形状走镜像原路径</b> —— 这是一条应用侧显式的形状门，不是库内部启发式。</div>
+  </div>
+  <div class="myth">
+    <div class="w">「改了通信，所有指标都会一起变好。」</div>
+    <div class="r"><b>不会。</b>2,048／1,024 档 TTFT P50 变差 +65%（首测），P90 变好 7%；
+      900 秒会话回放里 TTFT P50 更是 +31%。收益只落在 TPOT／TPS 这一侧，而且恰好是那一格唯一的未通过项。</div>
+  </div>
+  <div class="myth">
+    <div class="w">「trace 里那块 1.6 ms 的 AllGather 说明这条路径还是慢。」</div>
+    <div class="r"><b>那块是等待。</b>同一调用序号下 rank 4–7 只花 32.7–42.5 μs，rank 0–3 早到 1.58 ms 后干等。
+      kernel 时间包含到达不齐与依赖等待 —— 不把「传输」和「等」分开，就会把偏差读成算子性能。</div>
+  </div>
+  <div class="myth">
+    <div class="w">「通信占比降了 7 个百分点，所以通信快了 7%。」</div>
+    <div class="r"><b>占率的分母也在变。</b>54.11% → 46.90% 的同时，总 kernel 时间从 68.37 降到 61.30 ms；
+      通信项自身是 37.79 → 29.44 ms（−22.11%）。比率永远要配绝对量一起读。</div>
+  </div>
+
+  <h2 id="quiz"><span class="n">09</span>自测</h2>
+
+  <details>
+    <summary>1. 为什么 ReduceScatter 的两级顺序和 AllGather 相反？反了会怎样？</summary>
+    <div class="ans">因为<b>窄端的位置不同</b>：AllGather 的窄端在入口（每 rank 只有自己那一份），所以跨机放在第一段；
+      ReduceScatter 的窄端在出口（最后每人只要自己那一份），所以跨机放在最后一段。
+      反过来做，ReduceScatter 的第一段就要在两台机之间互搬<b>完整的宽张量</b>（16–64 行，是窄端的 16 倍），
+      机间带宽立刻成为瓶颈 —— 这也解释了为什么文档给的门是「窄端 1–4 行」。</div>
+  </details>
+
+  <details>
+    <summary>2. 门从「1–4 行」放宽到「1–32 行」，最先坏的是哪一项？</summary>
+    <div class="ans">最先坏的是<b>跨机段字节</b>：每对要搬 <span class="mono">32 × 6,144 × 2 B = 384 KB</span>，
+      是原来的 8 倍，而跨机一跳的带宽项开始压过延迟项 —— 此时「少轮数」省下的固定开销不再占主导，
+      多出来的 stage 边界变成纯成本。第二个坏的是机内段：8 卡集合通信每轮要搬 2 份，带宽项同样抬升。</div>
+  </details>
+
+  <details>
+    <summary>3. 为什么 AllGather 能逐位一致，ReduceScatter 不能？</summary>
+    <div class="ans">AllGather 只做拼接，<b>不做算术</b>，换顺序只是换拼接次序，bit 不变。
+      ReduceScatter 要做求和，两级是 <span class="mono">(A+B)+(C+D)</span>、原路径是链式
+      <span class="mono">(((A+B)+C)+D)</span>，而 BF16 加法不满足结合律，中间结果每次舍入的位置不同 ——
+      实测最大 NRMSE 0.419%。</div>
+  </details>
+
+  <details>
+    <summary>4. 「每轮 156 次、单次平均 242 μs、最快 33 μs」这三个数放在一起说明了什么？</summary>
+    <div class="ans">说明<b>单次调用的时间几乎全不是传输</b>：12–48 KB 的搬运是微秒级，33 μs 已经是「快」的下限，
+      而平均 242 μs 是它 7 倍 —— 中间那部分只能是启动、同步与等待。所以在这一档上，
+      改轮数（把等待点变少）比改带宽（把传输变快）有效得多。</div>
+  </details>
+
+  <details>
+    <summary>5. 并发从 8 提到 32，这条优化还能吃到收益吗？</summary>
+    <div class="ans">按本页的推导，<b>先掉出门外</b>：32 并发 × 每请求 5 个候选位置（draft 4 + bonus 1）= 160 token，
+      除以 16 卡 = 10 行 &gt; 4，直接走镜像原路径。即使把门放宽，收益也会被跨机段的带宽项吃掉。
+      这也提示一件更要紧的事：<b>门是随并发档位画的</b>，要推向更高并发，得先重划门。</div>
+  </details>
+
+  <h2 id="read">延伸阅读</h2>
+  <ul class="links">
+    <li><a href="../allreduce-1stage-vs-2stage/index.html">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</a>
+      <span class="why">同样是「把一次集合通信拆成两段」，但那一篇省的是字节、这一篇省的是轮数 —— 两篇对着读，能分清两类收益的来源。</span></li>
+    <li><a href="../a2a-ar-ag-sglang/index.html">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</a>
+      <span class="why">理解本文这两个算子在一层里究竟出现在哪一行、为什么前向是 allgather、反向是 reducescatter。</span></li>
+    <li><a href="../cuda-ipc-direct-push/index.html">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</a>
+      <span class="why">同一类问题在单机内的另一条解法：小消息的瓶颈在固定开销，这条判断是两篇共用的前提。</span></li>
+    <li><a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html" target="_blank" rel="noopener">NCCL · Collectives 文档</a>
+      <span class="why">AllGather／ReduceScatter 的定义与 ring／tree 算法差异，是「N−1 轮」这个下界的出处。</span></li>
+    <li><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener">Fast Inference from Transformers via Speculative Decoding</a>
+      <span class="why">投机解码原始论文；「一次验证轮次携带几个 token」直接决定 TPOT 与每轮时间的关系。</span></li>
+  </ul>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/dflash-pp-adaptation/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</b></span></a><a class="sm-pn-a sm-next" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html"><span class="sm-more-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-more-m">18 分钟<i aria-hidden="true"></i>2026-11-02</span></a><a class="sm-more-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html"><span class="sm-more-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-more-m">40 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html"><span class="sm-more-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html"><span class="sm-more-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-more-m">9 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html"><span class="sm-more-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-more-m">12 分钟<i aria-hidden="true"></i>2026-09-20</span></a><a class="sm-more-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><span class="sm-more-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-15</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p><b>来源与口径</b>：数字取自一次内部优化实验的验收文档（2026-11-04，含 125 个测点、3,590 条正式请求、64 份 rank trace），
+    内部文档名、镜像标签、机器编号与路径已脱敏。端到端数字为匹配测试实测（同镜像、同 P 容器、同请求目录、同缓存命中与并发）；
+    trace 数字为同一发布镜像下 D 端 16 rank 的 kernel 时间统计。
+    <b>标为「派生」的值</b>（非通信项 = 合计 − 通信、每轮 ≈156 次、单次平均 242 μs、每轮 ≈3.2 token、TPOT 对账）
+    由本页计算；<b>「轮数模型」与「原路径 15 轮」是一阶近似与推断</b>（原路径算法文档未写）；
+    「4 条 HCA」「attention 组几何」「原路径曾是 gloo」等同族事实取自团队另几份部署与实验文档，方向已就地标注为推断。
+    本页未做运行时实测。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT · 数据图表由 lieflat-charts 模板生成，图表代码按 PolyForm Noncommercial 1.0.0</span></p>
+  </footer>
+
+</div>
+<script>
+(function(){
+  var K = document.getElementById('ck'), R = document.getElementById('cr');
+  if(!K || !R) return;
+  var FLAT = 'LLLLLLLxLLLLLLx';   /* 7 机内 · 1 跨机 · 6 机内 · 1 跨机 = 15 轮 */
+  var HIER = 'xLLLLLLL';          /* 1 跨机 · 7 机内 = 8 轮 */
+
+  function build(el, pattern, k){
+    var out = '';
+    for(var i = 0; i < pattern.length; i++){
+      var isX = pattern.charAt(i) === 'x';
+      out += '<div class="seg' + (isX ? ' x' : '') + '" style="flex:' + (isX ? k : 1) + ' 1 0"></div>';
+    }
+    el.innerHTML = out;
+  }
+  function pick(el, v){ if(el) el.textContent = v; }
+
+  function upd(){
+    var k = +K.value, rows = +R.value;
+    var flat = 13 + 2 * k, hier = 7 + k;
+    var delta = (hier / flat - 1) * 100;
+    pick(document.getElementById('ckv'), k + '×');
+    pick(document.getElementById('crv'), rows + ' 行');
+    pick(document.getElementById('oFlat'), flat);
+    pick(document.getElementById('oHier'), hier);
+    pick(document.getElementById('oDelta'), (delta > 0 ? '+' : '−') + Math.abs(delta).toFixed(1) + '%');
+    pick(document.getElementById('cFlatL'), flat + ' 单位');
+    pick(document.getElementById('cHierL'), hier + ' 单位');
+    pick(document.getElementById('oFlatD'), '13 机内 + 2 跨机 = 13 + 2×' + k);
+    pick(document.getElementById('oHierD'), '7 机内 + 1 跨机 = 7 + ' + k);
+    var bytes = rows * 6144 * 2;
+    var txt = bytes >= 1048576 ? (bytes / 1048576).toFixed(2) + ' MB' : (bytes / 1024).toFixed(0) + ' KB';
+    pick(document.getElementById('oBytes'), txt);
+    pick(document.getElementById('oBytesD'), rows + ' 行 × 6,144 × 2 B');
+    var gate = rows <= 4;
+    var g = document.getElementById('oGate');
+    pick(g, gate ? '生效' : '不生效');
+    g.className = 'v ' + (gate ? 'good' : 'waste');
+    pick(document.getElementById('oGateD'), 'rows = ' + rows + (gate ? ' ≤ 4，走两级' : ' > 4，回原路径'));
+    build(document.getElementById('cFlat'), FLAT, k);
+    build(document.getElementById('cHier'), HIER, k);
+  }
+  K.addEventListener('input', upd);
+  R.addEventListener('input', upd);
+  upd();
+})();
+</script>
+</body>
+</html>
