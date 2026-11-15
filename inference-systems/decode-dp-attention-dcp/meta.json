@@ -1,0 +1,30 @@
+{
+  "title": "Decode 的 DPAttention 与 DCP：请求分池、位置分片与 KV 容量",
+  "slug": "decode-dp-attention-dcp",
+  "category": "inference-systems",
+  "date": "2026-11-15",
+  "tags": ["DPAttention", "Decode Context Parallel", "KV Cache", "MLA", "DSA", "PD 分离", "Attention DP", "容量模型"],
+  "one_liner": "沿两套真实 PD 部署解释 D 侧 DPAttention 与 DCP：TP16×attnDP4×attnTP4 下，DP 把请求和 KV 池分成四组，DCP 才把同一请求的 target 主 KV 按位置分片。GLM 当前是 DCP1+HiSparse（GPU 主池 480K、host ratio 3），Hy r15 是 DCP2（每 rank 主 KV 400K、每组逻辑 800K）；DCP2 的主 KV 副本因子是 2 而不是 1，index-K 和 NEXTN draft 仍是 4 份。附 owner rule、partial output+LSE 流程、四口径容量公式、页级可复核算例与不能单因子归因的历史实测。",
+  "artifact": "index.html",
+  "extra_files": ["notes.md"],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "工作区两套 PD recipe、resolved plan、历史 server args 与启动脚本；公开归档不保留内部节点地址和 run id",
+    "sglang/python/sglang/srt/arg_groups/{fields/parallel,parallel_hook,overrides,model_overrides/deepseek_v2}.py：默认值、互斥条件与通信后端解析",
+    "sglang/python/sglang/srt/{runtime_context,distributed/parallel_state,layers/dp_attention,models/deepseek_v2,layers/dcp,layers/attention/dsa/dsa_dcp}.py：rank、DP/DCP forward、owner rule 与 LSE 归并",
+    "sglang/python/sglang/srt/mem_cache/{memory_pool,kv_cache_configurator,index_key_cache,hisparse_memory_pool,allocator/hisparse,pool_host/base,pool_host/mla}.py：MLA/DSA buffer、DCP/draft、HiSparse 与 page reserve",
+    "sglang/python/sglang/srt/disaggregation/{common/utils,mooncake/conn,common/conn}.py：P→D DCP relayout、Prefill CP 条件与 rank mapping",
+    "Git a405481e:runtime/glm53_pd_d_hierarchy/patches/01-d-hierarchy.patch 与 03-dp-attention.patch：GLM unified 的 TP16 分层 AllGather/ReduceScatter",
+    "Hy r15 resolved plan、current launch、DCP final report 与 standalone 日志；r15 精确 overlay 源码未完整保存在本地，已在正文标注",
+    "历史 warmup 证据：SM120 sparse-MLA 无 num_heads=4 的 decode kernel，TP16/attnDP1 仅作理论对照"
+  ],
+  "visibility": "internal",
+  "redactions": [
+    "内部主机名、IP、端口映射、镜像仓库和容器/run id 已移除",
+    "本地绝对路径与内部文档链接已移除，仅保留仓库相对源码锚点",
+    "Hy 未公开模型版本与内部项目细节统一写作 Hy 系列，GLM 仅保留公开模型家族信息",
+    "内部环境变量的非必要网络/部署细节已省略，保留解释机制所需的公开配置键"
+  ],
+  "enriched": "2026-11-15"
+}
