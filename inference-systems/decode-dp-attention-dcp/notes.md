@@ -494,3 +494,64 @@ GLM/Hy 的 `bytes_per_target_row` 必须包括主 KV、index-K、DCP 和 draft �
 - `sglang/python/sglang/srt/mem_cache/{memory_pool,kv_cache_configurator,index_key_cache}.py`：MLA/DSA buffer、DCP 容量、index-K 与 draft。
 - `sglang/python/sglang/srt/mem_cache/{hisparse_memory_pool,allocator/hisparse,pool_host/mla}.py`：GLM HiSparse logical/device/host 映射。
 - `sglang/python/sglang/srt/disaggregation/{common/utils,mooncake/conn,common/conn}.py`：P→D DCP relayout、CP 条件与 rank mapping。
+
+## 附：如果只问 SGLang 原理（2026-11-15 补充）
+
+可以把两个机制压缩成一句话：**DPAttention 决定“哪些请求放在同一组 rank 上”，DCP 决定“同一请求的上下文放在哪些 rank 上”。**
+
+### 1. DPAttention：按请求分组的 attention 并行
+
+设 TP 组有 `T` 个 rank、attention-DP 有 `d` 组、Prefill CP 宽为 `cp`：
+
+```text
+attn_tp_size = T / d / cp
+```
+
+每个 attention-DP 组有自己的 scheduler、batch 和 KV pool。请求 A 只进入 DP0，请求 B 只进入 DP1；不会让 TP 组内所有 rank 都保存所有请求的 KV。组内 attention 权重仍按 attn-TP 切分，MoE/FFN 仍可在完整 TP 组上计算。
+
+一次 forward 的概念流程：
+
+```text
+DP-local 请求和 KV
+  → 本组 attention
+  → attn-TP 归约
+  → 各 DP 组的 hidden states 聚回完整 TP 的 FFN/MoE
+  → 结果散回本 DP 组
+```
+
+所以它不是“整模型 DP”，而是**attention 局部 DP + FFN 侧 TP**。收益是减少不同请求的 KV 重复、增加独立请求池；代价是 DP 组间 activation 通信和 scheduler 同步。
+
+### 2. DCP：按上下文位置分片的 decode 并行
+
+DCP 在同一 attention-TP 组内按位置交错存 target 主 KV：
+
+```text
+owner(slot) = slot % c
+local_row   = slot // c
+```
+
+decode 时，各 rank 先取得 DCP 组所需的 Q heads（或用 full-head Q 权重复制省掉这次 gather），再只用本地 KV 分片计算 partial output + LSE，最后按 LSE 做全局 softmax 归并，得到正确的 attention 输出。
+
+DCP 不增加独立请求池，而是让同一请求的上下文跨 rank 存放。每 rank 有 N 个主 KV 物理行时，单个 DCP 组的逻辑上下文容量约为 `cN`。
+
+### 3. 二者如何组合
+
+```text
+请求 → 先选 attention-DP 组
+     → 在该组的 attn-TP 内再按 DCP 位置分片
+```
+
+例如 TP16、attnDP4、DCP2：共有 4 个 DP 组，每组 4 个 rank；每组内部再分两个 DCP pair。不同请求进入不同 DP 组，同一请求的 target 主 KV 又在组内按位置分片。若每 rank 有 N 行：
+
+```text
+单 DP 组 target 逻辑容量 = 2N
+四个 DP 组的总逻辑容量 = 4 × 2N = 8N（均衡上界）
+```
+
+### 4. 最容易误解的三点
+
+- **DPAttention 不等于普通整模型 DP**：attention 按请求分开，FFN/MoE 仍需要完整 TP 的 activation 交换。
+- **DCP 不等于 Prefill CP**：DCP 主要用于 decode、target-verify 和 DSA extend；P 侧 Prefill CP 是另一套执行路径。
+- **DCP 不自动把 FLOPs 降为 1/c**：Q heads 乘 c、本地 KV 长度除 c，理想乘积不变；它主要节省主 KV 容量/副本，同时增加 Q 准备和 partial output + LSE 归并成本。
+
+一句话选型：**并发请求多、不同请求的 KV 重复是瓶颈时看 DPAttention；单请求上下文很长、主 KV 容量是瓶颈时看 DCP；两类瓶颈同时存在时组合使用。**
