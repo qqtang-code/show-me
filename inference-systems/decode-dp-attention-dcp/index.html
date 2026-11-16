@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light">
-<title>Decode 的 DPAttention 与 DCP：请求分池、位置分片与 KV 容量</title><!-- show-me:shell:begin -->
-<meta name="description" content="沿两套真实 PD 部署解释 D 侧 DPAttention 与 DCP：TP16×attnDP4×attnTP4 下，DP 把请求和 KV 池分成四组，DCP 才把同一请求的 target 主 KV 按位置分片。GLM 当前是 DCP1+HiSparse（GPU 主池 480K、host ratio 3），Hy r15 是 DCP2（每 rank 主 KV 400K、每组逻辑 800K）；DCP2 的主 KV 副本因子是 2 而不是 1，index-K 和 NEXTN draft 仍是 4 份。附 owner rule、partial output+LSE 流程、四口径容量公式、页级可复核算例与不能单因子归因的历史实测。">
+<title>DCP 与 DPAttention：TP8×DCP4 与 TP16×attnDP4 两条 1M 路线</title><!-- show-me:shell:begin -->
+<meta name="description" content="同样把上下文做到 1M，两种形态用的是完全不同的算术。TP8×DCP4 把序列按位置切成 4 份给 8 个 rank（每 rank 269,952 行 × 4 = 1,079,808，纯 GPU，实测完成 1,048,188+384）；TP16×attnDP4 把请求分进 4 个独立池，靠 host ratio 3 得 1,440,000 或组内 DCP2 得 1,200,000。DCP 不减少核心 attention FLOPs（heads×c、KV÷c 相抵），换的是主 KV 副本数与单请求容量；代价是 index-K 不随 DCP 分片、每层 partial output+LSE 归并，或 host 带宽与 4 份复制。附 owner rule、通用 buffer 公式、两套可复核算例与 1M 单请求的实际占用分解。">
 <meta property="og:type" content="article">
-<meta property="og:title" content="Decode 的 DPAttention 与 DCP：请求分池、位置分片与 KV 容量">
-<meta property="og:description" content="沿两套真实 PD 部署解释 D 侧 DPAttention 与 DCP：TP16×attnDP4×attnTP4 下，DP 把请求和 KV 池分成四组，DCP 才把同一请求的 target 主 KV 按位置分片。GLM 当前是 DCP1+HiSparse（GPU 主池 480K、host ratio 3），Hy r15 是 DCP2（每 rank 主 KV 400K、每组逻辑 800K）；DCP2 的主 KV 副本因子是 2 而不是 1，index-K 和 NEXTN draft 仍是 4 份。附 owner rule、partial output+LSE 流程、四口径容量公式、页级可复核算例与不能单因子归因的历史实测。">
+<meta property="og:title" content="DCP 与 DPAttention：TP8×DCP4 与 TP16×attnDP4 两条 1M 路线">
+<meta property="og:description" content="同样把上下文做到 1M，两种形态用的是完全不同的算术。TP8×DCP4 把序列按位置切成 4 份给 8 个 rank（每 rank 269,952 行 × 4 = 1,079,808，纯 GPU，实测完成 1,048,188+384）；TP16×attnDP4 把请求分进 4 个独立池，靠 host ratio 3 得 1,440,000 或组内 DCP2 得 1,200,000。DCP 不减少核心 attention FLOPs（heads×c、KV÷c 相抵），换的是主 KV 副本数与单请求容量；代价是 index-K 不随 DCP 分片、每层 partial output+LSE 归并，或 host 带宽与 4 份复制。附 owner rule、通用 buffer 公式、两套可复核算例与 1M 单请求的实际占用分解。">
 <meta property="og:url" content="https://qqtang-code.github.io/show-me/inference-systems/decode-dp-attention-dcp/index.html">
 <link rel="canonical" href="https://qqtang-code.github.io/show-me/inference-systems/decode-dp-attention-dcp/index.html">
 <meta name="twitter:card" content="summary">
@@ -29,7 +29,7 @@
   .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}.nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px}.nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}.tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:12px;padding:16px 20px}.tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}.tldr ul{margin:0;padding-left:18px}.tldr li{margin:6px 0;font-size:14px;color:#3b4860}.callout{border-left:3px solid var(--accent);background:#fff;border-radius:0 10px 10px 0;padding:12px 16px;margin:16px 0;font-size:14px;color:#3b4860}.callout.warn{border-left-color:var(--warn)}
   table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}tr:last-child td{border-bottom:0}td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}td.v{font-family:var(--mono);font-size:12.5px;color:#12489c}tr.hot td{background:#fff7f2}
   .tag{display:inline-block;font:10.5px var(--mono);padding:1px 7px;border-radius:999px;border:1px solid var(--line);margin:1px 3px 1px 0;white-space:nowrap}.fact{background:#eaf6ef;color:#0b6b3f}.infer{background:#e6eefb;color:#17509e}.hist{background:#fff2df;color:#8b4c05}.unknown{background:#f5e9e4;color:#9a3d1c}
-  .rankbox{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:16px 0}.rankcard{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px 14px;min-width:0}.rankcard h4{margin:0 0 8px;font:700 13px var(--mono);color:var(--ink)}.ranks{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.rank{border:1px solid var(--line);border-radius:7px;background:var(--rank-bg,var(--lane));padding:7px 5px;min-width:0;text-align:center}.rank .rid{font:10px var(--mono);color:var(--dim2)}.rank .what{font:11px var(--mono);color:var(--ink);margin-top:3px;overflow-wrap:anywhere}.pair{--rank-bg:#edf3ff;border-color:#b9c9ea}.pair2{--rank-bg:#eef7f0;border-color:#c7d7c2}
+  .rankbox{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:16px 0}.rankcard{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px 14px;min-width:0}.rankcard h4{margin:0 0 8px;font:700 13px var(--mono);color:var(--ink)}.ranks{display:grid;gap:6px}.r8{grid-template-columns:repeat(4,minmax(0,1fr))}.r16{grid-template-columns:repeat(4,minmax(0,1fr))}.rank{border:1px solid var(--line);border-radius:7px;background:var(--rank-bg,var(--lane));padding:7px 5px;min-width:0;text-align:center}.rank .rid{font:10px var(--mono);color:var(--dim2)}.rank .what{font:11px var(--mono);color:var(--ink);margin-top:3px;overflow-wrap:anywhere}.ga{--rank-bg:#edf3ff;border-color:#b9c9ea}.gb{--rank-bg:#eef7f0;border-color:#c7d7c2}
   .flow{display:grid;gap:7px;margin:15px 0}.step{display:grid;grid-template-columns:30px minmax(0,1fr);gap:10px;align-items:start}.step .sn{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:#e6eefb;color:var(--accent);font:700 11px var(--mono)}.step .st{background:#fff;border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:13.5px;color:#3b4860}.step .st b{color:var(--ink)}
   .figrow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start;margin:18px 0 6px}.figrow>.read{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}.read h4{margin:0 0 8px;font:600 12.5px var(--mono);color:var(--dim);letter-spacing:.04em}.read ul{margin:0;padding-left:17px}.read li{font-size:13.5px;color:#3b4860;margin:7px 0;line-height:1.62}.read .num{font-family:var(--mono);color:#12489c;font-size:12.8px}
   .chartcard{background:#F0EFEB;border-radius:24px;padding:28px 28px 20px;min-width:0}.chartcard h2{border:0;padding:0;margin:0 0 3px;font-size:16.5px;font-weight:700;letter-spacing:-.02em;color:#1C1C1A}.chartcard .csub{font-size:11.5px;color:#8F8E88;margin:0 0 14px;line-height:1.55}.chartcard .csrc{font-size:9.5px;color:#C6C5BF;margin-top:10px;letter-spacing:.08em;font-weight:500;line-height:1.6}.chartwrap{overflow-x:auto}.chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}.chartcard svg text{font-family:'Inter',-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}@keyframes pop{from{transform:scale(0)}to{transform:none}}.fade{animation:fade .9s ease both}@keyframes fade{from{opacity:0}}.draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}@keyframes draw{to{stroke-dashoffset:0}}@media(prefers-reduced-motion:reduce){.pop,.fade{animation:none}.draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}}
@@ -195,7 +195,7 @@
 </style>
 <!-- show-me:shell:end --></head>
 <body><!-- show-me:shell:begin -->
-<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">14 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-15</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">9 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
 try{(function(){var b=document.getElementById('sm-progress'),
 u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
 p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
@@ -208,261 +208,235 @@ addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').to
 e.preventDefault();g()}})})()}catch(e){}
 </script>
 <!-- show-me:shell:end --><!-- show-me:shell:begin -->
-<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 10 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/decode-dp-attention-dcp/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Decode 的 DPAttention 与 DCP：请求分池、位置分片与 KV 容量</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/deepinfer-vs-sglang/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-rail-m">43 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 10 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/decode-dp-attention-dcp/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DCP 与 DPAttention：TP8×DCP4 与 TP16×attnDP4 两条 1M 路线</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/deepinfer-vs-sglang/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-rail-m">43 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
 <!-- show-me:shell:end --><main class="wrap">
-  <div class="crumb"><a href="../../index.html">show-me</a><span class="sep">/</span><span>inference-systems</span><span class="sep">/</span><span>Decode DPAttention × DCP</span></div>
-  <h1>Decode 的 DPAttention 与 DCP：<br>请求分池、位置分片与 KV 容量</h1>
-  <p class="lead">沿两套真实 PD 部署的启动参数、rank 拓扑、attention/KV 代码和历史日志，解释 D 侧两个容易混淆的机制。</p>
-  <div class="metarow"><span>2026-11-15</span><span>DPAttention</span><span>DCP</span><span>MLA + DSA</span><span>KV Cache</span><span>源码核对</span></div>
-  <nav class="nav"><a href="#tldr">结论</a><a href="#deploy">01 部署</a><a href="#mechanism">02 机制</a><a href="#impact">03 推理影响</a><a href="#formula">04 KV 公式</a><a href="#examples">可复核算例</a><a href="#compare">对比与待确认</a></nav>
-  <p class="hint">术语约定：保留 <code>rank / group / scheduler / backend / target / draft / partial output / LSE</code>，便于直接检索代码。<span class="tag fact">事实</span>源码或配置；<span class="tag infer">推导</span>由代码形状计算；<span class="tag hist">历史实测</span>保存的日志；<span class="tag unknown">未确认</span>当前证据不足。</p>
+  <div class="crumb"><a href="../../index.html">show-me</a><span class="sep">/</span><span>inference-systems</span><span class="sep">/</span><span>DCP × DPAttention</span></div>
+  <h1>DCP 与 DPAttention：<br>TP8×DCP4 与 TP16×attnDP4 两条 1M 路线</h1>
+  <p class="lead">同样把上下文做到 1M，两种形态用的是完全不同的算术：一个把序列按位置切给更多 rank，一个把请求分进多个独立池。下面按这两套真实配置讲清原理、代价和容量公式。</p>
+  <div class="metarow"><span>2026-11-16</span><span>DCP</span><span>DPAttention</span><span>MLA + DSA</span><span>1M 上下文</span><span>源码 + 实测</span></div>
+  <nav class="nav"><a href="#tldr">结论</a><a href="#forms">01 两套形态</a><a href="#mechanism">02 机制</a><a href="#impact">03 推理影响</a><a href="#formula">04 容量公式</a><a href="#chart">05 三条 1M 算术</a><a href="#compare">对比与待确认</a></nav>
+  <p class="hint">术语：保留 <code>rank / group / scheduler / KV pool / target / draft / partial output / LSE</code>。<span class="tag fact">事实</span>源码或日志；<span class="tag infer">推导</span>由公式计算；<span class="tag hist">实测</span>保存的历史结果；<span class="tag unknown">未确认</span>证据不足。</p>
 
-  <section class="tldr" id="tldr"><h4>TL;DR · 先纠正四个常见误读</h4><ul>
-    <li><b>D 侧 = PD 分离里的 Decode 角色。</b> DPAttention 按请求拆 scheduler/KV 池；DCP 按 token 位置拆 target 主 KV。Prefill CP4 是另一件事。</li>
-    <li><b>两套 D 侧都是 TP16 × attnDP4 × attnTP4，但 GLM 系列是 DCP1，Hy 系列 r15 是 DCP2。</b>不能把 Hy 的 DCP2 公式或收益套到 GLM 上。</li>
-    <li><b>Hy DCP2 的主 KV 副本数是 2，不是 1。</b> attnTP4 内有两个 DCP pair；index-K 和 NEXTN draft 仍是 4 份。</li>
-    <li><b>核心 attention FLOPs 不因 DCP 自动下降。</b> gathered Q heads ×c、本地 KV ÷c；新增 Q 准备、partial output + LSE 归并、page remap 和同步。最确定的收益是容量，不是“必然更快”。</li>
+  <section class="tldr" id="tldr"><h4>TL;DR · 两条路都到 1M，但代价完全不同</h4><ul>
+    <li><b>DPAttention 是请求维度的并行</b>：<code>attn_tp_size = tp/d/attn_cp</code>，每个 DP 组有自己的 scheduler 和 KV pool；<b>DCP 是上下文维度的并行</b>：同一请求的主 KV 按 <code>slot%c</code> 分给组内不同 rank。</li>
+    <li><b>TP8×DCP4</b>：8 卡单节点，每 rank 269,952 行 × DCP4 = 逻辑 <b>1,079,808</b> tokens，纯 GPU、无 host 分层，实测完成 1,048,188+384 的真实 1M 请求。</li>
+    <li><b>TP16×attnDP4</b>：16 卡双节点，4 个独立池。每池 480K×host3 = <b>1,440,000</b>（DCP1）或 600K×DCP2 = <b>1,200,000</b>，两种都实测完成过 1M。</li>
+    <li><b>DCP 不减少核心 attention FLOPs</b>：gathered Q heads ×c、本地 KV ÷c，乘积不变；它换的是<b>主 KV 副本数</b>和<b>单请求上下文容量</b>。</li>
+    <li><b>最容易被忽略的代价</b>：DSA index-K 不随 DCP 分片，所以 TP8×DCP4 的 index-K 仍是 8 份全历史；而 TP16×attnDP4 靠 host 分层拿容量，同一份 1M 请求在每个 rank 的 host 上各存一份。</li>
   </ul></section>
 
-  <details><summary><b>只看 SGLang 原理：两个正交维度</b></summary><div class="ans">
-    <p><b>DPAttention 决定“哪些请求放在同一组 rank 上”；DCP 决定“同一请求的上下文放在哪些 rank 上”。</b></p>
-    <p><b>DPAttention：</b><code>attn_tp_size = tp_size / attn_dp_size / attn_cp_size</code>。每个 DP 组有独立 scheduler、batch 和 KV pool；请求 A 进 DP0、请求 B 进 DP1。组内 attention 权重仍按 attn-TP 切分，FFN/MoE 仍可在完整 TP 上运行，所以它是 <b>attention 局部 DP + FFN 侧 TP</b>，不是整模型 DP。</p>
-    <p><b>DCP：</b><code>owner(slot)=slot%c，local_row=slot//c</code>。各 rank 用本地 KV 分片计算 partial output+LSE，再按 LSE 做全局 softmax 归并。它不增加独立请求池，而是把同一请求的上下文跨 rank 存放；每 rank 有 N 个主 KV 物理行时，单个 DCP 组的逻辑容量约为 cN。</p>
-    <p><b>组合：</b>请求先选 DP 组，再在组内做 DCP。TP16、attnDP4、DCP2 时，每组 4 rank、两个 DCP pair；每组逻辑容量 2N，四组均衡时总计 8N。</p>
-    <p><b>选型：</b>不同请求的 KV 重复是瓶颈时看 DPAttention；单请求主 KV 容量是瓶颈时看 DCP。DCP 不自动把 FLOPs 降为 1/c，Q heads 乘 c、本地 KV 长度除 c，理想乘积不变。</p>
-  </div></details>
-
-  <h2 id="deploy"><span class="n">01</span>部署与实现依据</h2>
-  <p><b>一句话：</b>两个项目共享 SGLang 的并行底座，但实际配方不同；GLM 当前是 DCP1 + HiSparse，Hy r15 通过自定义 overlay 运行 DCP2。</p>
-  <table><thead><tr><th>项目</th><th>GLM 系列 · unified release</th><th>Hy 系列 · r15</th></tr></thead><tbody>
-    <tr><td class="k" data-label="项目">总组织</td><td data-label="GLM">四台 8-GPU 节点：P 两台 + D 两台；P/D 各自 world</td><td data-label="Hy">同左</td></tr>
-    <tr><td class="k" data-label="项目">Prefill</td><td data-label="GLM">TP4 × PP4 × CP4 × EP4；attnDP1；PP 层 18/21/21/18</td><td data-label="Hy">TP4 × PP4 × CP4 × EP4；attnDP1；PP 层 19/19/20/20</td></tr>
-    <tr class="hot"><td class="k" data-label="项目">Decode</td><td data-label="GLM">TP16 × PP1 × attnDP4 × attnTP4 × <b>DCP1</b>；EP1</td><td data-label="Hy">TP16 × PP1 × attnDP4 × attnTP4 × <b>DCP2</b>；EP1</td></tr>
-    <tr><td class="k" data-label="项目">D 侧缓存</td><td data-label="GLM">GPU 主池 480K/rank；HiSparse host ratio 3；热集 16K/request</td><td data-label="Hy">target 主池 400K/rank；逻辑 800K/DP 组</td></tr>
-    <tr><td class="k" data-label="项目">推测解码</td><td data-label="GLM">EAGLE 3 / topk1 / draft4</td><td data-label="Hy">NEXTN 3 / topk1 / draft4</td></tr>
-    <tr><td class="k" data-label="项目">配置锚点</td><td data-label="GLM"><code>recipes/v1/recipe.glm53-pd-unified-hisparse-r1.json</code></td><td data-label="Hy"><code>docs/HY4_CURRENT_LAUNCH_DCP2_20261112.sh</code></td></tr>
+  <h2 id="forms"><span class="n">01</span>两套 1M 形态</h2>
+  <p><b>一句话：</b>TP8×DCP4 用“位置分片”把 4 个 rank 拼成一个更长的逻辑序列；TP16×attnDP4 用“请求分池”把并发拆成 4 份，再靠 host 分层或组内 DCP 把单个池抬到 1M。</p>
+  <table><thead><tr><th>维度</th><th>A · TP8 × DCP4</th><th>B · TP16 × attnDP4</th></tr></thead><tbody>
+    <tr><td class="k" data-label="维度">部署</td><td data-label="A">单节点 8 卡；<code>TP8 × PP1 × DCP4 × attnDP1</code></td><td data-label="B">双节点 16 卡；<code>TP16 × PP1 × attnDP4 × attnTP4</code>，DCP1 或 DCP2</td></tr>
+    <tr><td class="k" data-label="维度">请求归属</td><td data-label="A">全部 8 rank 协同处理同一批请求（attnDP1）</td><td data-label="B">请求只进入其中一个 DP 组（4 rank）</td></tr>
+    <tr class="hot"><td class="k" data-label="维度">1M 的来源</td><td data-label="A">每 rank <b>269,952</b> 物理行 × DCP4 = 1,079,808</td><td data-label="B">每池 4 rank：<b>480,000×3</b>（host ratio 3）或 <b>600,000×2</b>（DCP2）</td></tr>
+    <tr><td class="k" data-label="维度">逻辑 target 容量</td><td class="v" data-label="A">1,079,808 tokens</td><td class="v" data-label="B">1,440,000 / 1,200,000 tokens（单池）</td></tr>
+    <tr><td class="k" data-label="维度">主 KV 副本因子</td><td class="v" data-label="A">attnTP/c = 8/4 = 2</td><td class="v" data-label="B">4/1 = 4（DCP1）或 4/2 = 2（DCP2）</td></tr>
+    <tr><td class="k" data-label="维度">每 rank KV</td><td class="v" data-label="A">16.4481 GiB（全 GPU，含 draft）</td><td class="v" data-label="B">26.5946 GiB GPU + 72.3424 GiB host（DCP1+host3）</td></tr>
+    <tr><td class="k" data-label="维度">1M 实测</td><td data-label="A">HTTP 200，1,048,188 in + 384 out，85.86 s（bs=1 graph）</td><td data-label="B">GLM：8×C1、每池 2 条、DP0–3 全覆盖；Hy4：同尺寸约 90 s</td></tr>
+    <tr><td class="k" data-label="维度">推测解码</td><td data-label="A">NEXTN 3 steps / 4 draft</td><td data-label="B">EAGLE 或 NEXTN 3/4</td></tr>
   </tbody></table>
-  <div class="callout"><b>模型路径：</b>当前 GLM checkpoint 是 <code>GlmMoeDsaForCausalLM</code>：78 层、64 query heads、hidden 6144，继承 <code>DeepseekV2ForCausalLM</code>；不是 GLM5Next 的 45 层 KDA 混合模型。Hy 的 <code>HYV4Attention</code> 同样继承 MLA，但另有 <code>linear_gate</code> 与 <code>learnable_sink_param</code>。</div>
-  <div class="callout warn"><b>时间线不能折叠：</b>GLM 的 11 月 13 日 literal 部署有 GPU 证据，11 月 14 日 Responses release 只有 CPU 验收，因此本文比较最近 GPU 配置及同参数 release，不断言实时在线状态。Hy 早期文档记录 stock trtllm 不支持 SM120；后续 r6–r15 才以自定义 sparse-MLA/LSE 路径运行 DCP2。11 月 13–14 日的 DCP4、TP8/DP1 和 PD1M 又是别的拓扑，不能与 r15 混算。</div>
+  <div class="callout"><b>为什么这两种能到 1M：</b>1M 需要 <code>≥1,048,576</code> 个逻辑 target 位置。TP8×DCP4 把 4 个 rank 的位置拼起来，物理行只要 269,952 就够；TP16×attnDP4 的单个池只有 4 个 rank，DCP1 时物理行必须靠 host 扩 3 倍，或开 DCP2 让组内再分一次。</div>
 
   <h3 class="mini">rank 与 DCP pair</h3>
-  <p><code>attn_tp_size = tp_size / attn_dp_size / attn_cp_size = 16/4/1 = 4</code>。依据 <code>runtime_context.py: derive_attn_tp_size()</code> 与 <code>parallel_state.py: initialize_model_parallel()</code>。</p>
   <div class="rankbox">
-    <div class="rankcard"><h4>两个项目共同的 DP 分组</h4><div class="ranks">
-      <div class="rank"><div class="rid">DP0</div><div class="what">r0–r3</div></div><div class="rank"><div class="rid">DP1</div><div class="what">r4–r7</div></div><div class="rank"><div class="rid">DP2</div><div class="what">r8–r11</div></div><div class="rank"><div class="rid">DP3</div><div class="what">r12–r15</div></div>
-    </div><p class="hint">每组 4 rank；DP0/1 在节点 0，DP2/3 在节点 1。每组一个 scheduler 和独立 KV allocator。</p></div>
-    <div class="rankcard"><h4>Hy 在一个 attnTP4 内的 DCP2</h4><div class="ranks">
-      <div class="rank pair"><div class="rid">r0 · dcp0</div><div class="what">偶数 token</div></div><div class="rank pair2"><div class="rid">r1 · dcp1</div><div class="what">奇数 token</div></div><div class="rank pair"><div class="rid">r2 · dcp0</div><div class="what">偶数 token</div></div><div class="rank pair2"><div class="rid">r3 · dcp1</div><div class="what">奇数 token</div></div>
-    </div><p class="hint">pair A=[r0,r1]、pair B=[r2,r3]；每个 token 在每个 pair 各有一个 owner，所以主 KV 是 2 份。</p></div>
+    <div class="rankcard"><h4>A · TP8 × DCP4：两个 DCP 组</h4><div class="ranks r8">
+      <div class="rank ga"><div class="rid">r0 · dcp0</div><div class="what">pos %4=0</div></div><div class="rank ga"><div class="rid">r1 · dcp1</div><div class="what">pos %4=1</div></div><div class="rank ga"><div class="rid">r2 · dcp2</div><div class="what">pos %4=2</div></div><div class="rank ga"><div class="rid">r3 · dcp3</div><div class="what">pos %4=3</div></div>
+    </div><div class="ranks r8" style="margin-top:6px">
+      <div class="rank gb"><div class="rid">r4 · dcp0</div><div class="what">pos %4=0</div></div><div class="rank gb"><div class="rid">r5 · dcp1</div><div class="what">pos %4=1</div></div><div class="rank gb"><div class="rid">r6 · dcp2</div><div class="what">pos %4=2</div></div><div class="rank gb"><div class="rid">r7 · dcp3</div><div class="what">pos %4=3</div></div>
+    </div><p class="hint">DCP 组是 TP 组的连续 4 卡切片，所以 8 卡里有两个组；每组各持一份完整位置空间。主 KV 因此存 2 份。</p></div>
+    <div class="rankcard"><h4>B · TP16 × attnDP4：四个请求池</h4><div class="ranks r16">
+      <div class="rank ga"><div class="rid">DP0</div><div class="what">r0–r3</div></div><div class="rank ga"><div class="rid">DP1</div><div class="what">r4–r7</div></div><div class="rank gb"><div class="rid">DP2</div><div class="what">r8–r11</div></div><div class="rank gb"><div class="rid">DP3</div><div class="what">r12–r15</div></div>
+    </div><p class="hint">每组 4 rank、独立 scheduler 与 KV pool；组内若开 DCP2，再分两个 pair。DP0/1 在节点 0，DP2/3 在节点 1。</p></div>
   </div>
 
-  <h3 class="mini">默认值与启用条件</h3>
-  <table><thead><tr><th>配置</th><th>默认</th><th>实际约束</th></tr></thead><tbody>
-    <tr><td class="k" data-label="配置"><code>--attn-dp-size</code></td><td data-label="默认">1</td><td data-label="约束">&gt;1 启用 DPAttention；需整除 TP，不能与独立 <code>dp_size&gt;1</code> 同用。旧 <code>--enable-dp-attention</code> 只是兼容入口。</td></tr>
-    <tr><td class="k" data-label="配置"><code>--dcp-size</code></td><td data-label="默认">1</td><td data-label="约束">&gt;1 启用；不能与 <code>--enable-prefill-cp</code> 同用；需整除 attention TP。PD 要求 MLA/hybrid-MLA。</td></tr>
-    <tr><td class="k" data-label="配置"><code>--dcp-comm-backend</code></td><td data-label="默认">未设置</td><td data-label="约束">DCP1 为 <code>ag_rs</code>（不起作用）；本批 SM120 不满足 <code>fi_a2a</code>，DCP&gt;1 解析为 <code>a2a</code>。</td></tr>
-    <tr><td class="k" data-label="配置"><code>--dcp-replicate-q-proj</code></td><td data-label="默认">未设置</td><td data-label="约束">DSA + a2a 默认 true：预复制 full-head Q 权重，省每层 Q gather，增加静态权重与重复 Q 计算。只覆盖 decode/target-verify。</td></tr>
-    <tr><td class="k" data-label="配置"><code>--enable-prefill-cp</code></td><td data-label="默认">false</td><td data-label="约束">P 侧 CP 开关，和 DCP 是不同轴。</td></tr>
-    <tr><td class="k" data-label="配置"><code>--enable-hisparse</code></td><td data-label="默认">false</td><td data-label="约束">GLM 已启用；stock DSA DCP 明确拒绝 HiSparse/HiCache + PD，不能直接叠加。</td></tr>
+  <h3 class="mini">关键配置与启用条件</h3>
+  <table><thead><tr><th>配置</th><th>默认</th><th>约束</th></tr></thead><tbody>
+    <tr><td class="k" data-label="配置"><code>--dcp-size</code></td><td data-label="默认">1</td><td data-label="约束">整除 TP；不能与 <code>--enable-prefill-cp</code> 同进程；PD 要求 MLA/hybrid-MLA。A 用 4，B 用 1 或 2。</td></tr>
+    <tr><td class="k" data-label="配置"><code>--attn-dp-size</code></td><td data-label="默认">1</td><td data-label="约束">整除 TP；不能与 <code>dp_size&gt;1</code> 同用。A 用 1，B 用 4。</td></tr>
+    <tr><td class="k" data-label="配置"><code>--dcp-comm-backend</code></td><td data-label="默认">未设置</td><td data-label="约束">DCP1 → <code>ag_rs</code>（不起作用）；SM120 不满足 <code>fi_a2a</code>，DCP&gt;1 解析为 <code>a2a</code>。</td></tr>
+    <tr><td class="k" data-label="配置"><code>--dcp-replicate-q-proj</code></td><td data-label="默认">未设置</td><td data-label="约束">DSA + a2a 默认 true：预复制 full-head Q 权重，省每层 Q gather，但 Q 计算约 ×c。</td></tr>
+    <tr><td class="k" data-label="配置"><code>--hicache-ratio</code></td><td data-label="默认">—</td><td data-label="约束">只出现在 B 的 DCP1 变体；host 池 = 设备池 × ratio，是这一路 1M 的直接来源。</td></tr>
   </tbody></table>
-  <p class="hint">源码：<code>arg_groups/fields/parallel.py</code>；<code>parallel_hook.py: handle_decode_context_parallelism()</code>；<code>model_overrides/deepseek_v2.py: _dsa_dcp_overrides()</code>；<code>overrides.py: _dcp_comm_backend_default()</code>。</p>
+  <p class="hint">源码：<code>arg_groups/fields/parallel.py</code>、<code>parallel_hook.py: handle_decode_context_parallelism()</code>、<code>overrides.py: _dcp_comm_backend_default()</code>、<code>model_overrides/deepseek_v2.py: _dsa_dcp_overrides()</code>。</p>
 
-  <h2 id="mechanism"><span class="n">02</span>具体工作机制</h2>
-  <h3 class="mini">DPAttention：请求和 KV 池分开，FFN 仍走完整 TP</h3>
+  <h2 id="mechanism"><span class="n">02</span>具体机制</h2>
+  <h3 class="mini">A 形态：DCP 把位置切给 4 个 rank</h3>
   <div class="flow">
-    <div class="step"><span class="sn">1</span><div class="st"><b>请求路由：</b>请求进入某个 DP scheduler；本组 attnTP4 只处理本组请求。其他 DP 组不复制该请求的 KV。</div></div>
-    <div class="step"><span class="sn">2</span><div class="st"><b>attention：</b>Q_B/KV_B/O projection 按 attnTP4 切 head；DCP1 时本组完整 latent KV 在 4 rank 各一份。</div></div>
-    <div class="step"><span class="sn">3</span><div class="st"><b>attention output：</b>attnTP 内完成 partial sum；<code>o_proj.reduce_results=False</code> 只表示归约交给 layer boundary，并非不需要归约。</div></div>
-    <div class="step"><span class="sn">4</span><div class="st"><b>FFN/MoE：</b>DP gather 把四个组的 token 重新送入完整 TP16 的 FFN/MoE，再 reduce-scatter 回 DP-local 行。</div></div>
-    <div class="step"><span class="sn">5</span><div class="st"><b>同步：</b><code>MLPSyncBatchInfo</code> 同步 token 数、forward mode 和 graph eligibility；无请求组可构造 idle batch，慢组会影响整组关键路径。</div></div>
+    <div class="step"><span class="sn">1</span><div class="st"><b>写入：</b>token 位置 <code>p</code> 只写到 <code>p % 4</code> 对应的 rank，局部行号 <code>p // 4</code>。逻辑 page 变成 <code>64×4=256</code> token。</div></div>
+    <div class="step"><span class="sn">2</span><div class="st"><b>取 Q：</b>每 rank 本地 8 个 head（64/8），要么 DCP all-gather Q 到 32 个 head，要么用 <code>dcp_replicate_q_proj</code> 直接算 full-head。</div></div>
+    <div class="step"><span class="sn">3</span><div class="st"><b>局部 attention：</b>32 个 gathered head × 本地 1/4 的 KV，产出 partial output + LSE。</div></div>
+    <div class="step"><span class="sn">4</span><div class="st"><b>归并：</b>组内 <code>a2a</code> 交换 partial output + FP32 LSE，Triton log-sum-exp 合并，回到本 rank 的 8 个 head。</div></div>
+    <div class="step"><span class="sn">5</span><div class="st"><b>无 DP 交换：</b>attnDP1，所以没有跨 DP 的 hidden gather/scatter，每层只有 DCP 这一次集合通信。</div></div>
   </div>
-  <p class="hint">源码：<code>managers/data_parallel_controller.py</code>；<code>scheduler_components/dp_attn.py</code>；<code>layers/dp_attention.py</code>；<code>models/deepseek_v2.py</code> 中 <code>parallel_group="attn_tp"</code>。MAX_LEN、SUM_LEN、gatherv 是不同分支，不能统一写成 all-gather。</p>
-  <div class="callout"><b>GLM unified 的 DP 通信特化：</b><code>SGLANG_PD_D_HIERARCHY_MAX_ROWS=4</code> 时，满足全 TP16、连续 BF16、宽度 6144、输入 1–4 行且输出为 16 倍的 AllGather 会先跨节点 pair <code>[r,r+8]</code>，再做节点内 8-rank 集合通信并重排；ReduceScatter 反向执行，未命中回退通用 NCCL。它优化 DP 激活交换，不是 DCP，也不改变 KV owner。实现见 Git <code>a405481e:runtime/glm53_pd_d_hierarchy/patches/01-d-hierarchy.patch</code> 与镜像哈希对账。</div>
+<pre><code>owner(slot) = slot % 4
+local_row   = slot // 4
+logical page = 64 × 4 = 256 tokens
 
-  <h3 class="mini">DCP：owner rule、局部 attention、LSE 合并</h3>
-  <p><b>独立可组合：</b>GLM 的 DP4+DCP1、代码允许的 DP1+DCP&gt;1、Hy 的 DP4+DCP2 说明两者并非互为前提。组合时先按请求分 DP，再在每组 attnTP 内按位置分片；DCP 不跨 DP 组共享 KV，也不替代 MoE 的 DP gather/combine。</p>
-<pre><code>owner(slot) = slot % dcp_size
-local_row   = slot // dcp_size
-logical_page = physical_page × dcp_size
+每 rank：8 local heads → 32 gathered heads × (1/4 KV) → partial + LSE
+        → a2a 归并 → 8 heads  ← 主 KV 只存 1/4，但存 2 份（两个 DCP 组）</code></pre>
 
-P → D:  send_kvcache_dcp / build_dcp_token_transfer_plan
-D:     Q projection → 可选 Q all-gather
-       gathered Q × 本地 KV shard → partial output + LSE
-       single-owner learnable sink（Hy）
-       a2a output+LSE → Triton LSE combine
-       V correction / o_proj / 后续 MoE 边界</code></pre>
-  <ul>
-    <li><code>layers/dcp/layout.py</code> 用 <code>indices[r::c] // c</code> 选择并折叠 owner 的物理行；<code>dsa_dcp.py</code> 重写并压缩 page table。</li>
-    <li><code>layers/dcp/comm.py: dcp_a2a_lse_reduce()</code> 把 output 与 FP32 LSE 打包进一次 <code>all_to_all_single</code>，随后本地 Triton combine；<code>ag_rs</code> 是另一条路径。stock 每 rank packed buffer 为 <code>B×H×(D+2)×e</code>：t=4、Hq=64、D=512、BF16 时 DCP2 为 B×32,896 B，DCP4 为 B×65,792 B；这不是 r15 自定义 kernel 的已验证线上流量。</li>
-    <li><code>DSATokenToKVPool</code> 的 target index-K 地址空间随 <code>c</code> 增长，仍覆盖全历史；NEXTN 在 <code>is_nextn and use_dsa</code> 时固定 <code>dcp_size=1</code>。</li>
-    <li>Hy 的 CP0 持完整 Prefill KV，P→D 时直接做 full→DCP relayout；decode 不需要每层广播全量 KV。</li>
-  </ul>
+  <h3 class="mini">B 形态：DPAttention 把请求分进 4 个池</h3>
+  <div class="flow">
+    <div class="step"><span class="sn">1</span><div class="st"><b>路由：</b>请求进入某个 DP 组的 scheduler，只由该组 4 个 rank 处理；其他组不复制这份 KV。</div></div>
+    <div class="step"><span class="sn">2</span><div class="st"><b>attention：</b>组内按 attnTP4 切 head，每 rank 16 个 head；DCP1 时本组完整 KV 在 4 个 rank 各一份。</div></div>
+    <div class="step"><span class="sn">3</span><div class="st"><b>FFN/MoE：</b>四个组的 token 重新聚合到完整 TP16 上算 FFN/MoE，再散回各 DP 组。</div></div>
+    <div class="step"><span class="sn">4</span><div class="st"><b>同步：</b><code>MLPSyncBatchInfo</code> 同步 token 数、forward mode、graph eligibility；最慢的组拖关键路径。</div></div>
+    <div class="step"><span class="sn">5</span><div class="st"><b>容量：</b>每池独立，DCP1 时靠 host 分层扩到 3×；或组内开 DCP2 再乘 2。</div></div>
+  </div>
+  <p class="hint">源码：<code>managers/data_parallel_controller.py</code>、<code>layers/dp_attention.py</code>、<code>scheduler_components/dp_attn.py</code>、<code>models/deepseek_v2.py</code> 的 <code>parallel_group="attn_tp"</code>。</p>
+
+  <h3 class="mini">两者是独立旋钮</h3>
+  <p>A 是 <code>DP1+DCP4</code>，B 的 DCP1 变体是 <code>DP4+DCP1</code>，B 的 DCP2 变体是 <code>DP4+DCP2</code>。组合时先按请求分 DP，再在组内按位置做 DCP；DCP 不跨 DP 组共享 KV，也不替代 MoE 前的 DP gather/combine。</p>
 
   <h2 id="impact"><span class="n">03</span>对推理行为的影响</h2>
-  <p><b>核心账：</b><code>(Hq/t × c) × (S/c) = Hq×S/t</code>。DCP 理想情况下不减少每 rank 的核心 attention FLOPs，只改变 ownership 和 kernel 形状。DSA 下把 <code>S</code> 换成 <code>K=min(S,2048)</code> 仍近似成立；indexer 全历史扫描和 remap 另算。</p>
-  <table><thead><tr><th>D 配置</th><th>Q heads/rank</th><th>主 KV 位置/rank</th><th>主 KV 副本/DP 组</th><th>逻辑容量/DP 组</th></tr></thead><tbody>
-    <tr><td class="k" data-label="配置">TP16 / DP1 / DCP1</td><td data-label="Q heads">4</td><td data-label="位置">S</td><td data-label="副本">16</td><td class="v" data-label="容量">N</td></tr>
-    <tr><td class="k" data-label="配置">TP16 / DP4 / DCP1</td><td data-label="Q heads">16</td><td data-label="位置">S</td><td data-label="副本">4</td><td class="v" data-label="容量">N</td></tr>
-    <tr><td class="k" data-label="配置">TP16 / DP1 / DCP2</td><td data-label="Q heads">8</td><td data-label="位置">S/2</td><td data-label="副本">8</td><td class="v" data-label="容量">2N</td></tr>
-    <tr class="hot"><td class="k" data-label="配置">TP16 / DP4 / DCP2</td><td data-label="Q heads">32</td><td data-label="位置">S/2</td><td data-label="副本">2</td><td class="v" data-label="容量">2N</td></tr>
+  <p><b>核心账：</b><code>(Hq/t × c) × (S/c) = Hq×S/t</code>。DCP 理想情况下不减少每 rank 的核心 attention FLOPs，改变的是 KV ownership、kernel 形状和容量。</p>
+  <table><thead><tr><th>维度</th><th>A · TP8 × DCP4</th><th>B · TP16 × attnDP4</th></tr></thead><tbody>
+    <tr><td class="k" data-label="维度">每 rank Q heads</td><td data-label="A">8 → gathered 32</td><td data-label="B">16（DCP1）；DCP2 时 16 → 32</td></tr>
+    <tr><td class="k" data-label="维度">每 rank 主 KV 位置</td><td data-label="A">S/4</td><td data-label="B">S（DCP1）或 S/2（DCP2）</td></tr>
+    <tr><td class="k" data-label="维度">核心 attention FLOPs</td><td data-label="A">不变（heads×c、KV÷c 相抵）</td><td data-label="B">不变；DCP2 同理</td></tr>
+    <tr><td class="k" data-label="维度">每层集合通信</td><td data-label="A">DCP：Q gather（可选）+ partial output/LSE a2a；<b>无跨 DP 交换</b></td><td data-label="B">DP：hidden gather + reduce-scatter；DCP2 再加 partial/LSE</td></tr>
+    <tr><td class="k" data-label="维度">同步面</td><td data-label="A">单 scheduler，无 DP 组间 skew</td><td data-label="B">4 个 scheduler，慢组会拖全局；EAGLE 下 graph 投票需一致</td></tr>
+    <tr><td class="k" data-label="维度">KV 副本</td><td data-label="A">主 KV 2 份；index-K 8 份（不分片）</td><td data-label="B">主 KV 4 份（DCP1）或 2 份（DCP2）；index-K 4 份</td></tr>
+    <tr><td class="k" data-label="维度">单请求 1M 占用</td><td class="v" data-label="A">15.1994 GiB/rank（8 卡合计约 121.6 GiB）</td><td class="v" data-label="B">3.491 GiB GPU + 52.6759 GiB host（4 卡合计约 14.0 + 210.7 GiB）</td></tr>
+    <tr><td class="k" data-label="维度">1M 并发</td><td data-label="A">1（1,079,808 只够一条）</td><td data-label="B">每池 1 条，四池共 4 条</td></tr>
   </tbody></table>
-  <p class="hint">按各自 DP 数聚合且均衡，整机逻辑容量约为 N / 4N / 2N / 8N；单请求上限约为 N / N / 2N / 2N，仍需与 P 侧取 min。TP16、attnDP1 在这里是理论基线：当前 SM120 sparse-MLA 没有 4-head decode kernel，不能当作可直接回退的生产配置。</p>
+  <div class="callout warn"><b>不要写成“DCP 更快”：</b>A 的收益是纯 GPU 里塞进 1M，代价是 index-K 8 份全历史和每层 LSE 归并；B 的收益是 4 个独立池与更大的聚合容量，代价是跨 DP 通信、host 带宽和 4 份 KV 复制。两者都是容量路线，不是算力路线。</div>
 
-  <h3 class="mini">Prefill 与 Decode 分别看什么</h3>
-  <table><thead><tr><th>维度</th><th>DPAttention</th><th>DCP</th></tr></thead><tbody>
-    <tr><td class="k" data-label="维度">长输入 Prefill / TTFT</td><td data-label="DPAttention">当前 P 侧 attnDP1，不改变 P 的 CP4 计算；D 侧主要影响传输布局与 metadata。</td><td data-label="DCP">P→D 需 relayout，但不改变 P 的计算。Hy r6→r15 TTFT 约 10.13→10.16s，未体现收益。</td></tr>
-    <tr><td class="k" data-label="维度">Decode 计算</td><td data-label="DPAttention">均衡时本地 batch ÷4、heads ×4，理想总量不变；C1 时其他 DP 组可能空闲。</td><td data-label="DCP">核心 FLOPs 不自动下降；Q 复制路径增加约 c 倍 Q projection，并增加 partial/LSE 与 remap。</td></tr>
-    <tr><td class="k" data-label="维度">kernel 效率</td><td data-label="DPAttention">4→16 heads/rank 可能改善 tile；同时权重复制、权重复读和小 batch 成本增加。</td><td data-label="DCP">16→32 heads/rank 可能改善形状，但短序列/小 batch 可能被集合通信和 combine 抵消。</td></tr>
-    <tr><td class="k" data-label="维度">通信与同步</td><td data-label="DPAttention">attnTP 组缩小，但增加 DP gather/combine 与全局 scheduler 同步，慢组拖长关键路径。</td><td data-label="DCP">每层 partial output+LSE 在关键路径；payload 随 query rows、gathered heads、c 增长，而非随历史 KV 总长线性增长。</td></tr>
-    <tr><td class="k" data-label="维度">显存访问</td><td data-label="DPAttention">单请求副本 16→4；每 rank 仍读本组完整 KV，收益主要是容量与并发。</td><td data-label="DCP">主 KV 每 rank 约 ÷c，但 gathered heads ×c，核心读取的理想乘积不变；index-K 与 draft 不同比例下降。</td></tr>
-    <tr><td class="k" data-label="维度">TTFT / TPOT / 吞吐</td><td data-label="DPAttention">需要足够并发才能兑现独立池收益；低并发不能保证更低 TPOT。</td><td data-label="DCP">长上下文/容量受限更有价值；短序列或小 batch 更可能由归并开销主导。必须实测，不写“更快”。</td></tr>
-  </tbody></table>
-  <div class="callout"><b>历史实测的正确读法：</b>Hy r6→r15 的 TPOT 18.2→15.5ms、输出 TPS 21.4→23.6 是组合结果；standalone full 0.179ms 对 DCP compute 0.206ms 也只说明该微基准的归并成本。DCP4 则 TPOT 24.6ms、TPS 18.7、accept 0.4751，明确不适合作为默认配置。</div>
-
-  <h3 class="mini">负载变化时的条件判断</h3>
+  <h3 class="mini">Prefill 与 Decode 分开看</h3>
   <ul>
-    <li><b>并发上升：</b>DP 组更容易填满，kernel/weight 利用改善；同时 KV 占用、MoE 全局 batch、慢组同步与 DCP payload 都增加。</li>
-    <li><b>输入/已生成长度上升：</b>DCP 的容量价值上升；但 DSA top-k 达 2048 后核心 sparse attention 近似饱和，indexer 仍随全历史增长。</li>
-    <li><b>DCP 宽度上升：</b>主 KV 每 rank 约 ÷c、逻辑容量 ×c；Q 复制、partial/LSE 和同步增加。DCP4 已退化，DCP8 超出 attnTP4 的有效布局。</li>
-    <li><b>NEXTN：</b>verify 行数放大约 draft token 数倍，partial/LSE 与 workspace 同步放大；accept rate 必须单列，不能把最终 TPOT 全归因于 DCP kernel。</li>
+    <li><b>Prefill：</b>两套 D 侧都不做长 Prefill。P 侧 CP4 负责把 prompt 算完；A 走 CP0-only 传输后按 DCP4 重排，B 按普通 MLA 传输。</li>
+    <li><b>Decode：</b>A 每层多一次 DCP 归并、少一半 KV 读取；B 每层多一次跨 DP 交换、KV 读全量。</li>
+    <li><b>长输出：</b>A 的 LSE 归并随 token 数线性增长但与被读历史无关；B 的 DP 交换随 batch 增长，KV 读取随上下文增长。</li>
+    <li><b>小 batch：</b>A 只有 1 个 scheduler，<code>max_running_requests=1</code> 时几乎无调度收益；B 天然支持 4 组并发，但单条长请求只占 1 组，其余组空转。</li>
   </ul>
 
-  <h2 id="formula"><span class="n">04</span>KV 容量与显存公式</h2>
-  <h3 class="mini">普通 MHA 的基线公式</h3>
-<pre><code>M_request,rank = 2 × Lloc × Hkv,loc × dh × e × S
-M_card         = Σrequest M_request,rank + M_page_reserve + M_runtime</code></pre>
-  <p><code>2</code> 是 K/V 两份；PP 改本地层数，TP 改本地 head 数，分页把 <code>S</code> 改为 <code>ceil(S/page)×page</code>。<b>GLM/Hy 的 MLA latent KV 不是普通 MHA，不能再机械乘 2。</b></p>
-
-  <h3 class="mini">两套实现的 target 布局</h3>
+  <h2 id="formula"><span class="n">04</span>容量公式与两个算例</h2>
+  <h3 class="mini">每层每 token 的字节数</h3>
 <pre><code>m = 512(FP8 latent) + (512/128)×4(scale) + 64×2(BF16 RoPE) = 656 B
 i = 128(FP8 index-K) + 4(FP32 scale) = 132 B
 
-target main / token / rank = 78m = 51,168 B
-target index / token / rank = 21i = 2,772 B
-NEXTN main+index / token / rank = m+i = 788 B</code></pre>
-  <p>依据 <code>DSATokenToKVPool</code> 与 <code>IndexKeyCache</code>：78 个 target 层中 21 个 full-indexer 层。MLA latent 由 K/V 共用，所以没有额外 ×2。</p>
+target 主 KV  = 78 × m = 51,168 B / token / rank
+target index  = 21 × i =  2,772 B / token / rank
+NEXTN draft   = m + i  =    788 B / token / rank</code></pre>
 
-  <h3 class="mini">单请求、单卡、并行组、整机</h3>
-<pre><code>S_target = ceil(S/(64×c)) × 64
-S_full   = ceil(S/64) × 64
-
-单请求 / rank:
-  M_req = 78m×S_target + 21i×S_full + (m+i)×S_full
-
-单请求 / attnTP 组:
-  M_group_req = (attn_tp_size/c)×78m×S_target
-              + attn_tp_size×21i×S_full
-              + attn_tp_size×(m+i)×S_full</code></pre>
-  <p>target 主 KV 副本因子为 <code>attn_tp_size/c</code>；index-K 与 DCP1 draft 的副本因子仍是 <code>attn_tp_size</code>。</p>
-<pre><code>Target main  = (N+64) × 78m
-Ibuf         = (N+64)×c - 64
-Pidx         = floor((Ibuf+64+1)/64)
+  <h3 class="mini">通用公式</h3>
+<pre><code>Target main  = (N + 64) × 78m
+Ibuf         = (N + 64) × c − 64
+Pidx         = floor((Ibuf + 65) / 64)
 Target index = Pidx × 64 × 21i
-Draft main   = (cN+64) × m
-Pdraft       = floor((cN+64+1)/64)
-Draft index  = Pdraft × 64 × i</code></pre>
-  <table><thead><tr><th>口径</th><th>target 容量/占用</th><th>必须再区分</th></tr></thead><tbody>
-    <tr><td class="k" data-label="口径">单请求</td><td data-label="公式">上述 <code>M_req</code>；最大 target 长度约 cN</td><td data-label="区分">还需与 context、P 侧、draft/index/metadata 取 min</td></tr>
-    <tr><td class="k" data-label="口径">单卡</td><td data-label="公式">N 个 target 主 KV 物理行 + index + draft + dummy page</td><td data-label="区分">KV payload ≠ 进程总 HBM；权重/activation/workspace 另算</td></tr>
-    <tr><td class="k" data-label="口径">单个 DP 组</td><td data-label="公式">target 逻辑容量 cN，不是 4N；物理 buffer 是 4 卡之和</td><td data-label="区分">主 KV 副本因子 attnTP/c；index 与 draft 仍 attnTP</td></tr>
-    <tr><td class="k" data-label="口径">整个部署</td><td data-label="公式">d 个 DP 组时逻辑容量 d×cN（均衡上界）</td><td data-label="区分">物理行 16N 不是唯一 token 容量；端到端并发还受 P 与调度限制</td></tr>
+Draft main   = (cN + 64) × m
+Draft index  = floor((cN + 65)/64) × 64 × i
+
+逻辑容量     = c × N
+主 KV 副本   = attn_tp_size / c
+1M 门槛      = 1,048,576</code></pre>
+  <p class="hint">B 的 DCP1 + host 变体还要把 <code>N</code> 换成 host 槽位数 <code>floor(3N/64)×64+64</code>，并单独加设备侧热集。</p>
+
+  <h3 class="mini">算例 A · TP8 × DCP4，N=269,952，c=4</h3>
+<pre><code>Target main  = (269,952+64) × 78 × 656 = 13,816,178,688 B = 12.8673 GiB
+Ibuf = 1,080,000 → Pidx = 16,876
+Target index = 16,876 × 64 × 21 × 132  =  2,993,937,408 B =  2.7883 GiB
+Draft main   = 1,079,872 × 656         =    708,396,032 B =  0.6597 GiB
+Draft index  = 16,873 × 64 × 132       =    142,543,104 B =  0.1328 GiB
+---------------------------------------------------------------
+每 rank 合计                            = 17,661,055,232 B = 16.4481 GiB
+
+逻辑容量 = 269,952 × 4 = 1,079,808  (> 1,048,576 ✓)
+num_pages = 269,952/64 = 4,218；逻辑 page = 256；物理行合计 8×269,952 = 2×1,079,808</code></pre>
+
+  <h3 class="mini">算例 B · TP16 × attnDP4</h3>
+<pre><code>变体 B1（DCP1 + host ratio 3，N=480,000）
+GPU  main  = (480,000+64) × 78 × 656 = 24,563,914,752 B = 22.8769 GiB
+GPU  index = 22,501 × 64 × 21 × 132  =  3,991,857,408 B =  3.7177 GiB
+GPU  合计                             = 28,555,772,160 B = 26.5946 GiB
+host 槽位  = 1,440,064
+host main  = 73,685,194,752 B = 68.6247 GiB
+host 合计  = 77,677,052,160 B = 72.3424 GiB
+逻辑容量   = 3 × 480,000 = 1,440,000  (> 1,048,576 ✓)
+
+变体 B2（DCP2，N=600,000，纯 GPU）
+每 rank 合计 = 34,976,480,000 B = 32.5744 GiB
+逻辑容量     = 2 × 600,000 = 1,200,000  (> 1,048,576 ✓)</code></pre>
+
+  <h3 class="mini">同一个 1M 请求，两种形态各占多少</h3>
+  <table><thead><tr><th>形态</th><th>每 rank</th><th>整组 / 整机</th><th>说明</th></tr></thead><tbody>
+    <tr><td class="k" data-label="形态">A · DCP4</td><td class="v" data-label="每 rank">15.1994 GiB</td><td class="v" data-label="合计">8 卡 ≈ 121.6 GiB</td><td data-label="说明">main 12.4922 + index 2.7072；index 全历史 8 份</td></tr>
+    <tr><td class="k" data-label="形态">B1 · DCP1+host3</td><td class="v" data-label="每 rank">3.491 GPU + 52.6759 host</td><td class="v" data-label="合计">4 卡 ≈ 14.0 + 210.7 GiB</td><td data-label="说明">GPU 只放 16,448 行热集；完整序列在 host，4 份</td></tr>
+    <tr><td class="k" data-label="形态">B2 · DCP2</td><td class="v" data-label="每 rank">≈ 16.29 GiB</td><td class="v" data-label="合计">4 卡 ≈ 65.2 GiB</td><td data-label="说明">纯 GPU；S/2 主 KV + 全历史 index</td></tr>
   </tbody></table>
+  <p class="hint">单副本理论值 = 1,048,576 × (51,168 + 2,772) = 52.66 GiB。A 的 121.6 GiB 来自主 KV 2 份 + index 8 份；B1 的 host 210.7 GiB 来自 DCP1 的 4 份复制。</p>
 
-  <h3 class="mini">HiSparse 是另一套修正，不与 DCP 混用</h3>
-  <p>GLM 当前 <code>N=480K</code>、host ratio 3，所以逻辑主池/index 地址空间为 <code>3N=1.44M</code>；每请求热集 16K，长序列其余主 KV 在 host。<code>HiSparseTokenToKVPoolAllocator</code> 同时维护 logical allocator 与 device allocator 及映射。stock DCP guard 拒绝 HiSparse + PD，不能把 Hy 的 DCP2 直接叠上来。</p>
+  <h3 class="mini">可拖动计算器</h3>
+  <div class="calc">
+    <div class="ctl">
+      <label>形态<select id="inForm"><option value="dcp">A · DCP 分片</option><option value="host">B · DCP1 + host 分层</option></select></label>
+      <label>每 rank 物理行 N<input id="inN" type="number" min="64" max="1200000" step="64" value="269952"></label>
+      <label>DCP 宽度 c<select id="inC"><option>1</option><option>2</option><option selected>4</option></select></label>
+      <label>host ratio（仅 B）<input id="inR" type="number" min="1" max="8" step="1" value="3"></label>
+      <label>请求长度 S<input id="inS" type="number" min="64" max="1048576" step="64" value="1048576"></label>
+      <label>DP 组数 d<input id="inD" type="number" min="1" max="16" step="1" value="1"></label>
+    </div>
+    <div class="outs">
+      <div class="out"><div class="ol">每 rank 合计</div><div class="ov" id="outCard">—</div><div class="on">主 KV + index + draft</div></div>
+      <div class="out"><div class="ol">逻辑 target 容量</div><div class="ov" id="outLogical">—</div><div class="on">c × N（B 含 host ratio）</div></div>
+      <div class="out"><div class="ol">距 1M 门槛</div><div class="ov" id="outHead">—</div><div class="on">逻辑 − 1,048,576</div></div>
+      <div class="out"><div class="ol">整机逻辑容量</div><div class="ov" id="outTotal">—</div><div class="on">d × 单池</div></div>
+      <div class="out"><div class="ol">S 长度可驻留</div><div class="ov" id="outConc">—</div><div class="on">floor(逻辑 / S) × d</div></div>
+      <div class="out"><div class="ol">主 KV 副本</div><div class="ov" id="outReplica">—</div><div class="on">attnTP / c</div></div>
+    </div>
+    <p class="hint">固定 <code>m=656B, i=132B, 78 层, 21 index 层, 1 draft 层</code>；attnTP = 8（A）/ 4（B）。名义上界，不含热集淘汰与生命周期。</p>
+  </div>
 
-  <h2 id="chart"><span class="n">05</span>target KV 构成：DCP 不是同比省</h2>
-  <p>固定每 rank 主 KV 物理行 <code>N=400,000</code>，只看 target、不含 draft：主 KV buffer 不随 DCP 改变，但 index-K 随 c 增长。换句话说，DCP 用更多 index/draft 与通信，换更大的主 KV 逻辑空间。</p>
+  <h2 id="chart"><span class="n">05</span>三条 1M 算术</h2>
+  <p>三条路径都越过了 1M 门槛，但余量和机制不同：TP8×DCP4 只多出 3.0%，TP16×attnDP4 的 DCP2 变体多出 14.5%，DCP1+host3 多出 37.3%。</p>
   <div class="figrow">
-    <div class="chartcard"><h2 id="s06">主 KV 持平，index-K 随 DCP 增加</h2><div class="csub">one rung = 0.25 GiB · 78 target 层 + 21 full-indexer 层 · N=400K · 不含 NEXTN draft</div><div class="chartwrap"><svg id="kvchart" viewBox="0 0 400 320" role="img" aria-label="DCP1、DCP2、DCP4 的 target 主 KV 与 index-K 显存构成"></svg></div><div class="csrc">F7 STACKED RUNGS · MONO-BASIC · 由配置与 buffer 公式计算，非运行时实测</div></div>
+    <div class="chartcard"><h2 id="s06">越过 1M 的三种算法</h2><div class="csub">one rung = 32,768 tokens · dashed = 1,048,576（1M）· 单请求可达的逻辑 target 长度</div><div class="chartwrap"><svg id="capchart" viewBox="0 0 400 320" role="img" aria-label="TP8 DCP4、TP16 attnDP4 DCP2、TP16 attnDP4 DCP1 host3 的逻辑容量与 1M 门槛对比"></svg></div><div class="csrc">RUNG BARS · MONO-BASIC · 由配置与 buffer 公式推导，非运行时压测</div></div>
     <div class="read"><h4>读图</h4><ul>
-      <li>主 KV（深灰）三档均为 <span class="num">19.0646 GiB/rank</span>，因为 N 固定；它决定的是物理 buffer，而不是逻辑容量。</li>
-      <li>index-K（浅灰）从 <span class="num">1.0328 → 2.0656 → 4.1313 GiB</span>；DCP 不会把 indexer 的全历史成本按 c 除掉。</li>
-      <li>逻辑 target 容量却从 <span class="num">400K → 800K → 1.6M</span>。收益与代价必须同时写。</li>
-      <li>NEXTN draft 还会另加 DCP1 的 main+index；见下方计算器和 notes。</li>
+      <li><b>TP8×DCP4</b>：<span class="num">269,952 × 4 = 1,079,808</span>，只比门槛高 31,232（3.0%），一条 1M 请求就基本占满。</li>
+      <li><b>TP16×attnDP4 + DCP2</b>：<span class="num">600,000 × 2 = 1,200,000</span>，纯 GPU，余量 151,424。</li>
+      <li><b>TP16×attnDP4 + DCP1+host3</b>：<span class="num">480,000 × 3 = 1,440,000</span>，余量 391,424，但完整 KV 落在 host。</li>
+      <li>三个数字都是<b>单个请求/单个池</b>的逻辑长度；B 形态整机还有 4 个这样的池。</li>
     </ul></div>
   </div>
 
-  <h2 id="examples"><span class="n">06</span>可复核算例</h2>
-  <h3 class="mini">GLM：target 26.5946 GiB/rank，不含 draft/host/runtime</h3>
-<pre><code>N=480,000, p=64, HiSparse index ratio=3
-Target main  = (480000+64)×78×656 = 24,563,914,752 B = 22.8769 GiB
-Pidx         = floor((1,440,000+64+1)/64) = 22,501
-Target index = 22,501×64×21×132 = 3,991,857,408 B = 3.7177 GiB
-Target total = 28,555,772,160 B = 26.5946 GiB</code></pre>
-  <p>每组逻辑主池 1.44M，四组 5.76M（host+device、均衡口径）。196,608-token 请求在 D 逻辑上每组 7 条、四组 28，但 P 的 1.2M 只允许约 6 条同长请求；端到端首先受 P 限制。完整配方的新 1M 回执在发布文档中仍标记待补，公式不等于实测通过。</p>
-  <p class="hint">host page reserve 后为 1,440,064 槽：host target main = 68.6247 GiB/rank，index = 3.7177 GiB/rank，总计 72.3424 GiB/rank；host 主池约 549.0 GiB/8 卡节点。热集为 16,448 slots/request，EAGLE scratch 为 1,024 slots/request；每组最多 16 个运行请求时，两项名义合计 279,552 slots，其他常驻与在途占用另算。</p>
-
-  <h3 class="mini">Hy r15：target+draft 21.7174 GiB/rank</h3>
-<pre><code>N=400,000, c=2, p=64
-Target main  = (400000+64)×78×656 = 20,470,474,752 B = 19.0646 GiB
-Target index = 12,502×64×21×132 = 2,217,954,816 B = 2.0656 GiB
-Draft main   = (800000+64)×656 = 524,841,984 B = 0.4888 GiB
-Draft index  = 12,501×64×132 = 105,608,448 B = 0.0984 GiB
-Total        = 23,318,880,000 B = 21.7174 GiB</code></pre>
-  <p>每组 target 逻辑 800K，四组 3.2M；196K 请求在 D 上名义 16 条，但 r15 的 P 实际池 549,952 只能容纳 2 条，所以端到端约 2。后续 PD1M 配方把 P/D 都调到 1.2M 才具备 1M 条件，不能与 r15 混用。</p>
-  <div class="callout"><b>公式交叉验证：</b>另一个单节点 DCP4 探针的 target 物理行 243,712、逻辑 974,848。按同一 buffer 公式得 <code>15,176,518,656 B = 14.134234 GiB</code>，与保存的运行时 <code>kv_cache_memory_usage_gb=14.1342344</code> 吻合。</div>
-
-  <h3 class="mini">可拖动计算器 · Hy 风格 target + NEXTN</h3>
-  <div class="calc">
-    <div class="ctl">
-      <label>每 rank target 物理行 N<input id="inN" type="number" min="64" max="1200000" step="64" value="400000"></label>
-      <label>DCP 宽度 c<select id="inC"><option>1</option><option selected>2</option><option>4</option></select></label>
-      <label>DP 组数 d<select id="inD"><option>1</option><option selected>4</option></select></label>
-      <label>请求长度 S<input id="inS" type="number" min="64" max="1048576" step="64" value="196608"></label>
-      <label>Prefill 容量 tokens<input id="inP" type="number" min="64" max="2000000" step="64" value="549952"></label>
-      <label>context_length<input id="inCtx" type="number" min="64" max="1048576" step="64" value="1048576"></label>
-    </div>
-    <div class="outs">
-      <div class="out"><div class="ol">单卡 target+draft</div><div class="ov" id="outCard">—</div><div class="on">含 dummy page，不含其他 runtime</div></div>
-      <div class="out"><div class="ol">单 DP 组逻辑 target</div><div class="ov" id="outGroup">—</div><div class="on">cN，主 KV 副本因子 attnTP/c</div></div>
-      <div class="out"><div class="ol">整机逻辑 target</div><div class="ov" id="outDeploy">—</div><div class="on">d×cN，均衡上界</div></div>
-      <div class="out"><div class="ol">单请求最大长度</div><div class="ov" id="outMax">—</div><div class="on">min(context, P, cN)</div></div>
-      <div class="out"><div class="ol">D 名义并发</div><div class="ov" id="outD">—</div><div class="on">d × floor(cN/S)</div></div>
-      <div class="out"><div class="ol">端到端名义并发</div><div class="ov" id="outE2E">—</div><div class="on">再与 P 和 maxRunning=64 取 min</div></div>
-    </div>
-    <p class="hint">计算使用 <code>m=656B, i=132B, target=78+21 层, draft=1 层</code>；并发是等长、无生命周期的名义上界，不是实测保证。</p>
-  </div>
-
-  <h2 id="compare"><span class="n">07</span>最终对比与待确认</h2>
-  <table><thead><tr><th>维度</th><th>GLM 系列当前代表配置</th><th>Hy 系列 r15</th></tr></thead><tbody>
-    <tr><td class="k" data-label="维度">实现</td><td data-label="GLM">DCP1 + HiSparse host ratio 3；长上下文 hot/cold 分层</td><td data-label="Hy">DCP2 + 定制 SM120 sparse MLA + single-owner sink + fused LSE</td></tr>
-    <tr><td class="k" data-label="维度">计算</td><td data-label="GLM">DP 均衡不改变核心总量；DCP1 无 LSE 归并</td><td data-label="Hy">DCP 核心 FLOPs 不自动减少；Q 复制与 LSE 归并是增量</td></tr>
-    <tr><td class="k" data-label="维度">通信</td><td data-label="GLM">attnTP + DP gather/combine + 全 TP MoE/scheduler 同步</td><td data-label="Hy">同左，另加 DCP partial output+LSE；Q gather 是否省掉取决于 Q 权重复制</td></tr>
-    <tr><td class="k" data-label="维度">容量</td><td data-label="GLM">每组逻辑 1.44M（host ratio 3）；每组 GPU 主池 480K</td><td data-label="Hy">每组 target 逻辑 800K；每 rank 主 KV 400K</td></tr>
-    <tr><td class="k" data-label="维度">单请求/并发</td><td data-label="GLM">公式具备 1M 条件，完整配方的新 1M 回执仍需补</td><td data-label="Hy">r15 受 P 549,952 限制，不能宣称 1M；PD1M 是另一配方</td></tr>
-    <tr><td class="k" data-label="维度">适用场景</td><td data-label="GLM">长上下文、可接受 host I/O 与 HiSparse 管理成本</td><td data-label="Hy">主 KV 容量/副本效率优先，且可承受自定义 kernel 与逐层归并</td></tr>
-    <tr><td class="k" data-label="维度">主要风险</td><td data-label="GLM">stock DCP + HiSparse/PD 被拒绝；热集与 host 带宽影响 TPOT</td><td data-label="Hy">小 batch/短序列归并占主导；DCP4 已退化，DCP8 布局不成立</td></tr>
+  <h2 id="compare"><span class="n">06</span>对比与待确认</h2>
+  <table><thead><tr><th>维度</th><th>A · TP8 × DCP4</th><th>B · TP16 × attnDP4</th></tr></thead><tbody>
+    <tr><td class="k" data-label="维度">并行轴</td><td data-label="A">上下文（位置）</td><td data-label="B">请求（分池）</td></tr>
+    <tr><td class="k" data-label="维度">硬件</td><td class="v" data-label="A">8 卡 1 节点</td><td class="v" data-label="B">16 卡 2 节点</td></tr>
+    <tr><td class="k" data-label="维度">1M 手段</td><td data-label="A">4× 位置分片</td><td data-label="B">4 池 + 3× host（或 2× DCP）</td></tr>
+    <tr><td class="k" data-label="维度">每层通信</td><td data-label="A">DCP Q gather + partial/LSE a2a</td><td data-label="B">跨 DP hidden gather/scatter（+ DCP2 归并）</td></tr>
+    <tr><td class="k" data-label="维度">KV 介质</td><td data-label="A">纯 GPU</td><td data-label="B">GPU + host（DCP1 变体）或纯 GPU（DCP2）</td></tr>
+    <tr><td class="k" data-label="维度">适合</td><td data-label="A">单机、长上下文、少并发（mr=1）</td><td data-label="B">多请求并发、可接受 host 带宽或组内归并</td></tr>
+    <tr><td class="k" data-label="维度">主要风险</td><td data-label="A">index-K 8 份；LSE 归并每层都在关键路径</td><td data-label="B">4 份 KV 复制；host 带宽；DP 组间长尾</td></tr>
   </tbody></table>
 
-  <h3 class="mini">仍需代码或实测确认</h3>
+  <h3 class="mini">仍需确认</h3>
   <ol>
-    <li><b>r15 精确 overlay：</b>decode 挂载对账为 8 匹配、4 缺失、4 版本不符；<code>dcp_kernels.py / dcp/comm.py / model_overrides/deepseek_v2.py / disaggregation/common/conn.py</code> 本地缺失，另四个文件哈希不一致。fused sink 与 SM120 partial-LSE kernel 的逐行实现及精确 payload 尚不能独立确认。</li>
-    <li><b>resolved 参数：</b>HYV4 属 DSA、SM120 解析为 a2a，stock 继而默认 Q 权重复制，故合理推断 <code>dcp_replicate_q_proj=true</code>；仍需现场 <code>/get_server_info</code> 或启动日志确认。</li>
-    <li><b>真实通信：</b>需固定 batch、accept length、序列长度和 Q 设置，用 trace 分别测 Q gather、partial/LSE、DP gather/combine 与 MoE；张量字节推导不是毫秒实测。</li>
-    <li><b>单因子 A/B：</b>固定 P、权重和 accept 分布，比较 DCP1/2、Q replicate on/off、a2a/ag_rs；r6→r15 与 DCP4 都不是单因子证据。</li>
-    <li><b>容量与总 HBM：</b>需补非均衡/变长/长输出/前缀复用测试，以及 host pool、权重、activation、workspace、graph、Mooncake/IPC 和 metadata 的现场账目。</li>
-    <li><b>基线与在线状态：</b>TP16、attnDP1 只用于理论对照，当前 4-head kernel 不可运行；本次未连接服务器检查容器，GLM 最新 Responses release 也只有 CPU 验收。</li>
+    <li><b>B 的 1M 归属：</b>GLM 的 8 条 1M 请求是“每池 2 条”并行完成的，单条仍独占一个池；不能据此说单池支持 2 条 1M。</li>
+    <li><b>index-K 与 DCP 的交互：</b>A 形态的 index-K 按全历史每 rank 一份，已由 <code>index_buf_size=(N+64)c−64</code> 推得，但没有逐 rank 的实测字节对照。</li>
+    <li><b>通信成本：</b>Q gather、partial/LSE a2a、DP gather 的真实耗时需 trace；本页只给 buffer 形状，不给毫秒。</li>
+    <li><b>单因子 A/B：</b>A 与 B 的差异同时包含 DCP、attnDP、host 分层与核形状，不能互相归因。</li>
   </ol>
 
   <h3 class="mini">自测</h3>
-  <details><summary>DPAttention 为什么不直接增加单请求上下文长度？</summary><div class="ans">它把不同请求放进不同 DP 池；单请求仍受所属池 N 限制。增加单请求 target 位置空间的是 DCP 的 c，或 GLM 的 HiSparse host ratio。</div></details>
-  <details><summary>Hy DCP2 为什么主 KV 是 2 份而不是 1 份？</summary><div class="ans">attnTP4 内有两个 DCP pair。一个 token 在每个 pair 各有一个 owner，所以跨 pair 仍复制一次；只有 DCP4 覆盖整个 attnTP4 时才降到一份。</div></details>
-  <details><summary>DCP 为什么不能说“核心 attention FLOPs 降 c 倍”？</summary><div class="ans">gathered Q head 数乘 c，本地 KV 长度除 c，乘积不变。DCP 的确定收益是主 KV 容量/副本效率；partial/LSE、Q 复制和同步还会增加成本。</div></details>
+  <details><summary>为什么 TP8×DCP4 只需要 269,952 行就能到 1M？</summary><div class="ans">因为 4 个 DCP rank 各持 1/4 位置，逻辑长度 = 4 × 269,952 = 1,079,808。若是 DCP1，同样行数只有 269,952。</div></details>
+  <details><summary>为什么 TP16×attnDP4 不能只靠 DPAttention 到 1M？</summary><div class="ans">DPAttention 把容量拆成 4 个独立池，单池仍是 480,000 行；单个 1M 请求只能落在一个池里，所以还要 host ratio 3 或组内 DCP2 把单池抬过 1M。</div></details>
+  <details><summary>DCP4 是不是把 attention 计算也降成 1/4？</summary><div class="ans">不是。gathered Q heads 变成 4 倍、本地 KV 变成 1/4，核心 FLOPs 乘积不变；省的是一半主 KV 副本和读取量，多的是 Q 准备与 LSE 归并。</div></details>
 
 <!-- show-me:shell:begin -->
 <nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-next" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html"><span class="sm-more-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-more-m">32 分钟<i aria-hidden="true"></i>2026-10-27</span></a><a class="sm-more-a" href="../../inference-systems/deepinfer-vs-sglang/index.html"><span class="sm-more-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-more-m">43 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html"><span class="sm-more-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-more-m">14 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/sglang-stream-interval/index.html"><span class="sm-more-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-24</span></a><a class="sm-more-a" href="../../inference-systems/moe-a2a-megamoe/index.html"><span class="sm-more-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-09-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-prefetch-prediction/index.html"><span class="sm-more-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/sglang-request-lifecycle/index.html"><span class="sm-more-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-more-m">19 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/hicache-mooncake/index.html"><span class="sm-more-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-18</span></a><a class="sm-more-a" href="../../inference-systems/dflash-pp-adaptation/index.html"><span class="sm-more-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-16</span></a></div></section>
 <!-- show-me:shell:end -->  <footer>
-    <p>主要源码：<code>runtime_context.py</code>、<code>parallel_state.py</code>、<code>layers/dp_attention.py</code>、<code>models/deepseek_v2.py</code>、<code>forward_mla.py</code>、<code>layers/dcp/*</code>、<code>layers/attention/dsa/dsa_dcp.py</code>、<code>mem_cache/{memory_pool,kv_cache_configurator,index_key_cache}.py</code>、<code>disaggregation/{common/utils,mooncake/conn,common/conn}.py</code>。完整路径与函数见 <a href="notes.md">notes.md</a>。</p>
-    <p>性能数字均标为历史日志；本页未启动服务、未重新压测。容量数字由配置和 buffer 公式推导，单节点 DCP4 的 14.134234 GiB 与保存的运行时字段吻合。</p>
-    <p>图表采用 <b>Mono</b> 灰阶：深色 = target 主 KV，浅灰 = index-K。图型来自 lieflat-charts 的 F7 Stacked Rungs（templates/basics-gallery.html 卡片 “Where each region's revenue sits”）。图表代码遵循 PolyForm Noncommercial 1.0.0；页面文字遵循 CC BY 4.0。</p>
+    <p>主要源码：<code>runtime_context.py</code>、<code>parallel_state.py</code>、<code>layers/dp_attention.py</code>、<code>layers/dcp/{layout,comm,planner}.py</code>、<code>forward_mla.py</code>、<code>mem_cache/{memory_pool,kv_cache_configurator,index_key_cache,pool_host/base}.py</code>、<code>disaggregation/common/utils.py</code>。完整推导见 <a href="notes.md">notes.md</a>。</p>
+    <p>容量数字由配置与 buffer 公式推导；1M 请求结果引自保存的历史日志，本页未启动服务、未重新压测。</p>
+    <p>图表采用 <b>Mono</b> 灰阶，图型来自 lieflat-charts 的 Rung Bars（templates/basics-gallery.html 卡片 “Revenue by plan, rung by rung”）。图表代码遵循 PolyForm Noncommercial 1.0.0；页面文字遵循 CC BY 4.0。</p>
   </footer>
 </main>
 <script>
 (function (global) {
   'use strict';
   const INK='#1C1C1A',PAPER='#F0EFEB',MUTED='#8F8E88',FAINT='#C6C5BF',GRID='#DEDDD6';
-  const L=['#1C1C1A','#4A4944','#6A6963','#8F8E88','#B0AFA9','#C6C5BF','#D8D7D1'];
   const rnd=(i,k)=>Math.abs(((i*73856093)^(k*19349663))%1000)/1000;
   const NS='http://www.w3.org/2000/svg';
   const el=(p,t,a)=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);p.appendChild(n);return n;};
@@ -471,55 +445,65 @@ Total        = 23,318,880,000 B = 21.7174 GiB</code></pre>
   const timers={};
   const keep=(id,t)=>{(timers[id]=timers[id]||[]).push(t);};
   const obsReveal=(id,fn)=>{const n=document.getElementById(id);const go=()=>{(timers[id]||[]).forEach(clearInterval);timers[id]=[];if(n.tagName==='svg'||n.tagName==='SVG')n.innerHTML='';fn(n);};const io=new IntersectionObserver(es=>{if(es[0].isIntersecting){go();io.disconnect();}},{threshold:.3});io.observe(n);n.style.cursor='pointer';n.addEventListener('click',go);};
-  global.MONO={INK,PAPER,MUTED,FAINT,GRID,L,rnd,el,txt,tip,obsReveal,keep};
+  global.MONO={INK,PAPER,MUTED,FAINT,GRID,rnd,el,txt,tip,obsReveal,keep};
 })(typeof window!=='undefined'?window:globalThis);
 
-// F7 Stacked Rungs · 骨架来自 basics-gallery.html 的 “Where each region's revenue sits”
-const {INK,PAPER,MUTED,FAINT,GRID,rnd,el,txt,tip,obsReveal}=MONO;
-const D=[
-  ['DCP1',[76.2584609985,4.1312627792]],
-  ['DCP2',[76.2584609985,8.2625255585]],
-  ['DCP4',[76.2584609985,16.5250558038]]
+// Rung Bars · 骨架来自 basics-gallery.html 卡片 “Revenue by plan, rung by rung”
+const {INK,MUTED,FAINT,GRID,rnd,el,txt,tip,obsReveal}=MONO;
+const THRESH=1048576, RUNG=32768;
+const BARS=[
+  ['TP8×DCP4',1079808,'269,952 × 4'],
+  ['TP16×DP4·DCP2',1200000,'600,000 × 2'],
+  ['TP16×DP4·host3',1440000,'480,000 × 3']
 ];
-const SEG=['target main','index-K'];
-const SHADE=[INK,'#8F8E88'];
-obsReveal('kvchart',s=>{
-  const x0=i=>72+i*104,base=270,step=2.35,HW=15,UNIT=.25;
-  D.forEach(([name,segs],i)=>{
-    const x=x0(i);let k0=0;
-    segs.forEach((v,si)=>{
-      const count=Math.round(v);
-      for(let k=0;k<count;k++){
-        const y=base-(k0+k+si)*step,w=HW-1.4+rnd(k+1,i*3+si+2)*2.8;
-        el(s,'line',{x1:x-w,y1:y,x2:x+w,y2:y,stroke:SHADE[si],'stroke-width':1,
-          opacity:.6+rnd(k+2,i+si+4)*.4,class:'fade',style:`animation-delay:${i*.09+(k0+k)*.006}s`});
-      }
-      const midY=base-(k0+count/2+si)*step;
-      const lab=txt(s,{x:x+HW+7,y:midY+2.5,'font-size':8,'font-weight':800,fill:SHADE[si],class:'fade',style:`animation-delay:${.5+i*.09+si*.06}s`},(segs[si]*UNIT).toFixed(2));
-      tip(lab,`${name} ${SEG[si]} — ${(segs[si]*UNIT).toFixed(6)} GiB`);
-      k0+=count;
-    });
-    txt(s,{x,y:base-(k0+2)*step-7,'font-size':10.5,'font-weight':800,fill:INK,'text-anchor':'middle',class:'fade',style:`animation-delay:${.6+i*.09}s`},(segs.reduce((a,b)=>a+b,0)*UNIT).toFixed(1));
-    txt(s,{x,y:base+18,'font-size':7.5,'font-weight':700,fill:MUTED,'text-anchor':'middle','letter-spacing':'.08em',class:'fade',style:`animation-delay:${i*.09}s`},name);
+obsReveal('capchart',s=>{
+  const base=268,step=5.6,HW=17,x0=i=>78+i*112;
+  const ty=base-(THRESH/RUNG)*step;
+  el(s,'line',{x1:28,y1:ty,x2:396,y2:ty,stroke:FAINT,'stroke-width':1,'stroke-dasharray':'4 3',class:'fade'});
+  txt(s,{x:396,y:ty-6,'font-size':6.5,'font-weight':700,fill:MUTED,'text-anchor':'end','letter-spacing':'.06em',class:'fade'},'1M = 32 rungs');
+  BARS.forEach(([name,tok,formula],i)=>{
+    const x=x0(i),rungs=Math.round(tok/RUNG);
+    for(let k=0;k<rungs;k++){
+      const y=base-k*step,w=HW-1.5+rnd(k+1,i+2)*3;
+      const over=k>=(THRESH/RUNG);
+      el(s,'line',{x1:x-w,y1:y,x2:x+w,y2:y,stroke:INK,'stroke-width':1,
+        opacity:(over?.42:.55)+rnd(k+2,i+4)*.45,class:'fade',style:`animation-delay:${i*.08+k*.012}s`});
+    }
+    const num=txt(s,{x,y:base-rungs*step-8,'font-size':9.5,'font-weight':800,fill:INK,'text-anchor':'middle',
+      class:'fade',style:`animation-delay:${.4+i*.08}s`},tok.toLocaleString('en-US'));
+    tip(num,`${name} — ${tok.toLocaleString('en-US')} tokens（${formula}）`);
+    txt(s,{x,y:base+14,'font-size':7,'font-weight':700,fill:MUTED,'text-anchor':'middle','letter-spacing':'.04em',class:'fade',style:`animation-delay:${i*.08}s`},name);
+    txt(s,{x,y:base+24,'font-size':6.5,'font-weight':600,fill:'#B0AFA9','text-anchor':'middle',class:'fade',style:`animation-delay:${i*.08+.05}s`},formula);
   });
-  el(s,'line',{x1:36,y1:base+4,x2:364,y2:base+4,stroke:GRID,'stroke-width':.8,class:'fade'});
-  txt(s,{x:200,y:310,'font-size':7,'font-weight':600,fill:'#B0AFA9','text-anchor':'middle','letter-spacing':'.12em',class:'fade',style:'animation-delay:1.1s'},'DARK = TARGET MAIN · LIGHT = INDEX-K · ONE RUNG = 0.25 GiB');
+  el(s,'line',{x1:28,y1:base+3,x2:372,y2:base+3,stroke:GRID,'stroke-width':.8,class:'fade'});
+  txt(s,{x:200,y:310,'font-size':7,'font-weight':600,fill:'#B0AFA9','text-anchor':'middle','letter-spacing':'.12em',class:'fade',style:'animation-delay:.9s'},'ONE RUNG = 32,768 TOKENS · FAINT RUNGS SIT ABOVE THE 1M LINE');
 });
 
-// Hy-style target+draft calculator · 与 notes.md 的 buffer 公式一致
-const ids=['inN','inC','inD','inS','inP','inCtx'];
-function fmtInt(x){return Math.round(x).toLocaleString('en-US');}
+// 容量计算器 · 与 notes.md 的 buffer 公式一致
+const ids=['inForm','inN','inC','inR','inS','inD'];
+const F={m:656,i:132,L:78,IL:21,p:64,layersDraft:1};
 function calc(){
-  const N=+document.getElementById('inN').value,c=+document.getElementById('inC').value,d=+document.getElementById('inD').value,S=+document.getElementById('inS').value,P=+document.getElementById('inP').value,ctx=+document.getElementById('inCtx').value;
-  const p=64,m=656,i=132,G=2**30;
-  const main=(N+p)*78*m,ib=(N+p)*c-p,pidx=Math.floor((ib+p+1)/p),idx=pidx*p*21*i;
-  const dm=(c*N+p)*m,pdr=Math.floor((c*N+p+1)/p),di=pdr*p*i,total=(main+idx+dm+di)/G;
-  document.getElementById('outCard').textContent=total.toFixed(4)+' GiB';
-  document.getElementById('outGroup').textContent=fmtInt(c*N)+' tok';
-  document.getElementById('outDeploy').textContent=fmtInt(d*c*N)+' tok';
-  document.getElementById('outMax').textContent=fmtInt(Math.min(ctx,P,c*N))+' tok';
-  document.getElementById('outD').textContent=fmtInt(d*Math.floor(c*N/S))+' req';
-  document.getElementById('outE2E').textContent=fmtInt(Math.min(64,d*Math.floor(c*N/S),Math.floor(P/S)))+' req';
+  const form=document.getElementById('inForm').value;
+  const N=+document.getElementById('inN').value, c=+document.getElementById('inC').value;
+  const r=+document.getElementById('inR').value, S=+document.getElementById('inS').value, d=+document.getElementById('inD').value;
+  const G=2**30,p=F.p,m=F.m,i=F.i;
+  const hostSlots=Math.floor(N*r/p)*p+p;
+  const isHost=form==='host';
+  // HiSparse 的 index 覆盖整个逻辑池（host 槽位），DCP 形态覆盖加宽后的 (N+p)c-p
+  const idxRows=isHost?hostSlots:((N+p)*c-p);
+  const main=(N+p)*F.L*m, pidx=Math.floor((idxRows+p+1)/p), idx=pidx*p*F.IL*i;
+  const dm=(c*N+p)*m, pdr=Math.floor((c*N+p+1)/p), di=pdr*p*i;
+  const hostBytes=isHost?hostSlots*(F.L*m+F.IL*i):0;
+  const card=(main+idx+dm+di+hostBytes)/G;
+  const logical=isHost?N*r:c*N;
+  const attnTP=isHost?4:8;
+  document.getElementById('outCard').textContent=card.toFixed(4)+' GiB';
+  document.getElementById('outLogical').textContent=logical.toLocaleString('en-US');
+  const head=logical-1048576;
+  document.getElementById('outHead').textContent=(head>=0?'+':'')+head.toLocaleString('en-US');
+  document.getElementById('outTotal').textContent=(logical*d).toLocaleString('en-US');
+  document.getElementById('outConc').textContent=(Math.floor(logical/S)*d).toLocaleString('en-US')+' 条';
+  document.getElementById('outReplica').textContent=(attnTP/c).toFixed(2)+'×';
 }
 ids.forEach(id=>document.getElementById(id).addEventListener('input',calc));calc();
 </script>
