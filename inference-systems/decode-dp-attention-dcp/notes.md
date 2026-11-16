@@ -8,7 +8,7 @@
 
 1. **两个机制回答两个不同问题。** DPAttention 决定“哪些请求放在同一组 rank 上”；DCP 决定“同一请求的上下文放在哪些 rank 上”。
 2. **TP8×DCP4 用位置拼长度。** `attn_dp_size=1`、`dcp_size=4`，每 rank 269,952 行，逻辑 target 容量 `4 × 269,952 = 1,079,808`，纯 GPU，实测完成过 1,048,188 + 384 的真实 1M 请求。
-3. **TP16×attnDP4 用分池换并发与容量。** `attn_dp_size=4`，每池 4 rank；DCP1 时靠 host ratio 3 得 `480,000 × 3 = 1,440,000`，DCP2 时靠组内分片得 `600,000 × 2 = 1,200,000`，两条都实测完成过 1M。
+3. **TP16×attnDP4 用分池换并发与容量。** `attn_dp_size=4`，每池 4 rank；DCP1 时靠 HiSparse 的 `host_to_device_ratio=3` 得 `480,000 × 3 = 1,440,000`，DCP2 时靠组内分片得 `600,000 × 2 = 1,200,000`，两条都实测完成过 1M。
 4. **DPAttention 单独不足以上 1M。** 它把容量拆成 4 个独立池，单池仍是 480,000 行；单个 1M 请求只落在一个池，所以必须叠加 host 分层或组内 DCP。
 5. **DCP 不减少核心 attention FLOPs。** gathered Q heads ×c、本地 KV ÷c，乘积不变；真正变化的是主 KV 副本数与单请求容量。
 6. **两个容易被忽略的代价。** DSA index-K 不随 DCP 分片，TP8×DCP4 的 index-K 仍是 8 份全历史；host 分层路线里，同一份 1M 序列在每个 attnTP rank 的 host 上各存一份（DCP1 时 4 份）。
@@ -28,6 +28,43 @@
 **A 的日志证据：** `max_total_num_tokens=1079808`、`max_running_requests=1`、`context_len=1048576`、`--cuda-graph-max-bs-decode 1`；真实请求 `1,048,188 input + 384 output + 4 模板 = 1,048,576` 返回 HTTP 200，bs=1 graph 耗时 85.86 s，no-graph 124.55 s；1P2D 组合 85.89 s、`spec_accept_rate=0.960`。
 
 **B 的日志证据：** GLM 侧为 TP16 × attnDP4 × DCP1 + HiSparse，GPU 主池 480,000、host ratio 3、每请求热集 16,384，8 条 C1 的 1M 请求按 DP0–3 各 2 条完成；Hy4 侧 pd1m 为 `TP16 × DCP2 × attnDP4`、每 rank 600,000、逻辑 1,200,000，1,048,000 + 8 约 86 s、完整上下文约 90 s。
+
+### 与 stock SGLang 的差异（必须先说清）
+
+两套 1M 形态里，**只有 B1 是 stock 允许的组合**。stock 源码对 DSA 模型的 DCP 有三条硬限制，全部在 `arg_groups/model_overrides/deepseek_v2.py: _dsa_dcp_overrides()`：
+
+```python
+if cfg.dcp_size <= 1:
+    return {}
+if cfg.enable_hisparse or cfg.enable_hierarchical_cache:
+    raise ValueError("DSA DCP does not support HiSparse or HiCache.")
+if cfg.disaggregation_mode != "null":
+    raise ValueError("DSA DCP does not support PD disaggregation.")
+if cfg.speculative_eagle_topk not in (None, 1):
+    raise ValueError("DSA DCP requires --speculative-eagle-topk 1.")
+```
+
+PD 解码端还有一条前置条件，在 `disaggregation/common/conn.py`：
+
+```python
+if self.dcp_size > 1:
+    if not (self.is_mla_backend or self.is_hybrid_mla_backend):
+        raise RuntimeError("PD decode DCP requires an MLA or hybrid-MLA KV pool.")
+    if info.attn_cp_size != 1:
+        raise RuntimeError(
+            "PD decode DCP currently requires prefill attention CP=1, "
+            f"got {info.attn_cp_size}.")
+```
+
+对照本页两套形态：
+
+| 形态 | DCP | PD | HiSparse/HiCache | P 侧 CP | stock 是否允许 |
+|---|---:|---:|---:|---:|---|
+| A · TP8×DCP4 | 4 | 是 | 否 | CP4 | **否**（PD guard + prefill CP≠1） |
+| B1 · TP16×attnDP4 | 1 | 是 | 是（HiSparse） | CP4 | **是**（`dcp_size≤1` 直接返回） |
+| B2 · TP16×attnDP4 | 2 | 是 | 否 | CP4 | **否**（PD guard + prefill CP≠1） |
+
+所以 A 与 B2 的 1M 结果是**带 overlay 的构建**跑出来的；本页讲的是这些构建里的机制与实测，但机制本身（owner rule、LSE 归并、加宽容量的公式）都是 stock 代码，overlay 改的是“允许在 PD 里开 DCP”这一层门禁。
 
 ### rank 划分
 
@@ -59,7 +96,7 @@ DCP2 时每组再分两个 pair。
 | `--attn-dp-size` | 1 | 整除 TP；不能与 `dp_size>1` 同用 |
 | `--dcp-comm-backend` | 未设置 | DCP1 → `ag_rs`；SM120 不满足 `fi_a2a`，DCP>1 解析为 `a2a` |
 | `--dcp-replicate-q-proj` | 未设置 | DSA + a2a 默认 true，Q 计算约 ×c |
-| `--hicache-ratio` | — | 只出现在 B1，host 池 = 设备池 × ratio |
+| `--enable-hisparse` + `--hisparse-config` | false | B1 用它做 host 分层：`{"host_to_device_ratio":3,"device_buffer_size":16384}`；stock DSA DCP 与 HiSparse 互斥 |
 
 源码：`arg_groups/fields/parallel.py`、`arg_groups/parallel_hook.py: handle_decode_context_parallelism()`、`arg_groups/overrides.py: _dcp_comm_backend_default()`、`arg_groups/model_overrides/deepseek_v2.py: _dsa_dcp_overrides()`。
 
@@ -84,7 +121,7 @@ Q projection（每 rank 8 local heads）
   → o_proj / 下一层
 ```
 
-`attn_dp_size=1`，所以没有跨 DP 的 hidden gather/scatter；每层只有 DCP 一次集合通信。这是 A 与 B 在通信结构上最本质的区别。
+`attn_dp_size=1` 时 `num_dp_ranks = dp_size × attn_dp_size = 1`，layer boundary 的 `move_rows()` 只在布局确有 `ATTN_DP` 差异时才插 gather，所以没有跨 DP 的 hidden gather/scatter。但每层 DCP 侧仍是两次集合通信：Q all-gather（开 `dcp_replicate_q_proj` 可省）+ partial output/LSE 的 a2a。这是 A 与 B 在通信结构上最本质的区别。
 
 ### 3.2 B：DPAttention 把请求分进 4 个池
 
@@ -224,13 +261,42 @@ host 合计 = 77,677,052,160 B = 72.3424 GiB
 | 单请求最大长度 | `min(context_length, Prefill 容量, 逻辑容量, draft/index/metadata 限制)` |
 | 等长请求并发 | `min(maxRunning 约束, floor(Prefill/S), d×floor(逻辑/S))` |
 
-## 06 仍需确认
+## 06 与 SGLang 源码的逐条核对
+
+| 结论 | 源码位置 | 核对 |
+|---|---|---|
+| `attn_tp = tp / attn_dp / attn_cp` | `runtime_context.py: derive_attn_tp_size()` | ✓ |
+| DCP 组是 TP 组的连续 `dcp_size` 切片 | `parallel_state.py`：`tp_group[start:start+dcp_size]` | ✓ TP8/DCP4 有 2 组；TP16/DCP2 有 8 组 |
+| `dcp` 必须整除 `tp_size` | `parallel_state.py`：`tp % dcp != 0` → RuntimeError | ✓ 只校验 tp_size |
+| 每 rank head = `num_heads / attn_tp` | `deepseek_v2.py:2057` | ✓ |
+| DCP 把 head 放大到 local × c | `deepseek_v2.py`：`q.view(-1, num_local_heads*dcp_size, …)`；`dsa_backend.py`：`num_dcp_q_heads` | ✓ |
+| Q gather 沿 head 维 | `dcp/comm.py: all_gather_q_for_mla_decode()` | ✓ |
+| a2a 单次调用打包 output+LSE | `dcp/comm.py: dcp_a2a_lse_reduce()`，buffer `[N,B,H/N,D+lpd]` | ✓ `lpd=2` |
+| 按 LSE 做 log-sum-exp | `dcp_lse_combine_triton()` + `is_mla_dcp_lse_base_on_e()` | ✓ base-e / base-2 分后端 |
+| 合并后回到 local heads | `forward_mla.py`：`attn_output.view(-1, num_local_heads, kv_lora_rank)` | ✓ |
+| owner 规则 | `layers/dcp/layout.py: maybe_dcp_kernel_indices()` | ✓ `indices[rank::c] // c` |
+| 写 KV 时解析 owner | `memory_pool.py: _scatter_mla_rows()` → `set_mla_kv_buffer_dcp_sharded_triton()` | ✓ |
+| page table 按 owner 重写 | `dsa/dsa_dcp.py: localize_dcp_page_table()` | ✓ 带 topk 缓存复用 |
+| indexer 无 DCP 分支 | `dsa_indexer.py` 无 `dcp`；`dsa_backend.py` 仅两处 | ✓ index-K 每 rank 全历史 |
+| index 覆盖加宽空间 | `kv_cache_configurator.py: index_size = max_total_num_tokens * dcp_size`；`memory_pool.py: index_buf_size=(size+page)*c−page` | ✓ |
+| allocator size/page 加宽 | `kv_cache_configurator.py`：`*dcp` 两处 | ✓ 逻辑 page `64×c` |
+| 逻辑容量 = `N × c` | `kv_cache_configurator.py: logical_token_capacity()` | ✓ `loc_space_scale` 只对 draft worker |
+| HiSparse 逻辑池 = 设备池 × ratio | `allocator/hisparse.py`：`_size_full = size*host_to_device_ratio` | ✓ |
+| host 槽位向上取整 | `pool_host/base.py: HostKVCache.__init__` | ✓ 1,440,064 |
+| DCP 后端默认解析 | `overrides.py: _dcp_comm_backend_default()` | ✓ SM120 → a2a |
+| DSA+a2a 默认复制 Q 权重 | `model_overrides/deepseek_v2.py:32-33` | ✓ 仅 decode/target_verify |
+| **stock 禁止 DSA DCP + PD/HiSparse** | 同文件 `:19-24` | ⚠ A/B2 需 overlay |
+| **PD 解码端要求 prefill CP=1** | `disaggregation/common/conn.py` | ⚠ P 用 CP4，需 overlay |
+| attnDP1 无跨 DP 交换 | `layer_boundary/layout.py: move_rows()`；`num_dp_ranks=dp*attn_dp` | ✓ |
+
+## 07 仍需确认
 
 1. **B 的 1M 归属：** GLM 的 8 条 1M 请求是每池 2 条并行完成，单条仍独占一个池；不能说单池支持 2 条 1M。
 2. **index-K 与 DCP 的交互：** A 形态 index-K 按全历史每 rank 一份，由 `index_buf_size=(N+64)c−64` 推得，但缺逐 rank 实测字节对照。
 3. **通信成本：** Q gather、partial/LSE a2a、DP gather 的真实耗时需 trace；本页只给 buffer 形状。
 4. **单因子 A/B：** A 与 B 的差异同时包含 DCP、attnDP、host 分层与 kernel 形状，不能互相归因。
 5. **B1 的 host 归属：** draft host pool 与 target host pool 是否同一 packed pool，需按实际 pool 日志确认。
+6. **overlay 的具体实现：** A 与 B2 需要去掉 `_dsa_dcp_overrides()` 的 PD guard 和 `conn.py` 的 prefill-CP=1 前置；工作区没有完整保留这两份 decode overlay，所以只能确认“stock 会拒绝”，不能逐行确认改法。
 
 ## 附：源码锚点
 
