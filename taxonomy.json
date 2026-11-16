@@ -11,6 +11,11 @@
     "DSA": ["DSA 稀疏注意力"],
     "GLM 系列": ["GLM 5.3", "GLM-5.3", "GLM5"],
     "KV Cache": ["KVCache", "KV cache"],
-    "源码走读": ["源码分析"]
+    "源码走读": ["源码分析"],
+    "Prefill": ["prefill", "prefill 阶段"],
+    "FP8": ["fp8", "FP-8"],
+    "FP4": ["fp4", "FP-4"],
+    "量化通信": ["quantized communication", "量化集合通信"],
+    "PD 分离": ["PD disaggregation", "PD分离", "pd-disaggregation"]
   }
 }

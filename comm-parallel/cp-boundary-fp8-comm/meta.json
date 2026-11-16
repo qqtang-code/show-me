@@ -1,0 +1,38 @@
+{
+  "title": "CP 边界的 FP8 通信：AllGather 先量化、ReduceScatter 把求和移出 wire",
+  "slug": "cp-boundary-fp8-comm",
+  "category": "comm-parallel",
+  "date": "2026-11-16",
+  "tags": [
+    "Context Parallel",
+    "量化通信",
+    "AllGather",
+    "ReduceScatter",
+    "FP8",
+    "PCIe",
+    "Prefill",
+    "SGLang"
+  ],
+  "one_liner": "CP 边界每层搬两次残差流（MoE 前 AllGather、MoE 后 RS），BF16 大块、正落在 PCIe 的带宽区间。AG 把量化折进 gather 的读地址、RS 把求和从 wire 挪到本地 FP32 累加，线上字节降到 50.2%（scale 仅占 0.39%）；代价是数值路径改变、行数 <256 回退 BF16、block 必须整除 4096。实测端到端 +8.39%~+10.48%，且 RS 那两档是「在 AG 已开之上」的增量，不能相加。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "一套单机 8 卡 PCIe（无 NVLink）的 GLM 系列 MoE 部署优化审计记录：CP8 / tp=1 prefill 形态下 AG 与 RS 的端到端对照（16K→512 与冷前缀两档）、RS 单次微基准 2.932→1.701 ms、门控配置（MIN_ROWS 256 / BLOCK 整除 4096 / 确定性推理关 RS）",
+    "知识库既有页 comm-parallel/prefill-cp8-decode-tp8：CP 边界的两次通信从哪来（CP8 下注意力 AllReduce 消失、MoE 前改为 AllGather、MoE 后 ReduceScatter）、通信总时长 349.51→275.71 ms、FP8 KV 全收集 3.94 MiB/层",
+    "知识库既有页 comm-parallel/decode-tp16-2level-comm：作为对照的「拆轮数」另一条轴（字节几乎没省）",
+    "字节构成条与计算器由 rows × hidden × 元素位宽 + block 块度推出，非运行时实测",
+    "图表按 lieflat-charts 的 F5 Tick Rows 模板（templates/basics-gallery.html · C1 tick rows）与 mono-tokens.js 生成"
+  ],
+  "visibility": "internal",
+  "publish": true,
+  "redactions": [
+    "内部主机名、机器编号、IP 与端口映射已移除",
+    "内部仓库地址、运行时目录与文件行号已移除；正文只保留机制描述与伪代码，不保留内部 runtime 路径",
+    "内部配方名、release 名与镜像 digest 已移除",
+    "内部环境变量前缀统一改写为中性写法（SGLANG_CP_AG_FP8 / SGLANG_CP_RS_FP8 / MIN_ROWS / BLOCK）",
+    "未公开模型版本统一写作 GLM 系列"
+  ],
+  "enriched": "2026-11-16"
+}

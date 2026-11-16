@@ -29,11 +29,13 @@
   {
    "name": "并行切分与跨机通信",
    "kind": "path",
-   "desc": "换切分是把收益换到另一处开销上：CP 换掉按 token 重复的算子、EP 改权重排布、TP16 跨机后要把全组通信拆成两层，而 LayerSplit 用一次整层广播换 72% 的 KV 显存。",
+   "desc": "换切分是把收益换到另一处开销上：CP 换掉按 token 重复的算子、EP 改权重排布，TP16 跨机后要把全组通信拆成两层；而 CP 边界与 P 端还有另一条路 —— 把通信的精度换成线上字节。LayerSplit 则用一次整层广播换 72% 的 KV 显存。",
    "items": [
     "comm-parallel/prefill-cp8-decode-tp8",
+    "comm-parallel/cp-boundary-fp8-comm",
     "comm-parallel/sglang-tp8-ep1-4-8-mixtral",
     "comm-parallel/decode-tp16-2level-comm",
+    "comm-parallel/prefill-cp4-quantized-comm",
     "inference-systems/sglang-layer-split"
    ]
   },

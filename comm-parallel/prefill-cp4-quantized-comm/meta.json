@@ -1,0 +1,41 @@
+{
+  "title": "P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather",
+  "slug": "prefill-cp4-quantized-comm",
+  "category": "comm-parallel",
+  "date": "2026-11-16",
+  "tags": [
+    "PD 分离",
+    "Context Parallel",
+    "量化通信",
+    "AllGather",
+    "ReduceScatter",
+    "FP4",
+    "FP8",
+    "Prefill"
+  ],
+  "one_liner": "CP4 的 P 端一层有五处跨卡搬运，归四类机制：MoE 输入先压成 4 bit 再 gather、MoE 输出的 RS 改成 FP8 wire + 本地 FP32 累加（<1024 行必须回退，否则 2K/16K 并发掉档）、KV gather 复用已有 FP8 字节（零转换，四条守卫要同时对上）、attention 边界同款按行量化。组合后 16K/384 冷前缀 TPS +29.5%；attention 边界非无损（rel-L2 2–3%）。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "四机 PD 部署 P 端的优化审计记录：tp=4 / pp=4 / cp=4 / ep=4、4 bit 权重、SM120 的登记组合与守卫；两个 MoE 边界落点的激活回执与多份 GPU probe",
+    "quant-RS 的单程序列对照 prefill_forward 8.40→8.05 s；组合后 19 档 SLO 全过、19 档/56 轮记录",
+    "组合收益读数：P 侧 16K/384 冷前缀 Prefill TPS +29.5%、64K +27.4%、请求延迟 −21.5～−22.8%",
+    "attention 边界量化通道 6336 B/row（FP8 payload + 每 block FP32 scale）；由 hidden=6144、block=128 反推得出，非实测",
+    "KV 路径守卫：EP4、8192 行、eager、656 B/key 布局；D 侧同类 dp_ag/dp_rs 判负（16K TPOT P95 21.1→46.6 ms）",
+    "知识库既有页 comm-parallel/cp-boundary-fp8-comm：单机线 CP8 的同类做法（本页与之分工，配置不可互抄）",
+    "图表按 lieflat-charts 的 F5 Tick Rows 模板（templates/basics-gallery.html · C1 tick rows）与 mono-tokens.js 生成"
+  ],
+  "visibility": "internal",
+  "publish": true,
+  "redactions": [
+    "内部主机名、机器编号、IP 与端口映射已移除",
+    "内部仓库地址、运行时目录与文件行号已移除；正文只保留机制描述与伪代码",
+    "内部配方名、release 名、组件名与镜像 digest 已移除",
+    "内部环境变量前缀统一改写为中性代称（CP_FP4_ALLGATHER / RS_QUANT / QCOMM / KV_FP8_GATHER）",
+    "未公开模型版本统一写作 GLM 系列；内部项目代号未保留",
+    "P 端选型结论（并行方案 A/B 对比）未纳入本页，仅保留机制、门限与组合收益"
+  ],
+  "enriched": "2026-11-16"
+}

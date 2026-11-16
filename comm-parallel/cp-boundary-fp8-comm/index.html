@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>CP 边界的 FP8 通信：AllGather 先量化、ReduceScatter 把求和移出 wire</title><!-- show-me:shell:begin -->
+<meta name="description" content="CP 边界每层搬两次残差流（MoE 前 AllGather、MoE 后 RS），BF16 大块、正落在 PCIe 的带宽区间。AG 把量化折进 gather 的读地址、RS 把求和从 wire 挪到本地 FP32 累加，线上字节降到 50.2%（scale 仅占 0.39%）；代价是数值路径改变、行数 &lt;256 回退 BF16、block 必须整除 4096。实测端到端 +8.39%~+10.48%，且 RS 那两档是「在 AG 已开之上」的增量，不能相加。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="CP 边界的 FP8 通信：AllGather 先量化、ReduceScatter 把求和移出 wire">
+<meta property="og:description" content="CP 边界每层搬两次残差流（MoE 前 AllGather、MoE 后 RS），BF16 大块、正落在 PCIe 的带宽区间。AG 把量化折进 gather 的读地址、RS 把求和从 wire 挪到本地 FP32 累加，线上字节降到 50.2%（scale 仅占 0.39%）；代价是数值路径改变、行数 &lt;256 回退 BF16、block 必须整除 4096。实测端到端 +8.39%~+10.48%，且 RS 那两档是「在 AG 已开之上」的增量，不能相加。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/comm-parallel/cp-boundary-fp8-comm/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/comm-parallel/cp-boundary-fp8-comm/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  /* ============ 全站共用设计变量 ============ */
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    /* lieflat Mono token（值取自 mono-tokens.js，仅图表区使用） */
+    --lf-paper:#F0EFEB; --lf-ink:#1C1C1A; --lf-muted:#8F8E88; --lf-faint:#C6C5BF; --lf-grid:#DEDDD6;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)} .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7b8aa3} pre .hl{color:#12489c;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:12px 16px;margin:16px 0;font-size:14px;color:#4a3a1f}
+  .note b{color:#7a4a06}
+  .oknote{background:#f1f8f4;border-left:3px solid var(--good);border-radius:0 8px 8px 0;
+        padding:12px 16px;margin:16px 0;font-size:14px;color:#20452f}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .panel h4{margin:0 0 10px;font-size:14.5px;color:var(--ink)}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin:12px 0}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+  th{font:12px var(--mono);color:var(--dim2);font-weight:600}
+  td.num,th.num{text-align:right;font-family:var(--mono);font-size:13px}
+  tr.em td{background:var(--accent-soft)}
+  .good{color:var(--good);font-weight:600} .flat{color:var(--dim2)}
+  footer{margin-top:52px;border-top:1px solid var(--line);padding-top:16px;color:var(--dim2);font-size:13px}
+  footer .lic{font:12px var(--mono);display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  footer .lic a{color:var(--accent);text-decoration:none}
+  @media (max-width:640px){
+    table.cardmode thead{display:none}
+    table.cardmode tr{display:block;border:1px solid var(--line);border-radius:10px;
+                      margin-bottom:10px;padding:6px 10px;background:var(--panel)}
+    table.cardmode td{display:block;text-align:right;overflow-wrap:anywhere;border:0;padding:3px 0}
+    table.cardmode td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;
+                              color:var(--dim2);font:12px var(--mono)}
+    table.cardmode td.k{display:block;text-align:left;font-weight:600;color:var(--ink);
+                        border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:4px}
+    table.cardmode td.k::before{content:none}
+    table.cardmode tr.em td{background:none}
+  }
+
+  /* ============ 图表区：lieflat-charts 语法（卡内排版＝Mono，卡外＝页面） ============ */
+  /* 不整段内联 MONO.CARD_CSS：它的 :root / body 规则会重刷整页。取值取自 mono-tokens.js。 */
+  .chartrow{display:grid;grid-template-columns:470px minmax(0,1fr);gap:26px;align-items:start}
+  .chartcard{background:var(--lf-paper);border-radius:24px;padding:28px 28px 20px;color:var(--lf-ink)}
+  .chartcard h2{font-family:'Inter',sans-serif;font-weight:700;font-size:16.5px;letter-spacing:-.02em;
+                color:var(--lf-ink);margin:0 0 3px;padding:0;border:0;line-height:1.35}
+  .chartcard .sub{font-family:'Inter',sans-serif;font-size:11.5px;color:var(--lf-muted);
+                  margin:0 0 14px;line-height:1.5}
+  .chartcard .src{font-family:'Inter',sans-serif;font-size:9.5px;color:var(--lf-faint);margin-top:10px;
+                  letter-spacing:.08em;font-weight:500}
+  .chartwrap{overflow-x:auto}
+  .chartcard svg{width:100%;max-height:330px;display:block;margin:0 auto}
+  .chartcard svg text{font-family:'Inter',sans-serif}
+  .chartnotes{margin:0;padding:0 0 0 22px;border-left:2px solid var(--accent-line);list-style:none}
+  .chartnotes li{margin:0 0 12px;font-size:14px;color:var(--dim);line-height:1.65}
+  .chartnotes b{color:var(--ink)}
+  @media (max-width:640px){
+    .chartrow{grid-template-columns:minmax(0,1fr);gap:16px}
+    .chartnotes{padding-left:0;border-left:0}
+    .chartcard svg{min-width:400px}
+  }
+
+  /* ============ 字节构成条（自绘版式，非图表） ============ */
+  .wbars{margin:14px 0 6px}
+  .wb{margin:10px 0}
+  .wb .cap{display:flex;justify-content:space-between;gap:12px;font:12px var(--mono);color:var(--dim2);
+           margin-bottom:5px;min-width:0}
+  .wb .cap b{font-family:var(--mono);color:var(--ink)}
+  .wb .track{display:flex;height:26px;border-radius:6px;overflow:hidden;background:#eef2f9;min-width:0}
+  .wb .seg{height:100%;display:flex;align-items:center;justify-content:center;
+           font:11px var(--mono);color:#fff;overflow:hidden;white-space:nowrap;flex:none}
+  .wb .seg.pay{background:#1d4ed8}
+  .wb .seg.scl{background:#a35a06}
+  .wb .seg.save{background:#e4eaf4;color:#5c6b83}
+  .wb .seg.bf{background:#657389}
+  .lg{display:flex;gap:14px;flex-wrap:wrap;font:11.5px var(--mono);color:var(--dim2);margin-top:8px}
+  .lg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .lg .a i{background:#1d4ed8}.lg .b i{background:#a35a06}.lg .c i{background:#e4eaf4;border:1px solid #c9d4e6}
+  .lg .d i{background:#657389}
+
+  /* ============ 数据流（自绘版式，非图表） ============ */
+  .flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:14px 0;align-items:stretch}
+  .flow .st{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+  .flow .st h6{margin:0 0 4px;font:600 11.5px var(--mono);color:var(--dim2);letter-spacing:.04em}
+  .flow .st p{margin:0;font-size:13px;color:var(--fg);line-height:1.55}
+  .flow .st .w{font:11px var(--mono);color:var(--waste);margin-top:5px}
+  .flow .st .g{font:11px var(--mono);color:var(--good);margin-top:5px}
+
+  /* ============ 计算器 ============ */
+  .calc{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:12px 0}
+  .cbox{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+  .cbox h5{margin:0 0 8px;font:600 12px var(--mono);color:var(--dim2);letter-spacing:.03em}
+  .cbox .row{display:flex;justify-content:space-between;gap:10px;font-size:13.5px;margin:5px 0;min-width:0}
+  .cbox .row span:first-child{color:var(--dim)}
+  .cbox .row span:last-child{font-family:var(--mono);color:var(--ink);font-weight:600;text-align:right}
+  .knob{margin:6px 0 12px}
+  .knob label{display:block;font-size:13.5px;color:var(--dim);margin-bottom:4px}
+  .knob input[type=range]{width:100%}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{font:12.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;border-radius:8px;
+              padding:5px 12px;color:#3f4c63;cursor:pointer}
+  .seg button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">10 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 9 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/cp-boundary-fp8-comm/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CP 边界的 FP8 通信：AllGather 先量化、ReduceScatter 把求和移出 wire</span><span class="sm-rail-m">10 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</span><span class="sm-rail-m">10 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-rail-m">18 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+<div class="crumb">
+  <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>
+  <span>comm-parallel</span><span class="sep">/</span>
+  <span>cp-boundary-fp8-comm</span>
+</div>
+
+<h1>CP 边界的 FP8 通信：AllGather 先量化、ReduceScatter 把求和移出 wire</h1>
+
+<div class="metarow">
+  <span>2026-11-16</span><span>Context Parallel</span><span>量化通信</span><span>AllGather</span>
+  <span>ReduceScatter</span><span>FP8</span><span>PCIe</span><span>Prefill</span>
+</div>
+
+<p class="lead">CP 边界每层有两次大块搬运：MoE 之前把 token 收齐（AllGather），MoE 之后把结果散回去（ReduceScatter）。这两次搬的都是残差流，BF16，每个 MoE 层都来一遍，而单机 PCIe 的带宽就那么点。把精度换成线上字节：AG 在 gather 之前先量化，RS 干脆把「求和」这件事从线上搬到本地 FP32 里做 —— 线上字节约减一半。</p>
+
+<div class="nav">
+  <a href="#tldr">速览</a>
+  <a href="#where">这两次通信从哪来</a>
+  <a href="#bytes">先算搬多少字节</a>
+  <a href="#ag">AG：量化发生在读地址上</a>
+  <a href="#rs">RS：把求和移出 wire</a>
+  <a href="#gates">两道门与一个回退</a>
+  <a href="#evidence">证据</a>
+  <a href="#numeric">数值代价</a>
+  <a href="#calc">计算器</a>
+  <a href="#myth">常见误解</a>
+  <a href="#quiz">自测</a>
+</div>
+
+<div class="panel">
+  <p style="margin:0"><b>术语约定</b>：并行维度沿用 SGLang flag 的写法（<code>tp_size</code> / <code>attn_cp_size</code>）；<code>rank</code>、<code>group</code>、<code>wire</code>、<code>payload</code>、<code>block</code>、<code>chunk</code> 保留英文——它们要在源码、日志和命令行里 round-trip。本文只讲单机 8 卡、<code>tp=1</code> 的 CP8 prefill 形态；四机 PD 线 P 端的同类做法（多一层 FP4 预量化）在<a href="../prefill-cp4-quantized-comm/index.html">另一篇</a>里，两条线的配置不能互抄。</p>
+</div>
+
+<h2 id="tldr"><span class="n">01</span>速览</h2>
+
+<div class="tldr">
+  <h4>TL;DR</h4>
+  <ul>
+    <li><b>省的是线上字节，不是通信次数。</b> CP 边界的两次集合通信一次都没少，改的是每次搬多少 —— BF16 2 字节/元素变成 FP8 1 字节/元素，外加每 block 一个 FP32 scale。</li>
+    <li><b>RS 的改动比 AG 更本质。</b> AG 只是「先压再搬」；RS 是把归约的位置从 wire 里挪到本地 FP32 累加里 —— 线上只跑各 rank 的 partial，收到之后自己加。</li>
+    <li><b>量级是个位数，不是减半。</b> 线上字节约 50.2%，但通信只占 prefill 墙钟的一部分：实测端到端 +8.39%（16K→512）与 +9.93%（长输入冷前缀），RS 在此之上再 +8.55% / +10.48%。</li>
+    <li><b>两道门决定它会不会生效。</b> 行数少于 256 一律回退 BF16（固定量化成本吃掉收益）；block 必须是能整除 4096 的 2 的幂。另有一条反向门：确定性推理关掉 RS 新路径。</li>
+    <li><b>不是逐位无损，且当前镜像没有重做单变量消融。</b> 数值路径变了，质量验收仍挂着。引用这些数字时必须标「历史同方案」。</li>
+  </ul>
+</div>
+
+<h2 id="where"><span class="n">02</span>这两次通信从哪来</h2>
+
+<p>先把位置说清楚，否则后面所有字节数都没法对账。</p>
+
+<p>TP8 prefill 里，每张卡只有 8 个注意力头，所以注意力输出必须跨卡求和 —— 每层一次 AllReduce。切到 CP8 之后，<b>每个 token 的全部注意力头都在同一张卡上</b>，那次 AllReduce 直接消失，token 的输出在卡内就是完整的。</p>
+
+<p>但 MoE 切的是权重，不是 token：本卡负责的那份专家权重，必须见过这一批里的<b>所有</b> token 才有意义。于是重心从「按头求和」换成了「按 token 收齐 / 散回」：</p>
+
+<div class="flow">
+  <div class="st"><h6>① 注意力输出</h6><p>CP8 下 token 在卡内完整，<b>无跨卡求和</b></p><div class="g">省掉一次 AllReduce</div></div>
+  <div class="st"><h6>② MoE 之前</h6><p>把 8 张卡各 1024 行的 token <b>收齐成 8192 行</b></p><div class="w">新增一次 AllGather</div></div>
+  <div class="st"><h6>③ MoE 之后</h6><p>把全量行的结果 <b>散回各卡自己的 token</b></p><div class="w">新增一次 ReduceScatter</div></div>
+  <div class="st"><h6>④ 残差回到本卡</h6><p>下一层从本卡的 1024 行接着算</p><div class="g">回到 CP 布局</div></div>
+</div>
+
+<p>这两次搬的东西一样：<b>残差流</b>（<code>hidden_states</code>），宽度是 hidden，行数是全量 chunk 的行数，dtype 是 BF16，每个 MoE 层各来一遍 —— 层数越多，这两笔账越沉。用一台 8 卡 PCIe 单机的 GLM 系列 MoE 部署实测，切换前 TP8 的通信是 349.51 ms、CP8 重构后是 275.71 ms —— 注意<b>变少</b>了，因为消失的那次 AllReduce 比新增的 AG+RS 更贵；但剩下的 275.71 ms 里，这两次搬运就是最大的两块。</p>
+
+<div class="oknote">
+  <b>为什么这两块偏偏是 PCIe 的痛处</b>：它们不是小消息。一个 8192 行的 chunk、hidden 数千，单次就是百 MB 量级（8192 × 6144 × 2 B ≈ 100 MB），正好落在「带宽决定一切」的区间里。而 PCIe 单机没有 NVLink，8 张卡还分处两个四卡组、跨组要过主机桥。
+</div>
+
+<h2 id="bytes"><span class="n">03</span>先算搬多少字节</h2>
+
+<p>AllGather 和 ReduceScatter 在「每 rank 收多少」这件事上是同一个数：</p>
+
+<pre><code><span class="cm">// 一次集合通信，每 rank 收到的字节（N = 组内 rank 数）</span>
+<span class="hl">每 rank 收</span> = <span class="hl">(N − 1) / N</span> × P        <span class="cm">// P = 这次通信的载荷</span>
+<span class="hl">P</span>         = rows × hidden × bytes_per_elem
+
+<span class="cm">// BF16：bytes_per_elem = 2</span>
+<span class="cm">// FP8 + scale：bytes_per_elem = 1，另加每个 block 4 字节的 FP32 scale</span></code></pre>
+
+<p>所以「省多少」只有两个乘数：<b>元素位宽</b>和<b>scale 的块度</b>。按 block = 1024 列算，scale 的开销是 4 / 1024 = 0.39% 的载荷，几乎可以忽略：</p>
+
+<div class="wbars">
+  <div class="wb">
+    <div class="cap"><span>BF16 线上字节（基准）</span><b>100%</b></div>
+    <div class="track"><div class="seg bf" style="width:100%">2 字节 / 元素</div></div>
+  </div>
+  <div class="wb">
+    <div class="cap"><span>FP8 payload + FP32 scale（block = 1024）</span><b>50.2%</b></div>
+    <div class="track">
+      <div class="seg pay" style="width:50%">FP8 payload 50%</div>
+      <div class="seg scl" style="width:0.392%"></div>
+      <div class="seg save" style="width:49.6%">省下 49.6%</div>
+    </div>
+  </div>
+  <div class="lg">
+    <span class="a"><i></i>FP8 payload</span>
+    <span class="b"><i></i>FP32 scale（每 1024 列一个，占 0.39%）</span>
+    <span class="c"><i></i>省下的字节</span>
+    <span class="d"><i></i>BF16 原始</span>
+  </div>
+</div>
+
+<p class="hint">这张条是按 <code>block=1024</code> 推出来的算术，不是实测读数。block 越小 scale 开销越大：block=128 时是 3.1%，仍然值得做；block=32 时升到 12.5%，就该重新算这笔账了（计算器里可以直接拖）。</p>
+
+<div class="note">
+  <b>别把这个 50% 当端到端收益。</b> 线上字节减半 ≠ 墙钟减半：通信只占 prefill 时间的一部分，而且量化本身要花算力。第 06 节的实测是个位数。
+</div>
+
+<h2 id="ag"><span class="n">04</span>AG：量化发生在读地址上</h2>
+
+<p>AllGather 改起来直白：<b>在 gather 之前先把本地那份压成 FP8</b>，wire 上就只有 FP8 payload 和每 block 的 FP32 scale。</p>
+
+<p>关键在于「先」字落在哪。如果实现是 <code>把 BF16 复制进一块缓冲区 → 再扫一遍做量化 → 再 gather</code>，那多出来的读写会把省下的带宽又吃回去。这里的做法是<b>把量化折进 gather 的读地址</b>：内核按目标布局去读本地 BF16 源数据时顺手转换，写进 wire 缓冲区的就已经是 FP8 —— 元素只被读一次、写一次，没有中间那一趟。</p>
+
+<pre><code><span class="cm">// 形状差别（伪代码，不是源码）</span>
+<span class="cm">// 改之前：gather 直接搬 BF16</span>
+wire[r] = local_bf16[shard_indices]
+
+<span class="cm">// 改之后：读的时候顺手量化，并按 block 吐出 scale</span>
+<span class="hl">wire[r], scale[r]</span> = quantize_on_read(local_bf16, shard_indices, block)
+gather(wire, scale)        <span class="cm">// wire 上只有 1 字节/元素</span></code></pre>
+
+<p>为什么这条对 prefill 特别值：prefill 的行数是 chunk 决定的（一个满 chunk 8192 行），载荷大、量化摊得薄；而 decode 的载荷只有几 MB 量级，固定成本吃不住 —— 这也是为什么同一族的量化思路在 decode 上普遍不划算。</p>
+
+<h2 id="rs"><span class="n">05</span>RS：把求和移出 wire</h2>
+
+<p>ReduceScatter 的改法不一样，也是这一页真正值得记的一点。</p>
+
+<p>常规的 reduce-scatter，<b>求和发生在通信内部</b>：数据在 ring 上转，每跳把收到的段累加上去，最后每个 rank 手上是一段「已经加好的」BF16。这么做省事，但有两个后果：</p>
+<ul>
+  <li>线上搬的每一段都必须保持足够精度 —— 因为它已经是求和结果的一部分，误差会被后续累加放大；</li>
+  <li>累加发生在 wire 上，你无法选择用什么精度做加法。</li>
+</ul>
+
+<p>这里的做法是把这两件事拆开：<b>线上只搬各 rank 的 FP8 partial，不做任何加法；收到之后在本地用 FP32 累加。</b></p>
+
+<div class="flow">
+  <div class="st"><h6>常规 RS（BF16）</h6><p>ring 上每跳累加，wire 上搬的是「部分和」</p><div class="w">2 字节/元素 · 累加在 wire 里</div></div>
+  <div class="st"><h6>本地求和 RS（FP8）</h6><p>wire 上只搬各 rank 的 partial，落盘后在本地 FP32 相加</p><div class="g">1 字节/元素 · 累加在 FP32 里</div></div>
+</div>
+
+<p>这样做的收益有两层，而且<b>只有第一层是带宽</b>：</p>
+
+<table class="cardmode">
+  <thead><tr><th>层次</th><th>改了什么</th><th>量级</th></tr></thead>
+  <tbody>
+    <tr><td class="k">字节</td><td data-label="改了什么">wire 上每元素 2 字节 → 1 字节，另加 0.39% 的 scale</td><td class="num" data-label="量级">≈ 50.2%</td></tr>
+    <tr class="em"><td class="k">精度预算</td><td data-label="改了什么">误差只来自「量化成 FP8」这一次，不来自「用 FP8 反复加」；加法的舍入留在 FP32</td><td class="num" data-label="量级">误差不随 N 放大</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>但这不等于「无损」。</b> 每个加数本身已经带了 FP8 的量化误差（e4m3 只有 3 位尾数，相对误差 6% 量级）；FP32 累加只是保证误差<b>不叠加</b>，不会把已经丢掉的信息找回来。所以它仍然是「改变数值路径」，仍然需要质量门。
+</div>
+
+<h2 id="gates"><span class="n">06</span>两道门与一个回退</h2>
+
+<table class="cardmode">
+  <thead><tr><th>条件</th><th>值</th><th>不满足时</th><th>为什么</th></tr></thead>
+  <tbody>
+    <tr class="em"><td class="k">行数门</td><td data-label="值"><code>MIN_ROWS = 256</code></td><td data-label="不满足时">回退 BF16</td><td data-label="为什么">量化的固定成本（转换 + 出 scale）与消息大小基本无关；行数太少时，省下的带宽盖不过这笔固定开销</td></tr>
+    <tr><td class="k">块度门</td><td data-label="值"><code>BLOCK</code> = 能整除 4096 的 2 的幂</td><td data-label="不满足时">配置非法</td><td data-label="为什么">实现按 4096 列切 tile；block 要能整除它，否则最后一块会跨 tile。合法取值：128 / 256 / 512 / 1024 / 2048 / 4096</td></tr>
+    <tr><td class="k">确定性门</td><td data-label="值">确定性推理开启</td><td data-label="不满足时">RS 新路径关闭</td><td data-label="为什么">本地 FP32 累加的次序与 wire 内累加不同，确定性推理要求可复现的加法顺序</td></tr>
+  </tbody>
+</table>
+
+<p>AG 与 RS 各自独立开关（<code>SGLANG_CP_AG_FP8</code> / <code>SGLANG_CP_RS_FP8</code>），但<b>在同一个 group 里必须全体一致</b>：集合通信的形状取决于它，一半开一半不开会直接形状不匹配。</p>
+
+<h2 id="evidence"><span class="n">07</span>证据：微基准与端到端</h2>
+
+<div class="chartrow">
+  <div class="chartcard">
+    <h2>两条边界，两段增量</h2>
+    <div class="sub">一档 = 1 个百分点 · 深墨 = 仅开 AG 的增量 · 中灰 = 在 AG 之上再开 RS 的增量</div>
+    <div class="chartwrap"><svg id="cpgain" viewBox="0 0 340 270" preserveAspectRatio="xMidYMid meet" role="img" aria-label="CP 边界 FP8 通信在两个负载档位下的两段端到端增量"></svg></div>
+    <div class="src">TICK ROWS · MONO-BASIC · PREFILL CP8</div>
+  </div>
+  <ul class="chartnotes">
+    <li><b>两把梯子测的是两段增量，不是两个时点的总量。</b> 深墨是「AG 单开」相对基线的增益；中灰是「AG 已开、再开 RS」的<b>增量</b>。想要一个总数，只能报「全开 vs 全关」的那一组对照。</li>
+    <li><b>四档都在个位数。</b> 最高的一档也只有 10.48 个百分点 —— 这正是「线上字节减半」折算成端到端之后的样子。</li>
+    <li><b>冷前缀比带缓存前缀更高一点。</b> 冷前缀没有可复用的 radix 命中，prefill 要真把整段算完，通信占比随之变高；两档之差只有 1.5 个百分点左右，别过度解读。</li>
+  </ul>
+</div>
+
+<table class="cardmode">
+  <thead><tr><th>项目</th><th>改之前</th><th>改之后</th><th>变化</th><th>证据强度</th></tr></thead>
+  <tbody>
+    <tr class="em"><td class="k">RS 单次微基准</td><td data-label="改之前">2.932 ms</td><td data-label="改之后">1.701 ms</td><td class="num good" data-label="变化">−42%（1.72×）</td><td data-label="证据强度">直接测量</td></tr>
+    <tr><td class="k">AG 端到端 · 16K→512</td><td data-label="改之前">基线</td><td data-label="改之后">+8.39%</td><td class="num good" data-label="变化">+8.39 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+    <tr><td class="k">AG 端到端 · 冷前缀</td><td data-label="改之前">基线</td><td data-label="改之后">+9.93%</td><td class="num good" data-label="变化">+9.93 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+    <tr><td class="k">RS（在 AG 之上）· 16K→512</td><td data-label="改之前">仅 AG</td><td data-label="改之后">+8.55%</td><td class="num good" data-label="变化">+8.55 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+    <tr><td class="k">RS（在 AG 之上）· 冷前缀</td><td data-label="改之前">仅 AG</td><td data-label="改之后">+10.48%</td><td class="num good" data-label="变化">+10.48 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>口径必须说清楚</b>：这四档是<b>历史同方案</b>的实测，不是当前交付镜像重新跑出来的。当前镜像只验证了配置与调用链可核对，<b>没有重做 AG / RS 的单变量消融</b>，质量验收也还挂着。引用时请带上这句，否则很容易被读成「最新版本又涨了 10%」。
+</div>
+
+<p class="hint">另外注意 RS 那档的测法：它测的是「在 AG 已开的基础上再打开 RS」的增量，不是 RS 单独从基线起的收益。把两个数字相加是没有依据的。</p>
+
+<h2 id="numeric"><span class="n">08</span>数值代价与不可用的场合</h2>
+
+<ul>
+  <li><b>不是逐位无损。</b> AG 在 gather 前把 BF16 压成 FP8，RS 在发送前压成 FP8 —— 两处都改变了数值路径。下游任何对数值敏感的验收（GSM8K、质量对比）都要重新做。</li>
+  <li><b>确定性推理会关掉 RS 新路径。</b> 需要可复现结果时，RS 退回常规路径；AG 不受这条影响。</li>
+  <li><b>小批量场景不划算。</b> 行数掉到 256 以下就回退，别指望在 decode 或小 chunk 上看到收益。</li>
+  <li><b>换机器要重验。</b> 收益正比于「这次通信在墙钟里的占比」；换了网络（NVLink、跨机 IB）之后占比会变，收益可能消失甚至转负。</li>
+</ul>
+
+<h2 id="calc"><span class="n">09</span>动手算：你的形状会不会过门</h2>
+
+<div class="panel">
+  <div class="knob">
+    <label>每 rank 行数：<b id="vRows">2048</b>（chunk 16384 ÷ cp_size 8）</label>
+    <input type="range" id="kRows" min="128" max="8192" step="128" value="2048">
+  </div>
+  <div class="knob">
+    <label>hidden 宽度：<b id="vHid">6144</b> 列</label>
+    <input type="range" id="kHid" min="1024" max="20480" step="512" value="6144">
+  </div>
+  <div class="knob">
+    <label>block 大小（必须是能整除 4096 的 2 的幂）</label>
+    <div class="seg" id="kBlock">
+      <button data-v="128">128</button><button data-v="256">256</button>
+      <button data-v="512">512</button><button data-v="1024" aria-pressed="true">1024</button>
+      <button data-v="2048">2048</button>
+    </div>
+  </div>
+
+  <div class="calc">
+    <div class="cbox">
+      <h5>载荷 / 换算</h5>
+      <div class="row"><span>BF16 载荷 P</span><span id="oBf">24.0 MiB</span></div>
+      <div class="row"><span>FP8 payload</span><span id="oPay">12.0 MiB</span></div>
+      <div class="row"><span>scale 开销</span><span id="oScl">48 KiB</span></div>
+    </div>
+    <div class="cbox">
+      <h5>换算结果</h5>
+      <div class="row"><span>FP8 合计占 BF16</span><span id="oPct">50.2%</span></div>
+      <div class="row"><span>每次通信省下</span><span id="oSave">11.9 MiB</span></div>
+      <div class="row"><span>block 是否合法</span><span id="oLegal">合法</span></div>
+    </div>
+    <div class="cbox">
+      <h5>结论</h5>
+      <div class="row"><span>行数门（≥256）</span><span id="oGate">过门</span></div>
+      <div class="row"><span>每次通信省下的比例</span><span id="oRate">49.8%</span></div>
+      <div class="row"><span>每个 MoE 层省下（AG+RS）</span><span id="oLayer">—</span></div>
+    </div>
+  </div>
+  <p class="hint" style="margin:10px 0 0">只算载荷，不含协议头与对齐；「每个 MoE 层」按 AG + RS 各一次估。真实墙钟收益还取决于通信在你这套部署里的占比。</p>
+</div>
+
+<h2 id="myth"><span class="n">10</span>常见误解</h2>
+
+<div class="panel">
+  <h4>①「FP8 通信 = 通信时间减半」</h4>
+  <p>错。减半的是<b>字节</b>。墙钟取决于这次通信在关键路径上暴露了多少；实测端到端是个位数。而且量化本身要花算力，行数少的时候这笔账会反过来。</p>
+</div>
+
+<div class="panel">
+  <h4>②「它和 decode 端拆分轮数是同一件事」</h4>
+  <p>不是，是两条正交的轴。<a href="../decode-tp16-2level-comm/index.html">TP16 分层通信</a>那篇省的是<b>串行轮数</b>（15 → 8），页内明确写了「字节几乎没省，反而多了一次 stage」；这一页省的是<b>字节</b>，轮数一次没动。两条改动的收益不能相乘，也不能互相替代。</p>
+</div>
+
+<div class="panel">
+  <h4>③「AG 和 RS 的收益可以相加」</h4>
+  <p>不能。RS 的两档是在 AG 已经打开的基础上测的增量。真要报一个总数，只能报「AG + RS 全开 vs 都不开」的那一组对照。</p>
+</div>
+
+<div class="panel">
+  <h4>④「它是无损的优化」</h4>
+  <p>不是。它改的是数值路径。唯一能说的是：误差只来自一次量化，不会因为 8 个 partial 相加而放大 —— 但已经丢掉的精度找不回来。</p>
+</div>
+
+<h2 id="quiz"><span class="n">11</span>自测</h2>
+
+<details>
+  <summary>为什么 CP 边界是 AllGather + ReduceScatter，而不是一次 AllReduce？</summary>
+  <p>因为 CP 切的是 token（按位置交错分片），每个 token 的注意力输出在卡内就是完整的，不需要跨卡求和；真正需要跨卡的是 MoE —— 专家按权重切，本卡那份权重必须见过全部 token。所以是「收齐 token → 算 MoE → 把结果散回去」，正好是 AG + RS。</p>
+</details>
+
+<details>
+  <summary>AG 说「量化折进读地址」，省掉的是哪一步？</summary>
+  <p>省掉的是「先把 BF16 复制进一块中转缓冲区、再整体扫一遍做量化」这一趟。折进去之后元素只被读一次、写一次，写进 wire 的就已经是 FP8。</p>
+</details>
+
+<details>
+  <summary>RS 把求和移出 wire，改的到底是什么？</summary>
+  <p>把「加法」从通信内部（ring 上逐跳累加）挪到接收端本地（FP32 累加）。线上只搬各 rank 的 FP8 partial。收益是字节减半 + 误差不随 N 叠加；代价是数值路径改变、确定性推理要关掉新路径。</p>
+</details>
+
+<details>
+  <summary>为什么 block 必须是能整除 4096 的 2 的幂？</summary>
+  <p>实现按 4096 列切 tile，block 要能整除它才不会出现跨 tile 的最后一块。所以合法取值是 128 / 256 / 512 / 1024 / 2048 / 4096，3000 这类不是 2 的幂的数不合法。</p>
+</details>
+
+<details>
+  <summary>线上字节减半，为什么端到端只有 8–10 个百分点？</summary>
+  <p>因为通信只占 prefill 墙钟的一部分（另一部分是 GEMM 与按 token 重复的算子），而且量化本身要花算力、要出 scale。8–10 个百分点是「字节减半」经过占比折算之后的结果。</p>
+</details>
+
+<details>
+  <summary>什么情况下这套东西不该开？</summary>
+  <p>行数长期低于 256（小 chunk、decode）、需要确定性推理（RS 那条）、以及换了更高带宽的互联之后通信占比大幅下降的场景。换机器要重新测，不能沿用这台机器的结论。</p>
+</details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/dflash-pp-adaptation/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</b></span></a><a class="sm-pn-a sm-next" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html"><span class="sm-more-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</span><span class="sm-more-m">10 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html"><span class="sm-more-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-11-04</span></a><a class="sm-more-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html"><span class="sm-more-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-more-m">18 分钟<i aria-hidden="true"></i>2026-11-02</span></a><a class="sm-more-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html"><span class="sm-more-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-more-m">40 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html"><span class="sm-more-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html"><span class="sm-more-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-more-m">9 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html"><span class="sm-more-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-more-m">12 分钟<i aria-hidden="true"></i>2026-09-20</span></a><a class="sm-more-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><span class="sm-more-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-15</span></a></div></section>
+<!-- show-me:shell:end --><footer>
+  <p><b>数据来源</b>：一套单机 8 卡 PCIe（无 NVLink）上的 GLM 系列 MoE 部署的优化审计记录 —— CP8 / tp=1 的 prefill 形态，包含 AG / RS 的端到端对照、RS 单次微基准与门控配置。字节构成条与计算器是按 <code>block</code> 块度推出来的算术，<b>不是实测读数</b>；四档端到端增益来自<b>历史同方案</b>测量，当前镜像未重做单变量消融，质量验收未完成。</p>
+  <p><b>脱敏说明</b>：本文保留全部结构与数值（门控阈值、block 取值、字节比例、微基准与端到端数字），去掉了内部主机名、内部仓库与运行时路径、内部配方与镜像标识、内部环境变量前缀（下文统一写作 <code>SGLANG_CP_AG_FP8</code> / <code>SGLANG_CP_RS_FP8</code> / <code>MIN_ROWS</code> / <code>BLOCK</code>）。代码形状为伪代码，用于说明数据流，不是可编译的源码。</p>
+  <p><b>没做什么</b>：没有运行任何压测，没有重测 AG / RS 的单变量收益，没有做数值精度对比 —— 页内所有数字都引自审计记录。</p>
+  <div class="lic">
+    <span>内容 <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></span>
+    <span>·</span>
+    <span>代码 <a href="https://opensource.org/licenses/MIT">MIT</a></span>
+    <span>·</span>
+    <span>图表由 <a href="https://github.com/larashero3-dotcom/lieflat-charts">lieflat-charts</a> 模板与 token 生成，该部分遵循 PolyForm Noncommercial 1.0.0</span>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ── lieflat Mono token（内联；值取自 mono-tokens.js） ── */
+const INK='#1C1C1A',MUTED='#8F8E88',FAINT='#C6C5BF',GRID='#DEDDD6',MID='#6A6963';
+const NS='http://www.w3.org/2000/svg';
+const el=(p,t,a)=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);p.appendChild(n);return n};
+const txt=(p,a,s)=>{const n=el(p,'text',a);n.textContent=s;return n};
+const tip=(n,s)=>{const t=document.createElementNS(NS,'title');t.textContent=s;n.appendChild(t)};
+const rnd=(i,k)=>Math.abs(((i*73856093)^(k*19349663))%1000)/1000;
+const obsReveal=(id,fn)=>{
+  const n=document.getElementById(id);
+  const go=()=>{n.innerHTML='';fn(n)};
+  const io=new IntersectionObserver(es=>{if(es[0].isIntersecting){go();io.disconnect()}},{threshold:.3});
+  io.observe(n);
+  n.style.cursor='pointer';
+  n.addEventListener('click',go);
+};
+
+// ════ F5 · tick rows：四个场景 / 两段增量，一档 = 1 个百分点 ════
+// 深墨 = 仅 AG 相对基线的增量；中灰 = AG 已开之上再开 RS 的增量（两段基准不同，颜色区分）
+(()=>{
+const D=[
+  ['AG · 16K→512', 8.39, INK, false],
+  ['AG · 冷前缀',   9.93, INK, false],
+  ['RS · 16K→512', 8.55, MID, true ],
+  ['RS · 冷前缀',  10.48, MID, true ],
+];
+obsReveal('cpgain',s=>{
+  const y0=i=>76+i*46, X0=128, PX=15.4;
+  // rim 标尺：每 2 个百分点一条导轨，标 0 / 4 / 8
+  for(let pp=0;pp<=10;pp+=2){
+    const x=X0+pp*PX;
+    el(s,'line',{x1:x,y1:54,x2:x,y2:66,stroke:pp===0?MUTED:FAINT,'stroke-width':pp===0?.8:.6,class:'fade'});
+    el(s,'line',{x1:x,y1:66,x2:x,y2:236,stroke:pp===0?GRID:'#E8E7E1','stroke-width':.5,
+      'stroke-dasharray':pp===0?'0':'2 3',class:'fade'});
+    if(pp%4===0)txt(s,{x:x,y:48,'font-size':7,'font-weight':600,fill:FAINT,
+      'text-anchor':'middle','letter-spacing':'.06em',class:'fade'},pp);
+  }
+  D.forEach(([name,v,c,inc],i)=>{
+    const y=y0(i);
+    txt(s,{x:X0-13,y:y+3,'font-size':8,'font-weight':700,fill:inc?MID:'#4A4944','text-anchor':'end',
+      'letter-spacing':'.02em',class:'fade',style:`animation-delay:${i*.08}s`},name);
+    // 满档参考线（10 pp）
+    el(s,'line',{x1:X0,y1:y+9,x2:X0+10*PX,y2:y+9,stroke:GRID,'stroke-width':.6,
+      class:'fade',style:`animation-delay:${i*.08}s`});
+    const full=Math.floor(v), frac=v-full;
+    for(let k=0;k<full;k++){
+      const x=X0+k*PX+PX/2,h=10+rnd(k+1,i+2)*6;
+      el(s,'line',{x1:x,y1:y+9,x2:x,y2:y+9-h,stroke:c,'stroke-width':.9,
+        opacity:.55+rnd(k+3,i+5)*.45,class:'fade',style:`animation-delay:${i*.08+k*.012}s`});
+      if(k%5===4)el(s,'circle',{cx:x,cy:y+13,r:.8,fill:FAINT,
+        class:'fade',style:`animation-delay:${i*.08+k*.012}s`});
+    }
+    if(frac>0.01){
+      const x=X0+full*PX+PX/2, h=(10+rnd(full+1,i+2)*6)*frac;
+      el(s,'line',{x1:x,y1:y+9,x2:x,y2:y+9-h,stroke:c,'stroke-width':.9,opacity:.45,
+        class:'fade',style:`animation-delay:${i*.08+full*.012}s`});
+    }
+    const lab=txt(s,{x:X0+v*PX+10,y:y+4,'font-size':11,'font-weight':800,fill:c,
+      class:'fade',style:`animation-delay:${.4+i*.08}s`},v.toFixed(2));
+    tip(lab,`${name} — +${v} 百分点${inc?'（在 AG 已开之上再取得）':''}`);
+  });
+  txt(s,{x:170,y:252,'font-size':7,'font-weight':600,fill:FAINT,'text-anchor':'middle',
+    'letter-spacing':'.12em',class:'fade',style:'animation-delay:.9s'},
+    'ONE RUNG = ONE PERCENTAGE POINT · DOT MARKS EVERY FIFTH');
+
+});
+})();
+
+// ── 计算器 ──
+(()=>{
+const rows=document.getElementById('kRows'), hid=document.getElementById('kHid');
+const vRows=document.getElementById('vRows'), vHid=document.getElementById('vHid');
+const segBox=document.getElementById('kBlock');
+let block=1024;
+const LEGAL=[128,256,512,1024,2048,4096];
+const fmt=(b)=>{
+  if(b>=1024*1024*1024)return (b/1024/1024/1024).toFixed(2)+' GiB';
+  if(b>=1024*1024)return (b/1024/1024).toFixed(1)+' MiB';
+  if(b>=1024)return (b/1024).toFixed(1)+' KiB';
+  return b.toFixed(0)+' B';
+};
+const render=()=>{
+  const R=+rows.value, H=+hid.value;
+  const bf=R*H*2, pay=R*H*1, blocks=Math.ceil(H/block), scl=R*blocks*4;
+  const tot=pay+scl;
+  vRows.textContent=R; vHid.textContent=H;
+  document.getElementById('oBf').textContent=fmt(bf);
+  document.getElementById('oPay').textContent=fmt(pay);
+  document.getElementById('oScl').textContent=fmt(scl);
+  document.getElementById('oPct').textContent=(tot/bf*100).toFixed(1)+'%';
+  document.getElementById('oSave').textContent=fmt(bf-tot);
+  document.getElementById('oRate').textContent=((bf-tot)/bf*100).toFixed(1)+'%';
+  const legal=LEGAL.includes(block)&&4096%block===0;
+  document.getElementById('oLegal').textContent=legal?'合法':'非法';
+  document.getElementById('oLegal').className=legal?'':'flat';
+  const gate=R>=256;
+  document.getElementById('oGate').textContent=gate?'过门':'回退 BF16';
+  document.getElementById('oGate').className=gate?'good':'flat';
+  document.getElementById('oLayer').textContent=gate?fmt((bf-tot)*2):'0（已回退）';
+};
+segBox.addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  [...segBox.querySelectorAll('button')].forEach(x=>x.setAttribute('aria-pressed','false'));
+  b.setAttribute('aria-pressed','true'); block=+b.dataset.v; render();
+});
+rows.addEventListener('input',render); hid.addEventListener('input',render);
+render();
+})();
+</script>
+</body>
+</html>
