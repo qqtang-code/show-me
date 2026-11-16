@@ -1,0 +1,26 @@
+{
+  "title": "P 端 A/B：TP4×PP2 与 TP8+LayerSplit 到底差在哪",
+  "slug": "pp-vs-layersplit-prefill",
+  "category": "inference-systems",
+  "date": "2026-11-16",
+  "tags": ["SGLang", "LayerSplit", "pipeline parallel", "prefill CP", "PD disaggregation", "bubble", "KV cache", "选型"],
+  "one_liner": "两者都是 PD 的 prefill 侧、都是 8 卡、聚合算力完全一样 —— 所以差别只在「哪个的浪费更小」。PP2 每卡持 ⌈L/2⌉ 层 KV，浪费 1/(m+1) 在流水线 bubble 上；LayerSplit(S=8) 每卡 ⌈L/8⌉+1 层，浪费 (L−⌈L/S⌉)×池容量×b/带宽 在整层广播上。两种浪费可换算成同一单位：按 55 GB/s、L=61、m=4 算，交叉点约 88k token —— 池子更小选 LayerSplit，更大选 PP2。附两者的 TTFT 形态差异、与 chunk 大小的敏感性差异、以及「PP 有旋钮可调、LayerSplit 没有」这条运维结论。",
+  "artifact": "index.html",
+  "extra_files": ["notes.md"],
+  "session_ref": "",
+  "cwd": "inference-systems/pp-vs-layersplit-prefill",
+  "sources": [
+    "SGLang v0.5.23 源码：mem_cache/dsa_cache_layer_split.py（_broadcast_tensor_from_owner 的整层语义、prefetch_kv_buffer 深度 1）",
+    "SGLang v0.5.23 源码：layers/cp/utils.py（层归属）、runtime_context.py:73-76（attn_tp = tp // dp // cp）",
+    "SGLang v0.5.23 源码：disaggregation/prefill.py（每 rank 只上报自己那段连续层）",
+    "SGLang v0.5.23 文档：docs/docs/advanced_features/pipeline_parallelism.mdx（bubble 口径与 dynamic chunking）",
+    "交叉点（~88k token）、每卡层数、bubble 与广播毫秒数均由公式推导，非运行时实测"
+  ],
+  "visibility": "public",
+  "redactions": [
+    "本地 checkout 的绝对路径",
+    "内部模型版本号（正文只写 GLM-DSA / 权重占位）",
+    "会话标识"
+  ],
+  "enriched": "2026-11-16"
+}

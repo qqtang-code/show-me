@@ -35,7 +35,8 @@
     "comm-parallel/sglang-tp8-ep1-4-8-mixtral",
     "comm-parallel/decode-tp16-2level-comm",
     "inference-systems/sglang-layer-split",
-    "inference-systems/pp-vs-layer-split-8gpu"
+    "inference-systems/pp-vs-layer-split-8gpu",
+    "inference-systems/pp-vs-layersplit-prefill"
    ]
   },
   {
