@@ -298,7 +298,7 @@
 </style>
 <!-- show-me:shell:end --></head>
 <body><!-- show-me:shell:begin -->
-<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-tooling" style="--sm-cat:#a35a06" title="工具与方法"><i class="sm-dot" aria-hidden="true"></i><span>工具与方法</span></a><div class="sm-right"><span class="sm-min">8 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-tooling" style="--sm-cat:#a35a06" title="工具与方法"><i class="sm-dot" aria-hidden="true"></i><span>工具与方法</span></a><div class="sm-right"><span class="sm-min">10 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
 try{(function(){var b=document.getElementById('sm-progress'),
 u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
 p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
@@ -322,7 +322,7 @@ if(!(set instanceof Array))set=[];
 if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
 </script>
 <!-- show-me:shell:end --><!-- show-me:shell:begin -->
-<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 3 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../tooling/host-side-knobs/index.html" style="--sm-cat:#a35a06" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">主机侧的四项：NCCL 的 SYS 路径、NUMA 绑定、CPU governor、host 分词</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../tooling/show-me-knowledge-base-review/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">show-me 知识库体检：改了什么，以及为什么这么改</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../tooling/torchrun-launch-internals/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-rail-m">20 分钟</span></a></div></nav>
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 3 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../tooling/host-side-knobs/index.html" style="--sm-cat:#a35a06" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">主机侧的四项：NCCL 的 SYS 路径、NUMA 绑定、CPU governor、host 分词</span><span class="sm-rail-m">10 分钟</span></a><a class="sm-rail-a" href="../../tooling/show-me-knowledge-base-review/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">show-me 知识库体检：改了什么，以及为什么这么改</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../tooling/torchrun-launch-internals/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-rail-m">20 分钟</span></a></div></nav>
 <!-- show-me:shell:end -->
 <div class="wrap">
 
@@ -377,7 +377,9 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
 
 <h2 id="why"><span class="n">02</span>为什么这四项要单独一页</h2>
 
-<p>因为它们有一个共同的失败模式：<b>看起来像通用参数，实际是本机事实</b>。</p>
+<p>先把一件事说清楚：<b>这四项不是同一台机器上的一组实验</b>。它们分属三个不同的部署角色 —— NCCL 路径与 CPU/NUMA 来自单机 8 卡的 Flash 线，D 侧 PCIe-IPC 来自四机 PD 线的 decode 侧，并行分词那项则横跨 P / D 两侧（两边配置相反）。把它们的数字凑成「一套部署的收益」是错的，下面每项都会标出处。</p>
+
+<p>它们有一个共同的失败模式：<b>看起来像通用参数，实际是本机事实</b>。</p>
 
 <p><code>NCCL_P2P_LEVEL=SYS</code> 写进配置很容易，但它在单 socket 机器上可能什么都没变、在别的拓扑上还可能变慢；NUMA 那串数字抄错两位，性能会悄悄掉一半却没人报错；CPU governor 忘了恢复，第二天所有对比实验都不可信；分词加速更是典型的「改对了没感觉、改错了看不出」。</p>
 
@@ -397,7 +399,17 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
 
 <p>默认的 ring 构造可能在两个组之间来回跳：rank0→rank1（组内快）→rank2（组内快）……一旦排布跨了组，每一圈都有一跳走慢链路，而集合通信的耗时由<b>最慢那一跳</b>决定。</p>
 
-<p><code>NCCL_P2P_LEVEL=SYS</code> 的作用是让 P2P 走系统级路径（经主机），而不是让它误以为可以走更快的点对点；配套再关掉组内网络路径。这样 ring 的连通性选择和实际拓扑对齐，不会出现「以为在走组内、其实在绕桥」的错配。</p>
+<p><code>NCCL_P2P_LEVEL=SYS</code> 改的是 <b>NCCL 对「哪些卡之间算直连」的判定</b>，进而改 ring 的连通性构造。原始记录给的解释只有一句：<b>避免 ring 混用快慢链路</b>。「为什么把等级降到 SYS 反而更快」记录里没给机制 —— 下面三条能确定，第四条我不替它编：</p>
+
+<ul>
+  <li><b>耗时由最慢那一跳决定。</b> 只要 ring 里有一跳落在跨组慢链路上，整次通信就跟着降速 —— 这是「选路对齐」能撬动端到端的原因。</li>
+  <li><b>它改的是构造，不是链路带宽。</b> 同一台机器上并没有「SYS 链路比 PIX 更快」的测量。</li>
+  <li><b>它高度依赖拓扑事实。</b> 记录自己写了「不能照搬到其他机器」。</li>
+</ul>
+
+<div class="note">
+  <b>必须点名一处容易被读成矛盾的地方。</b> 本库另一篇（<a href="../../comm-parallel/decode-tp16-2level-comm/index.html">D 端 TP16 分层通信</a>）记着一次相反的结论：<b>「9 月试过一版机内分层 AllReduce，实测 PIX 与 SYS 带宽无差异、无收益，路线作废」</b>。两者不是同一件事，但也不能用「机器不同」打发 —— 那次判负的是<b>自研的分层实现形式</b>（拿 PIX/SYS 两条链路做对比），这次动的是 <b>NCCL 自己的选路等级</b>。所以本页的收益只能记在「ring 选路与拓扑对齐」上，<b>不能记成「SYS 链路更快」</b>—— 那样写会让读者在两页之间得出相反结论。审计里同族的「D 端 hierarchy」也是中性到更差、未纳入优化。
+</div>
 
 <div class="stat">
   <div><div class="k">128 MB ALL-REDUCE</div><div class="v">7.60 → 5.75 ms</div><div class="d">同一台机器、同一消息大小</div></div>
@@ -424,7 +436,7 @@ nvidia-smi topo -m                  <span class="cm"># 看 GPU 之间的连接�
 <span class="cm"># 查完才写进 inventory：前四张卡绑 node 0，后四张绑 node 2</span>
 <span class="hl">NUMA_NODES=0,0,0,0,2,2,2,2</span></code></pre>
 
-<p><b>为什么是 0 和 2 而不是 0 和 1？</b>因为这台机器上 CPU 侧的 node 编号本来就不连续（有未暴露的插槽/内存域），这是它的事实，不是规律。同一份配置搬到 2 socket 的普通机器上很可能直接绑错 —— 绑错了不会报错，只会变慢。</p>
+<p><b>为什么是 0 和 2 而不是 0 和 1？</b>记录里只有取值、没有解释；能确定的只是<b>这台机器上 CPU 侧的 node 编号不连续</b>。这正说明它是本机事实而不是规律 —— 同一份配置搬到别的 2 socket 机器上很可能直接绑错，而绑错了不会报错，只会变慢。</p>
 
 <div class="note">
   <b>这类配置最危险的地方是「静默」。</b> NUMA 绑错、绑到不存在的 node、或者忘了加亲和 —— 三种情况都不会让服务起不来，只会让延迟和抖动慢慢变差。所以它是必须写进部署清单、并在换机器时逐条复核的那一类。
@@ -466,6 +478,13 @@ nvidia-smi topo -m                  <span class="cm"># 看 GPU 之间的连接�
 <p>它值得进知识库的理由不是那 0.39%，而是两条判断：<b>①别把主机侧的收益记进 GPU 收益</b>；<b>②换 tokenizer 或对话模板后，要重新核对 token ID 与数据集是否对齐</b> —— 这条比性能重要得多，因为它会让「同一份输入」在两个版本上变成不同 token。</p>
 
 <h2 id="table"><span class="n">07</span>四项的适用前提</h2>
+
+<div class="note">
+  <b>三处必须记住的证据限制</b>（原始记录写得很明确）：
+  ①<b>四项的证据强度都是「中」</b>，不是「已验证」；
+  ②<b>本页后三项（NUMA / governor / 分词）的独立收益弱于 P2P SYS 那条</b>（记录原话是「NET/CPU 的独立收益弱于 P2P SYS 的证据」）—— 别把 +10.4% 这个量级套到它们头上；
+  ③<b>D 侧 PCIe-IPC 只覆盖它支持的形状，其他形状回退</b>，而且当前版本<b>缺少单项性能拆分</b>，不能把 PD 总收益归给这一项。
+</div>
 
 <table class="cardmode">
   <thead><tr><th>项</th><th>判据（什么情况下才成立）</th><th>不成立的后果</th><th>谁负责还原</th></tr></thead>
@@ -547,7 +566,7 @@ kMB.addEventListener('input',render); render();
 
 <details>
   <summary>为什么 <code>NCCL_P2P_LEVEL=SYS</code> 能提升集合通信？它到底改了哪一步？</summary>
-  <p>改的是 ring / 连通性的路径选择：让 P2P 走系统级路径，避免 ring 在双组拓扑上误用更快但实际会绕桥的通路。耗时由最慢那一跳决定，所以把错配的那一跳纠正过来，整次通信就跟着降。</p>
+  <p>改的是 NCCL 对「哪些卡算直连」的判定，进而改 ring 的连通性构造。原始记录只给了一句「避免 ring 混用快慢链路」，<b>没给「为什么把等级降下来反而更快」的机制</b>。能确定的是：耗时由最慢那一跳决定，所以只要选路对齐、让 ring 里不再有那一跳拖后腿，整次通信就跟着降。</p>
 </details>
 
 <details>

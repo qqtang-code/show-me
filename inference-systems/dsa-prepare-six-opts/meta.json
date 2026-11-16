@@ -1,5 +1,5 @@
 {
-  "title": "DSA 的准备阶段六项小优化：五项只在特定形状生效，一项是负向",
+  "title": "DSA 的准备阶段六项小优化：条件窄、净值小，还有一项是负向",
   "slug": "dsa-prepare-six-opts",
   "category": "inference-systems",
   "date": "2026-11-16",
@@ -9,7 +9,7 @@
     "Prefill",
     "元数据"
   ],
-  "one_liner": "六项都在「选 top-k 之前」：indexer 行块、SM wave 对齐、复用 absorbed-Q 布局、单页表视图、单 query 元数据、单请求批计划。五项只在 singleton + 大行数 + eager + SM120 下生效；indexer 分块 + Q 布局复用两项合计使 192K TTFT 约降 1.5%。单请求批计划单项曾 TTFT 只降 12 ms 而吞吐掉 3.94%——小优化叠多了会互相打架。",
+  "one_liner": "六项都在「选 top-k 之前」：indexer 行块、SM wave 对齐、复用 absorbed-Q 布局、单页表视图、单 query 元数据、单请求批计划。前提不是同一条：③⑤⑥ 挂 singleton、④ 挂 eager、①② 挂大行数 + SM120。indexer 分块 + Q 布局复用两项合计使 192K TTFT 约降 1.5%；单请求批计划单项曾 TTFT 只降 12 ms 而吞吐掉 3.94%——小优化叠多了会互相打架。",
   "artifact": "index.html",
   "extra_files": [],
   "session_ref": "",

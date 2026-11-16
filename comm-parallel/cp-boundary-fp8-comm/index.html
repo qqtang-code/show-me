@@ -314,7 +314,7 @@
 </style>
 <!-- show-me:shell:end --></head>
 <body><!-- show-me:shell:begin -->
-<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">10 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">11 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
 try{(function(){var b=document.getElementById('sm-progress'),
 u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
 p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
@@ -338,7 +338,7 @@ if(!(set instanceof Array))set=[];
 if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
 </script>
 <!-- show-me:shell:end --><!-- show-me:shell:begin -->
-<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 9 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/cp-boundary-fp8-comm/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CP 边界的 FP8 通信：AllGather 先量化、ReduceScatter 把求和移出 wire</span><span class="sm-rail-m">10 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</span><span class="sm-rail-m">10 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-rail-m">18 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 9 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/cp-boundary-fp8-comm/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CP 边界的 FP8 通信：AllGather 先量化、ReduceScatter 把求和移出 wire</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-rail-m">18 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
 <!-- show-me:shell:end -->
 <div class="wrap">
 
@@ -372,7 +372,7 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
 </div>
 
 <div class="panel">
-  <p style="margin:0"><b>术语约定</b>：并行维度沿用 SGLang flag 的写法（<code>tp_size</code> / <code>attn_cp_size</code>）；<code>rank</code>、<code>group</code>、<code>wire</code>、<code>payload</code>、<code>block</code>、<code>chunk</code> 保留英文——它们要在源码、日志和命令行里 round-trip。本文只讲单机 8 卡、<code>tp=1</code> 的 CP8 prefill 形态；四机 PD 线 P 端的同类做法（多一层 FP4 预量化）在<a href="../prefill-cp4-quantized-comm/index.html">另一篇</a>里，两条线的配置不能互抄。</p>
+  <p style="margin:0"><b>术语约定</b>：并行维度沿用 SGLang flag 的写法（<code>tp_size</code> / <code>attn_cp_size</code>）；<code>rank</code>、<code>group</code>、<code>wire</code>、<code>payload</code>、<code>block</code>、<code>chunk</code> 保留英文——它们要在源码、日志和命令行里 round-trip。本文只讲单机 8 卡、<b>attention 的 TP 为 1</b>（<code>tp_size</code> 仍是 8，只是注意力权重按 CP 复制）的 prefill 形态 —— 别把「attention TP=1」误读成「<code>--tp 1</code>」；四机 PD 线 P 端的同类做法（多一层 FP4 预量化）在<a href="../prefill-cp4-quantized-comm/index.html">另一篇</a>里，两条线的配置不能互抄。</p>
 </div>
 
 <h2 id="tldr"><span class="n">01</span>速览</h2>
@@ -403,10 +403,10 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
   <div class="st"><h6>④ 残差回到本卡</h6><p>下一层从本卡的 1024 行接着算</p><div class="g">回到 CP 布局</div></div>
 </div>
 
-<p>这两次搬的东西一样：<b>残差流</b>（<code>hidden_states</code>），宽度是 hidden，行数是全量 chunk 的行数，dtype 是 BF16，每个 MoE 层各来一遍 —— 层数越多，这两笔账越沉。用一台 8 卡 PCIe 单机的 GLM 系列 MoE 部署实测，切换前 TP8 的通信是 349.51 ms、CP8 重构后是 275.71 ms —— 注意<b>变少</b>了，因为消失的那次 AllReduce 比新增的 AG+RS 更贵；但剩下的 275.71 ms 里，这两次搬运就是最大的两块。</p>
+<p>这两次搬的东西一样：<b>残差流</b>（<code>hidden_states</code>），宽度是 hidden，行数是全量 chunk 的行数，dtype 是 BF16，每个 MoE 层各来一遍 —— 层数越多，这两笔账越沉。用一台 8 卡 PCIe 单机的 GLM 系列 MoE 部署实测（<b>这两个数引自本库 <a href="../prefill-cp8-decode-tp8/index.html">Prefill CP8 / Decode TP8</a> 那篇，审计记录里没有这两项</b>），切换前 TP8 的通信是 349.51 ms、CP8 重构后是 275.71 ms —— 注意<b>变少</b>了，因为消失的那次 AllReduce 比新增的 AG+RS 更贵；但剩下的 275.71 ms 里，这两次搬运就是最大的两块。</p>
 
 <div class="oknote">
-  <b>为什么这两块偏偏是 PCIe 的痛处</b>：它们不是小消息。一个 8192 行的 chunk、hidden 数千，单次就是百 MB 量级（8192 × 6144 × 2 B ≈ 100 MB），正好落在「带宽决定一切」的区间里。而 PCIe 单机没有 NVLink，8 张卡还分处两个四卡组、跨组要过主机桥。
+  <b>为什么这两块偏偏是 PCIe 的痛处</b>：它们不是小消息。一个 8192 行的 chunk、hidden 数千，单次就是百 MB 量级（按 hidden 6144 举例：8192 × 6144 × 2 B ≈ 100 MB；<b>hidden 的取值原始审计记录没给</b>，这里取自本库另一篇的部署口径），正好落在「带宽决定一切」的区间里。而 PCIe 单机没有 NVLink，8 张卡还分处两个四卡组、跨组要过主机桥。
 </div>
 
 <h2 id="bytes"><span class="n">03</span>先算搬多少字节</h2>
@@ -420,7 +420,7 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
 <span class="cm">// BF16：bytes_per_elem = 2</span>
 <span class="cm">// FP8 + scale：bytes_per_elem = 1，另加每个 block 4 字节的 FP32 scale</span></code></pre>
 
-<p>所以「省多少」只有两个乘数：<b>元素位宽</b>和<b>scale 的块度</b>。按 block = 1024 列算，scale 的开销是 4 / 1024 = 0.39% 的载荷，几乎可以忽略：</p>
+<p>所以「省多少」只有两个乘数：<b>元素位宽</b>和<b>scale 的块度</b>。按 <b>RS 侧</b>的 block = 1024 列算，scale 的开销是 4 / 1024 = 0.39% 的载荷，几乎可以忽略（<b>AG 侧的块度原始记录没给</b>，下面按同一个值估算）：</p>
 
 <div class="wbars">
   <div class="wb">
@@ -431,14 +431,14 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
     <div class="cap"><span>FP8 payload + FP32 scale（block = 1024）</span><b>50.2%</b></div>
     <div class="track">
       <div class="seg pay" style="width:50%">FP8 payload 50%</div>
-      <div class="seg scl" style="width:0.392%"></div>
-      <div class="seg save" style="width:49.6%">省下 49.6%</div>
+      <div class="seg scl" style="width:0.195%"></div>
+      <div class="seg save" style="width:49.8%">省下 49.8%</div>
     </div>
   </div>
   <div class="lg">
     <span class="a"><i></i>FP8 payload</span>
     <span class="b"><i></i>FP32 scale（每 1024 列一个，占 0.39%）</span>
-    <span class="c"><i></i>省下的字节</span>
+    <span class="c"><i></i>省下的字节（49.8%）</span>
     <span class="d"><i></i>BF16 原始</span>
   </div>
 </div>
@@ -463,7 +463,7 @@ wire[r] = local_bf16[shard_indices]
 <span class="hl">wire[r], scale[r]</span> = quantize_on_read(local_bf16, shard_indices, block)
 gather(wire, scale)        <span class="cm">// wire 上只有 1 字节/元素</span></code></pre>
 
-<p>为什么这条对 prefill 特别值：prefill 的行数是 chunk 决定的（一个满 chunk 8192 行），载荷大、量化摊得薄；而 decode 的载荷只有几 MB 量级，固定成本吃不住 —— 这也是为什么同一族的量化思路在 decode 上普遍不划算。</p>
+<p>为什么这条对 prefill 特别值：prefill 的行数是 chunk 决定的（一个满 chunk 8192 行），载荷大、量化摊得薄；而 decode 的载荷只有几 MB 量级，固定成本吃不住。<b>这只说明「本页这条改法」在小行数下不划算</b>，不要推广成「所有量化通信在 decode 上都没用」—— 别的落点有别的门（见 <a href="../prefill-cp4-quantized-comm/index.html">P 端那篇</a>的 1024 行门）。</p>
 
 <h2 id="rs"><span class="n">05</span>RS：把求和移出 wire</h2>
 
@@ -493,7 +493,7 @@ gather(wire, scale)        <span class="cm">// wire 上只有 1 字节/元素</s
 </table>
 
 <div class="note">
-  <b>但这不等于「无损」。</b> 每个加数本身已经带了 FP8 的量化误差（e4m3 只有 3 位尾数，相对误差 6% 量级）；FP32 累加只是保证误差<b>不叠加</b>，不会把已经丢掉的信息找回来。所以它仍然是「改变数值路径」，仍然需要质量门。
+  <b>但这不等于「无损」。</b> 每个加数本身已经带了 FP8 的量化误差 —— e4m3 只有 3 位尾数，<b>单个数的相对精度约 6%</b>；有 per-block FP32 scale 时这个误差是相对该 block 的量级、不是相对整张量，所以别把「6%」读成「整段通信掉了 6% 精度」。FP32 累加只保证误差<b>不叠加</b>，找不回已经丢的信息。所以它仍然是「改变数值路径」，仍然需要质量门。
 </div>
 
 <h2 id="gates"><span class="n">06</span>两道门与一个回退</h2>
@@ -502,25 +502,27 @@ gather(wire, scale)        <span class="cm">// wire 上只有 1 字节/元素</s
   <thead><tr><th>条件</th><th>值</th><th>不满足时</th><th>为什么</th></tr></thead>
   <tbody>
     <tr class="em"><td class="k">行数门</td><td data-label="值"><code>MIN_ROWS = 256</code></td><td data-label="不满足时">回退 BF16</td><td data-label="为什么">量化的固定成本（转换 + 出 scale）与消息大小基本无关；行数太少时，省下的带宽盖不过这笔固定开销</td></tr>
-    <tr><td class="k">块度门</td><td data-label="值"><code>BLOCK</code> = 能整除 4096 的 2 的幂</td><td data-label="不满足时">配置非法</td><td data-label="为什么">实现按 4096 列切 tile；block 要能整除它，否则最后一块会跨 tile。合法取值：128 / 256 / 512 / 1024 / 2048 / 4096</td></tr>
+    <tr><td class="k">块度门</td><td data-label="值"><code>BLOCK</code> = 能整除 4096 的 2 的幂</td><td data-label="不满足时">配置非法</td><td data-label="为什么">实现按 4096 列切 tile，block 要能整除它。<b>「为什么是 4096」原始记录只给了这条硬约束、没给理由</b> —— 能确定的只是 block 必须是它的约数里那些 2 的幂。合法取值：128 / 256 / 512 / 1024 / 2048 / 4096</td></tr>
     <tr><td class="k">确定性门</td><td data-label="值">确定性推理开启</td><td data-label="不满足时">RS 新路径关闭</td><td data-label="为什么">本地 FP32 累加的次序与 wire 内累加不同，确定性推理要求可复现的加法顺序</td></tr>
   </tbody>
 </table>
 
-<p>AG 与 RS 各自独立开关（<code>SGLANG_CP_AG_FP8</code> / <code>SGLANG_CP_RS_FP8</code>），但<b>在同一个 group 里必须全体一致</b>：集合通信的形状取决于它，一半开一半不开会直接形状不匹配。</p>
+<p>AG 与 RS 各自独立开关，取值都是 <code>all</code>（<code>SGLANG_CP_AG_FP8=all</code> / <code>SGLANG_CP_RS_FP8=all</code>），并且<b>在同一个 group 里必须全体一致</b> —— 集合通信的形状取决于它，一半开一半不开会直接形状不匹配。（这条一致性要求是同族的 P 端量化通信记录里写明的；本项原始记录没单独声明，但集合通信的道理一样。）</p>
 
 <h2 id="evidence"><span class="n">07</span>证据：微基准与端到端</h2>
+
+<p class="hint">本项在审计里的证据强度是<b>中</b>：当前已启用、代码可核对，但性能主要来自历史同方案与组合对照，不是当前镜像上的单变量消融。</p>
 
 <div class="chartrow">
   <div class="chartcard">
     <h2>两条边界，两段增量</h2>
-    <div class="sub">一档 = 1 个百分点 · 深墨 = 仅开 AG 的增量 · 中灰 = 在 AG 之上再开 RS 的增量</div>
+    <div class="sub">一档 = 1% 的吞吐增益 · 深墨 = 仅开 AG 的增量 · 中灰 = 在 AG 之上再开 RS 的增量</div>
     <div class="chartwrap"><svg id="cpgain" viewBox="0 0 340 270" preserveAspectRatio="xMidYMid meet" role="img" aria-label="CP 边界 FP8 通信在两个负载档位下的两段端到端增量"></svg></div>
     <div class="src">TICK ROWS · MONO-BASIC · PREFILL CP8</div>
   </div>
   <ul class="chartnotes">
     <li><b>两把梯子测的是两段增量，不是两个时点的总量。</b> 深墨是「AG 单开」相对基线的增益；中灰是「AG 已开、再开 RS」的<b>增量</b>。想要一个总数，只能报「全开 vs 全关」的那一组对照。</li>
-    <li><b>四档都在个位数。</b> 最高的一档也只有 10.48 个百分点 —— 这正是「线上字节减半」折算成端到端之后的样子。</li>
+    <li><b>四档都在个位数。</b> 最高的一档也只有 10.48% —— 这正是「线上字节减半」折算成端到端之后的样子。</li>
     <li><b>冷前缀比带缓存前缀更高一点。</b> 冷前缀没有可复用的 radix 命中，prefill 要真把整段算完，通信占比随之变高；两档之差只有 1.5 个百分点左右，别过度解读。</li>
   </ul>
 </div>
@@ -529,10 +531,10 @@ gather(wire, scale)        <span class="cm">// wire 上只有 1 字节/元素</s
   <thead><tr><th>项目</th><th>改之前</th><th>改之后</th><th>变化</th><th>证据强度</th></tr></thead>
   <tbody>
     <tr class="em"><td class="k">RS 单次微基准</td><td data-label="改之前">2.932 ms</td><td data-label="改之后">1.701 ms</td><td class="num good" data-label="变化">−42%（1.72×）</td><td data-label="证据强度">直接测量</td></tr>
-    <tr><td class="k">AG 端到端 · 16K→512</td><td data-label="改之前">基线</td><td data-label="改之后">+8.39%</td><td class="num good" data-label="变化">+8.39 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
-    <tr><td class="k">AG 端到端 · 冷前缀</td><td data-label="改之前">基线</td><td data-label="改之后">+9.93%</td><td class="num good" data-label="变化">+9.93 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
-    <tr><td class="k">RS（在 AG 之上）· 16K→512</td><td data-label="改之前">仅 AG</td><td data-label="改之后">+8.55%</td><td class="num good" data-label="变化">+8.55 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
-    <tr><td class="k">RS（在 AG 之上）· 冷前缀</td><td data-label="改之前">仅 AG</td><td data-label="改之后">+10.48%</td><td class="num good" data-label="变化">+10.48 百分点</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+    <tr><td class="k">AG 端到端 · 16K→512</td><td data-label="改之前">基线</td><td data-label="改之后">+8.39%</td><td class="num good" data-label="变化">+8.39%</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+    <tr><td class="k">AG 端到端 · 冷前缀</td><td data-label="改之前">基线</td><td data-label="改之后">+9.93%</td><td class="num good" data-label="变化">+9.93%</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+    <tr><td class="k">RS（在 AG 之上）· 16K→512</td><td data-label="改之前">仅 AG</td><td data-label="改之后">+8.55%</td><td class="num good" data-label="变化">+8.55%</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
+    <tr><td class="k">RS（在 AG 之上）· 冷前缀</td><td data-label="改之前">仅 AG</td><td data-label="改之后">+10.48%</td><td class="num good" data-label="变化">+10.48%</td><td data-label="证据强度">同方案 GPU 实测</td></tr>
   </tbody>
 </table>
 
@@ -635,12 +637,12 @@ gather(wire, scale)        <span class="cm">// wire 上只有 1 字节/元素</s
 
 <details>
   <summary>为什么 block 必须是能整除 4096 的 2 的幂？</summary>
-  <p>实现按 4096 列切 tile，block 要能整除它才不会出现跨 tile 的最后一块。所以合法取值是 128 / 256 / 512 / 1024 / 2048 / 4096，3000 这类不是 2 的幂的数不合法。</p>
+  <p>实现按 4096 列切 tile，block 必须能整除它（否则最后一块会跨 tile —— 这条推论是我的解释，记录只给了「必须是能整除 4096 的 2 的幂」这个约束）。所以合法取值是 128 / 256 / 512 / 1024 / 2048 / 4096，3000 这类不是 2 的幂的数不合法。</p>
 </details>
 
 <details>
-  <summary>线上字节减半，为什么端到端只有 8–10 个百分点？</summary>
-  <p>因为通信只占 prefill 墙钟的一部分（另一部分是 GEMM 与按 token 重复的算子），而且量化本身要花算力、要出 scale。8–10 个百分点是「字节减半」经过占比折算之后的结果。</p>
+  <summary>线上字节减半，为什么端到端只有 8–10%？</summary>
+  <p>因为通信只占 prefill 墙钟的一部分（另一部分是 GEMM 与按 token 重复的算子），而且量化本身要花算力、要出 scale。8–10% 是「字节减半」经过占比折算之后的结果。</p>
 </details>
 
 <details>
@@ -649,9 +651,9 @@ gather(wire, scale)        <span class="cm">// wire 上只有 1 字节/元素</s
 </details>
 
 <!-- show-me:shell:begin -->
-<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/dflash-pp-adaptation/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</b></span></a><a class="sm-pn-a sm-next" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html"><span class="sm-more-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</span><span class="sm-more-m">10 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html"><span class="sm-more-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-11-04</span></a><a class="sm-more-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html"><span class="sm-more-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-more-m">18 分钟<i aria-hidden="true"></i>2026-11-02</span></a><a class="sm-more-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html"><span class="sm-more-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-more-m">40 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html"><span class="sm-more-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html"><span class="sm-more-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-more-m">9 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html"><span class="sm-more-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-more-m">12 分钟<i aria-hidden="true"></i>2026-09-20</span></a><a class="sm-more-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><span class="sm-more-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-15</span></a></div></section>
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/dflash-pp-adaptation/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</b></span></a><a class="sm-pn-a sm-next" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../comm-parallel/prefill-cp4-quantized-comm/index.html"><span class="sm-more-t">P 端 CP4 的量化通信三件套：MoE 先量化再 AllGather、quant-RS、CP KV 的 FP8 gather</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html"><span class="sm-more-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-11-04</span></a><a class="sm-more-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html"><span class="sm-more-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-more-m">18 分钟<i aria-hidden="true"></i>2026-11-02</span></a><a class="sm-more-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html"><span class="sm-more-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-more-m">40 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html"><span class="sm-more-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html"><span class="sm-more-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-more-m">9 分钟<i aria-hidden="true"></i>2026-09-22</span></a><a class="sm-more-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html"><span class="sm-more-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-more-m">12 分钟<i aria-hidden="true"></i>2026-09-20</span></a><a class="sm-more-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><span class="sm-more-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-15</span></a></div></section>
 <!-- show-me:shell:end --><footer>
-  <p><b>数据来源</b>：一套单机 8 卡 PCIe（无 NVLink）上的 GLM 系列 MoE 部署的优化审计记录 —— CP8 / tp=1 的 prefill 形态，包含 AG / RS 的端到端对照、RS 单次微基准与门控配置。字节构成条与计算器是按 <code>block</code> 块度推出来的算术，<b>不是实测读数</b>；四档端到端增益来自<b>历史同方案</b>测量，当前镜像未重做单变量消融，质量验收未完成。</p>
+  <p><b>数据来源</b>：一套单机 8 卡 PCIe（无 NVLink）上的 GLM 系列 MoE 部署的优化审计记录 —— CP8 / attention TP=1 的 prefill 形态，包含 AG / RS 的端到端对照、RS 单次微基准与门控配置。字节构成条与计算器是按 <code>block</code> 块度推出来的算术，<b>不是实测读数</b>；四档端到端增益来自<b>历史同方案</b>测量，当前镜像未重做单变量消融，质量验收未完成。</p>
   <p><b>脱敏说明</b>：本文保留全部结构与数值（门控阈值、block 取值、字节比例、微基准与端到端数字），去掉了内部主机名、内部仓库与运行时路径、内部配方与镜像标识、内部环境变量前缀（下文统一写作 <code>SGLANG_CP_AG_FP8</code> / <code>SGLANG_CP_RS_FP8</code> / <code>MIN_ROWS</code> / <code>BLOCK</code>）。代码形状为伪代码，用于说明数据流，不是可编译的源码。</p>
   <p><b>没做什么</b>：没有运行任何压测，没有重测 AG / RS 的单变量收益，没有做数值精度对比 —— 页内所有数字都引自审计记录。</p>
   <div class="lic">
@@ -682,7 +684,7 @@ const obsReveal=(id,fn)=>{
   n.addEventListener('click',go);
 };
 
-// ════ F5 · tick rows：四个场景 / 两段增量，一档 = 1 个百分点 ════
+// ════ F5 · tick rows：四个场景 / 两段增量，一档 = 1% 的吞吐增益 ════
 // 深墨 = 仅 AG 相对基线的增量；中灰 = AG 已开之上再开 RS 的增量（两段基准不同，颜色区分）
 (()=>{
 const D=[
@@ -693,7 +695,7 @@ const D=[
 ];
 obsReveal('cpgain',s=>{
   const y0=i=>76+i*46, X0=128, PX=15.4;
-  // rim 标尺：每 2 个百分点一条导轨，标 0 / 4 / 8
+  // rim 标尺：每 2% 一条导轨，标 0 / 4 / 8
   for(let pp=0;pp<=10;pp+=2){
     const x=X0+pp*PX;
     el(s,'line',{x1:x,y1:54,x2:x,y2:66,stroke:pp===0?MUTED:FAINT,'stroke-width':pp===0?.8:.6,class:'fade'});
