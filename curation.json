@@ -36,7 +36,8 @@
     "comm-parallel/decode-tp16-2level-comm",
     "inference-systems/sglang-layer-split",
     "inference-systems/pp-vs-layer-split-8gpu",
-    "inference-systems/pp-vs-layersplit-prefill"
+    "inference-systems/pp-vs-layersplit-prefill",
+    "inference-systems/prefill-192k-pp-vs-layersplit"
    ]
   },
   {

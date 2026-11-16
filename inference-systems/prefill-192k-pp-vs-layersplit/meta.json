@@ -1,0 +1,26 @@
+{
+  "title": "192k 输入的 P 端：TP4×PP2×CP4 与 TP8×CP4×LayerSplit4 谁更高效",
+  "slug": "prefill-192k-pp-vs-layersplit",
+  "category": "inference-systems",
+  "date": "2026-11-16",
+  "tags": ["SGLang", "LayerSplit", "pipeline parallel", "prefill CP", "192k 上下文", "prefix cache", "KV cache", "选型"],
+  "one_liner": "192k 下两者成本随什么缩放相反：PP 的开销跟「实际算多少 token」走（bubble = 1/(m+1) × t_chunk），LayerSplit 的开销跟「KV 池驻留多少 token」走（每前向 45 层 × 192k × 708B = 6.26 GB，与命中率无关）。90% 命中把计算量砍到 1/10、广播一分不少，所以选项 1 的优势被放大。唯一的反击是选项 2 的 attention 并行度 8 路（CP4×attn_tp2）对 4 路（CP4×attn_tp1），冷启动下可能略快；分水岭是互连带宽与 m，不是上下文长度本身。",
+  "artifact": "index.html",
+  "extra_files": ["notes.md"],
+  "session_ref": "",
+  "cwd": "inference-systems/prefill-192k-pp-vs-layersplit",
+  "sources": [
+    "SGLang v0.5.23 源码：mem_cache/dsa_cache_layer_split.py（_broadcast_tensor_from_owner 广播整个 remote_kv_buffer、prefetch_kv_buffer 深度 1）",
+    "SGLang v0.5.23 源码：mem_cache/memory_pool.py:5283（DSATokenToKVPool，size 是 token 数，故广播量 = max_total_num_tokens × b）",
+    "SGLang v0.5.23 源码：runtime_context.py:73-76（attn_tp = tp // dp // cp）、layers/cp/utils.py（⌈L/S⌉+1 层归属）",
+    "SGLang v0.5.23 文档：docs/docs/advanced_features/pipeline_parallelism.mdx（bubble 与 long-context 的非均匀性）",
+    "每卡 KV（4.31 / 2.37 GB）、每前向广播（6.26 GB / 113.8 ms）、前向次数均由公式推导，非运行时实测"
+  ],
+  "visibility": "public",
+  "redactions": [
+    "本地 checkout 的绝对路径",
+    "内部模型与分支名（正文只写 GLM-DSA / 占位）",
+    "会话标识"
+  ],
+  "enriched": "2026-11-16"
+}
