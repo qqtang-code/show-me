@@ -3,10 +3,21 @@
   "slug": "decode-dp-attention-dcp",
   "category": "inference-systems",
   "date": "2026-11-16",
-  "tags": ["DCP", "DPAttention", "HiSparse", "1M 上下文", "KV Cache", "MLA", "DSA", "容量模型"],
-  "one_liner": "单请求 1M 上下文要求逻辑 target 位置 ≥ 1,048,576，三条路都在这个数字上做乘法，但乘的对象不同：DCP 乘位置分片宽度（TP8×DCP4，269,952×4=1,079,808，纯 GPU）、DPAttention 把容量拆成 4 个独立池（TP16×attnDP4，每池 480,000×host3=1,440,000 或 600,000×DCP2=1,200,000）、HiSparse 乘 host/device 倍数（TP8，132,096×16=2,113,536，可驻留 2 条 1M）。DCP 的 gathered Q heads ×c 与本地 KV ÷c 相抵，核心 FLOPs 不变；index-K 既不随 DCP 分片也不随热集缩小，所以显存收益小于主 KV ÷c。附 owner rule、通用 buffer 公式、四个可复核算例、1M 单请求占用分解，以及每条结论对应的 SGLang 源码位置。",
+  "tags": [
+    "DCP",
+    "DPAttention",
+    "HiSparse",
+    "1M 上下文",
+    "KV Cache",
+    "MLA",
+    "DSA",
+    "容量模型"
+  ],
+  "one_liner": "单请求 1M 上下文要求逻辑 target 位置 ≥ 1,048,576，三条路乘的对象不同：DCP 乘位置分片宽度（TP8×DCP4，269,952×4=1,079,808，纯 GPU）、DPAttention 拆成 4 个独立池（每池 480,000×host3 或 600,000×DCP2）、HiSparse 乘 host/device 倍数（TP8，132,096×16=2,113,536）。index-K 不随 DCP 分片，显存收益小于主 KV ÷c。",
   "artifact": "index.html",
-  "extra_files": ["notes.md"],
+  "extra_files": [
+    "notes.md"
+  ],
   "session_ref": "",
   "cwd": "",
   "sources": [
@@ -21,6 +32,7 @@
     "sglang/python/sglang/srt/disaggregation/common/{utils,conn}.py：P→D DCP relayout 与 PD 解码端前置条件"
   ],
   "visibility": "internal",
+  "publish": true,
   "redactions": [
     "内部主机名、IP、端口映射、镜像仓库与容器/run id 已移除",
     "本地绝对路径与内部文档链接已移除，仅保留仓库相对源码锚点",

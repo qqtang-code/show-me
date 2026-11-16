@@ -3,16 +3,29 @@
   "slug": "allreduce-1stage-vs-2stage",
   "category": "comm-parallel",
   "date": "2026-09-15",
-  "tags": ["AllReduce", "张量并行", "通信优化", "PCIe", "投机解码", "Amdahl"],
+  "tags": [
+    "AllReduce",
+    "张量并行",
+    "通信优化",
+    "PCIe",
+    "投机解码",
+    "Amdahl"
+  ],
   "one_liner": "把 AllReduce 从广播式改成 reduce-scatter + all-gather，单次归约 907 → 222.6 µs；收益全部来自「少搬 4 倍字节」，端到端 +60% 对 Amdahl 上限 +76% 的兑现率 91%。",
   "artifact": "index.html",
-  "extra_files": ["allreduce-infographic.png"],
+  "extra_files": [
+    "allreduce-infographic.png"
+  ],
   "session_ref": "sess_0255fd71",
   "sources": [
     "2026-09 一次内部优化实验的实测数据（8 卡 PCIe 服务器 · TP8 · 投机解码 verify 负载）",
     "原始报告未公开；本页保留全部数字与推导，仅去除模型版本号与内部文档标识"
   ],
   "visibility": "public",
-  "redactions": ["模型版本号", "内部文档名称"],
+  "publish": true,
+  "redactions": [
+    "模型版本号",
+    "内部文档名称"
+  ],
   "enriched": "2026-09-19"
 }

@@ -28,12 +28,27 @@ import theme
 ROOT = Path(__file__).resolve().parent
 PORTAL_TEMPLATE = ROOT / "templates" / "portal.html"
 CURATION = ROOT / "curation.json"
+TAXONOMY = ROOT / "taxonomy.json"
 
 CATEGORIES = theme.CATEGORIES
 CAT_ZH = theme.CAT_ZH
 CAT_ORDER = theme.CAT_ORDER
 
 REQUIRED = ("title", "slug", "category", "date", "tags", "one_liner")
+
+# 公开仓库里不该出现的字面内容：本机绝对路径、完整 session id。
+# 这些是「已经脱敏过」的声明最容易滑掉的地方 —— meta.json 本身也是公开文件。
+ABS_PATH_RE = re.compile(
+    r"(?:^|[\s(\[（:：=,])"
+    r"(?:/(?:Users|home|mnt|opt|srv|data|workspace|root|private|var)/(?!\s)|[A-Za-z]:\\\\)"
+)
+SESSION_FULL_RE = re.compile(r"\bsess_[A-Za-z0-9]{13,}")
+
+# visibility 描述的是「原始材料的敏感度」，不是「是否已批准公开」；
+# 后者由 publish 决定。public-ok 是旧口径的混血值，构建时归一到 public。
+VISIBILITY_VALUES = ("public", "internal")
+VISIBILITY_ALIASES = {"public-ok": "public"}
+DEFAULT_PUBLISH = True
 
 SHELL_BEGIN = "<!-- show-me:shell:begin -->"
 SHELL_END = "<!-- show-me:shell:end -->"
@@ -241,19 +256,134 @@ def normalize_pages() -> list[str]:
     return touched
 
 
+def load_alias_map() -> dict[str, str]:
+    """读 taxonomy.json，得到「任意写法 → 规范写法」的映射。
+
+    标签是门户上唯一跨条目聚合的维度，放任自由写法会让 95 个标签里 75 个只出现一次。
+    归并只发生在展示层，各篇 meta.json 保留作者写下的原词。
+    """
+    if not TAXONOMY.exists():
+        return {}
+    raw = json.loads(TAXONOMY.read_text(encoding="utf-8"))
+    mapping: dict[str, str] = {}
+    for canonical, variants in (raw.get("aliases") or {}).items():
+        mapping[canonical] = canonical
+        for variant in variants:
+            mapping[str(variant)] = canonical
+    return mapping
+
+
+def normalize_tags(tags: list[str], aliases: dict[str, str]) -> list[str]:
+    """按词表归并标签，保留首次出现的顺序并去重。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        canonical = aliases.get(str(tag), str(tag))
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out
+
+
+def _walk_strings(obj, field: str = ""):
+    """递归产出 (字段路径, 字符串)，用来扫 meta 里的字面泄漏。"""
+    if isinstance(obj, str):
+        yield field, obj
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from _walk_strings(value, f"{field}.{key}" if field else str(key))
+    elif isinstance(obj, list):
+        for i, value in enumerate(obj):
+            yield from _walk_strings(value, f"{field}[{i}]")
+
+
+def scrub_meta(meta_path: Path, meta: dict) -> list[str]:
+    """把 meta.json 收敛到公开仓库口径，返回做过哪些修正（幂等）。
+
+    - cwd 是本机绝对路径时改写为仓库相对路径（仓库外则为空串），保留可回溯性但不出本机；
+    - visibility 的旧混血值 public-ok 归一到 public；
+    - 其余字段里若仍有绝对路径或完整 session id，直接中止构建 —— 这类内容一旦推上去
+      就无法从 git 历史里真正撤回，宁可卡在本地。
+    """
+    notes: list[str] = []
+
+    cwd = meta.get("cwd")
+    if isinstance(cwd, str) and cwd.strip():
+        path = Path(cwd)
+        if path.is_absolute():
+            try:
+                rel = path.resolve().relative_to(ROOT)
+                meta["cwd"] = "" if rel == Path(".") else rel.as_posix()
+            except ValueError:
+                meta["cwd"] = ""
+            notes.append("cwd 改写为仓库相对路径")
+
+    visibility = meta.get("visibility")
+    if isinstance(visibility, str) and visibility in VISIBILITY_ALIASES:
+        meta["visibility"] = VISIBILITY_ALIASES[visibility]
+        notes.append(f"visibility {visibility} → {meta['visibility']}")
+    if meta.get("visibility") not in VISIBILITY_VALUES:
+        raise SystemExit(
+            f"{meta_path.relative_to(ROOT).as_posix()}: visibility 只能是 "
+            f"{' / '.join(VISIBILITY_VALUES)}，当前 {meta.get('visibility')!r}"
+        )
+
+    leaks = []
+    for field, value in _walk_strings(meta):
+        if field == "cwd":
+            continue
+        if ABS_PATH_RE.search(value):
+            leaks.append(f"{field}: 本机绝对路径")
+        if SESSION_FULL_RE.search(value):
+            leaks.append(f"{field}: 完整 session id")
+    if leaks:
+        detail = "\n  ".join(leaks)
+        raise SystemExit(
+            f"{meta_path.relative_to(ROOT).as_posix()}: 有未脱敏内容，已中止（不打印原值）：\n  {detail}"
+        )
+
+    if notes:
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    return notes
+
+
 def load_entries() -> list[dict]:
     entries: list[dict] = []
+    unpublished: list[str] = []
+    notes: list[str] = []
+    aliases = load_alias_map()
+    merged_tags = 0
     for meta_path in sorted(ROOT.glob("*/*/meta.json")):
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         missing = [k for k in REQUIRED if k not in meta]
         if missing:
             raise SystemExit(f"{meta_path}: 缺少字段 {missing}")
 
+        fixed = scrub_meta(meta_path, meta)
+        if fixed:
+            notes.append(f"{meta_path.parent.name}: {'；'.join(fixed)}")
+
+        publish = meta.get("publish", DEFAULT_PUBLISH)
+        if not isinstance(publish, bool):
+            raise SystemExit(
+                f"{meta_path.relative_to(ROOT).as_posix()}: publish 必须是 true / false"
+            )
+        if not publish:
+            # 未批准公开：不进门户、不进 README、不参与上一篇/下一篇，避免半公开
+            unpublished.append(meta_path.parent.relative_to(ROOT).as_posix())
+            continue
+
         page_path = meta_path.parent / meta.get("artifact", "index.html")
         if not page_path.exists():
             raise SystemExit(f"{meta_path}: artifact 不存在 —— {page_path.name}")
 
         entry = dict(meta)
+        raw_tags = list(entry.get("tags") or [])
+        entry["tags"] = normalize_tags(raw_tags, aliases)
+        merged_tags += len(raw_tags) - len(entry["tags"])
         entry["_dir"] = meta_path.parent.relative_to(ROOT).as_posix()
         entry["_depth"] = 2
         entry["_root"] = "../" * 2
@@ -270,6 +400,13 @@ def load_entries() -> list[dict]:
         entry["_sections"] = info["sections"]
         entry["_minutes"] = info["minutes"]
         entries.append(entry)
+
+    for note in notes:
+        print(f"  脱敏修正 {note}", file=sys.stderr)
+    if merged_tags:
+        print(f"  标签词表归并：{merged_tags} 处重复/变体写法已合并", file=sys.stderr)
+    if unpublished:
+        print(f"  未发布（publish=false）：{len(unpublished)} 篇，已排除", file=sys.stderr)
 
     # 分类顺序 → 组内日期新→旧。这条顺序同时决定门户、上一篇/下一篇与分类侧栏。
     entries.sort(key=lambda e: e["date"], reverse=True)
@@ -326,7 +463,14 @@ def load_paths(entries: list[dict]) -> list[dict]:
             print(f"  ⚠ 路线「{p.get('name')}」里有不存在的条目，已跳过：{dropped}",
                   file=sys.stderr)
         if items:
-            paths.append({"name": p["name"], "desc": p.get("desc", ""), "items": items})
+            paths.append(
+                {
+                    "name": p["name"],
+                    "desc": p.get("desc", ""),
+                    "kind": p.get("kind", "path"),
+                    "items": items,
+                }
+            )
     return paths
 
 
@@ -353,6 +497,29 @@ def _esc(text) -> str:
     return _html.escape(str(text), quote=True)
 
 
+def render_recent(entries: list[dict], limit: int = 5) -> str:
+    """最近更新条：路线只覆盖一部分条目，新文章需要一个固定的入口，别沉在分类里。"""
+    latest = sorted(entries, key=lambda e: e["date"], reverse=True)[:limit]
+    rows = []
+    for e in latest:
+        rows.append(
+            '<a class="recent-a" href="{dir}/{art}" data-dir="{dir}">'
+            '<span class="rd">{date}</span>'
+            '<span class="rc" style="--c:{color}" aria-hidden="true"></span>'
+            '<span class="rt">{title}</span>'
+            '<span class="rm">{minutes} 分钟</span>'
+            "</a>".format(
+                dir=_esc(e["_dir"]),
+                art=_esc(e["artifact"]),
+                date=_esc(e["date"]),
+                color=_esc(e["_color"]),
+                title=_esc(e["title"]),
+                minutes=e["_minutes"],
+            )
+        )
+    return '<div class="recent">' + "".join(rows) + "</div>"
+
+
 def render_paths(paths: list[dict], by_dir: dict[str, dict]) -> str:
     if not paths:
         return '<p class="empty">还没有阅读路线，直接看下面的分类。</p>'
@@ -364,7 +531,7 @@ def render_paths(paths: list[dict], by_dir: dict[str, dict]) -> str:
             if not e:
                 continue
             items.append(
-                '<li><a href="{dir}/{art}">'
+                '<li><a href="{dir}/{art}" data-dir="{dir}">'
                 '<span class="pn">{n:02d}</span>'
                 '<span class="pt">{title}</span>'
                 '<span class="pm"><i style="--c:{c}"></i>{m} 分钟</span>'
@@ -377,12 +544,14 @@ def render_paths(paths: list[dict], by_dir: dict[str, dict]) -> str:
                     m=e["_minutes"],
                 )
             )
+        kind = path.get("kind", "path")
+        kind_label = "路线" if kind == "path" else "合集"
         blocks.append(
             '<div class="path">'
             '<div class="path-h">'
             f'<h3>{_esc(path["name"])}</h3>'
             f'<p>{_esc(path.get("desc", ""))}</p>'
-            f'<span class="path-n">{len(items)} 篇</span>'
+            f'<span class="path-n kind">{kind_label} · {len(items)} 篇</span>'
             "</div>"
             f'<ol class="path-items">{"".join(items)}</ol>'
             "</div>"
@@ -481,6 +650,7 @@ def render_portal(entries: list[dict], paths: list[dict], built: str) -> str:
     mapping = {
         "TOKENS": theme.TOKENS_CSS,
         "SITE": _json_literal(portal_payload(entries)),
+        "RECENT_HTML": render_recent(entries),
         "PATHS_HTML": render_paths(paths, by_dir),
         "CARDS_HTML": render_cards(entries),
         "TABS_HTML": render_tabs(entries),

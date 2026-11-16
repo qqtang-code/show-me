@@ -3,12 +3,26 @@
   "slug": "sglang-tp8-ep1-4-8-mixtral",
   "category": "comm-parallel",
   "date": "2026-11-02",
-  "tags": ["SGLang", "MoE", "专家并行", "TP8", "EP", "all-reduce", "all-to-all", "Mixtral", "并行组", "moe_tp", "源码走读"],
-  "one_liner": "在 SGLang v0.5.23 的默认 backend（moe_a2a_backend=none）下，--tp 8 --ep 1/4/8 的 MoE 段通信完全相同：都是同一个 _TP(8) 组上的一次 all-reduce，载荷 [T,4096] BF16，约 0.94 MiB/token。ep 改的是权重排布：ep=1 每 rank 存全部 8 个专家的 1/8 列，ep=4 存 2 个专家的 1/2 列（moe_tp=2），ep=8 存 1 个完整专家；每 rank 专家参数恒为 176.16M/层。真正引入 dispatch/combine all-to-all 的是 --moe-a2a-backend deepep 等后端，而它们会把 ep 强制改成 tp，使三种写法收敛到 ep=8。附并行组构造、调用链、通信/显存对照与可拖动账本。",
+  "tags": [
+    "SGLang",
+    "MoE",
+    "专家并行",
+    "TP8",
+    "EP",
+    "all-reduce",
+    "all-to-all",
+    "Mixtral",
+    "并行组",
+    "moe_tp",
+    "源码走读"
+  ],
+  "one_liner": "在 SGLang v0.5.23 的默认 backend（moe_a2a_backend=none）下，--tp 8 --ep 1/4/8 的 MoE 段通信完全相同：同一个 _TP(8) 组上的一次 all-reduce，载荷 [T,4096] BF16，约 0.94 MiB/token。ep 只改权重排布；引入 dispatch/combine all-to-all 的是 deepep 等后端，它们把 ep 强制改成 tp，三种写法收敛到 ep=8。",
   "artifact": "index.html",
-  "extra_files": ["notes.md"],
+  "extra_files": [
+    "notes.md"
+  ],
   "session_ref": "",
-  "cwd": "/Users/qqtang/Desktop/research/show-me",
+  "cwd": "",
   "sources": [
     "SGLang 官方仓库 github.com/sgl-project/sglang，tag v0.5.23，commit 297e54fd105e974cdf401e5b4d20253a22c16f90（2026-10-28）；GitHub Releases 页面最新发布为 v0.5.22（2026-10-19）",
     "python/sglang/srt/arg_groups/fields/parallel.py（tp_size/dp_size/attn_dp_size/moe_dp_size/ep_size 字段与默认值）、arg_groups/parallel_hook.py（moe_dp>1 时的 ep*moe_dp==tp 等约束）、arg_groups/overrides.py（_A2A_EP_SPANNING_BACKENDS 与 _a2a_ep_size 强制 ep=tp）、arg_groups/fields/exec_.py（moe_a2a_backend 默认 none）",
@@ -24,7 +38,8 @@
     "模型配置：huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1 的 config.json（hidden 4096、intermediate 14336、32 层、32 q 头、8 kv 头、8 experts、top-2、vocab 32000、BF16）",
     "显存与通信字节（11.68 GB/rank、16 KiB/token KV、0.94/0.63 MiB/token）由上述源码公式与 config 算术推导，非运行时实测"
   ],
-  "visibility": "public-ok",
+  "visibility": "public",
+  "publish": true,
   "redactions": [
     "本地 checkout 的绝对路径（正文只保留仓库相对路径）",
     "HuggingFace 镜像域名（正文只写模型 id 与 config.json）"

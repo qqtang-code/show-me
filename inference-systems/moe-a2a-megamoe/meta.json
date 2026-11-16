@@ -3,8 +3,18 @@
   "slug": "moe-a2a-megamoe",
   "category": "inference-systems",
   "date": "2026-09-21",
-  "tags": ["SGLang", "DeepGEMM", "MegaMoE", "MoE", "EP / A2A", "DeepEP", "FlashInfer", "对称内存", "源码走读"],
-  "one_liner": "对着 SGLang 与 DeepGEMM 源码讲三件事：MegaMoE 把一个 MoE 层的 dispatch、两次分组 GEMM、激活、combine 归约压进同一个全网格持久内核（拉取式 dispatch + L1 输出直落 L2 池 + 结果直推源 rank）；设与不设 --moe-a2a-backend 之间，换的是「层尾那次稠密 all-reduce」与「dispatch/combine」的取舍，并顺带改写 ep=tp、共享专家融合、CUDA graph 等七项参数；而 runner 后端与 A2A 后端是两层正交的东西，靠一张按 DispatchOutputFormat 注册的表决定谁能配谁。",
+  "tags": [
+    "SGLang",
+    "DeepGEMM",
+    "MegaMoE",
+    "MoE",
+    "EP / A2A",
+    "DeepEP",
+    "FlashInfer",
+    "对称内存",
+    "源码走读"
+  ],
+  "one_liner": "MegaMoE 把一个 MoE 层的 dispatch、两次分组 GEMM、激活与 combine 归约压进同一个全网格持久内核（拉取式 dispatch + L1 输出直落 L2 池 + 结果直推源 rank）；设与不设 --moe-a2a-backend 之间，换的是「层尾那次稠密 all-reduce」与「dispatch/combine」的取舍，并顺带改写 ep=tp、共享专家融合、CUDA graph 等七项参数。",
   "artifact": "index.html",
   "extra_files": [],
   "session_ref": "",
@@ -15,6 +25,7 @@
     "缓冲区容量与通信量公式由上述源码函数逐条对应推导"
   ],
   "visibility": "internal",
+  "publish": true,
   "redactions": [
     "主机名、集群编号与机器地址",
     "实验结果的绝对路径与内部归档目录",

@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light">
 <title>三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</title><!-- show-me:shell:begin -->
-<meta name="description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码，再补上 PP 的点对点：send_tensor_dict 只发 1/P 切片、接收端 all_gather 拼回，所以每跨一条 stage 边界都多一次 allgather，且 to_pp 必须在传输前把欠的 sum 全部结清。GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
+<meta name="description" content="两个判据分开 all2all / allreduce / allgather：输出在各 rank 上是否相同、是否做算术 —— 字节数相同不等于可互换。再沿 SGLang 的五层调用链走到 PP 点对点（send_tensor_dict 只发 1/P 切片，每跨一条 stage 边界多一次 allgather）。GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
 <meta property="og:type" content="article">
 <meta property="og:title" content="三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward">
-<meta property="og:description" content="先把 all2all / allreduce / allgather 在「目标、参与方数据变化、典型输出、场景」四维上分开，给出两个判据：输出在各 rank 上是否相同，以及是否做算术；再用 N=4 的网格图把三者摆在一起，并说明 allgather 与 all2all 字节数相同却不可互换。后半程沿 SGLang 的 communication_op → GroupCoordinator → layer_boundary → token_dispatcher 五层地图走源码，再补上 PP 的点对点：send_tensor_dict 只发 1/P 切片、接收端 all_gather 拼回，所以每跨一条 stage 边界都多一次 allgather，且 to_pp 必须在传输前把欠的 sum 全部结清。GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
+<meta property="og:description" content="两个判据分开 all2all / allreduce / allgather：输出在各 rank 上是否相同、是否做算术 —— 字节数相同不等于可互换。再沿 SGLang 的五层调用链走到 PP 点对点（send_tensor_dict 只发 1/P 切片，每跨一条 stage 边界多一次 allgather）。GLM-5.3 的 H200 配方按调用点计是 91 次 all-reduce + 1 次 all-gather + 0 次 all2all。">
 <meta property="og:url" content="https://qqtang-code.github.io/show-me/comm-parallel/a2a-ar-ag-sglang/index.html">
 <link rel="canonical" href="https://qqtang-code.github.io/show-me/comm-parallel/a2a-ar-ag-sglang/index.html">
 <meta name="twitter:card" content="summary">
@@ -392,7 +392,7 @@
 </style>
 <!-- show-me:shell:end --></head>
 <body><!-- show-me:shell:begin -->
-<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">40 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-21</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">40 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-10-21</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
 try{(function(){var b=document.getElementById('sm-progress'),
 u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
 p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
@@ -403,6 +403,17 @@ if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e
 e.preventDefault();g()});
 addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
 e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
 </script>
 <!-- show-me:shell:end --><!-- show-me:shell:begin -->
 <nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 7 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-rail-m">18 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>
@@ -1968,7 +1979,7 @@ else:
 
     <p class="lic">内容 CC BY 4.0 ·
       <a href="../../index.html">返回 show-me 知识库</a> ·
-      <a href="../../index.html#comm-parallel">同类条目</a></p>
+      <a href="../../index.html#cat-comm-parallel">同类条目</a></p>
   </footer>
 
 </div>

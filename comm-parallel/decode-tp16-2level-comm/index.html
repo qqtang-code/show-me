@@ -7,12 +7,12 @@
 <title>D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</title><!-- show-me:shell:begin -->
 <meta property="og:type" content="article">
 <meta property="og:title" content="D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」">
-<meta property="og:description" content="4 机 32 卡 1P1D 部署里，decode 端 TP16 必然横跨两台机，于是每层都要跨机同步两次、每次只搬 12–48 KB。把 16 卡全组 AllGather／ReduceScatter 拆成「同位置 rank 跨机配对 1 轮 + 机内 8 卡集合通信 7 轮」，串行轮数从 15 降到 8：D 端每验证轮通信 37.79→29.44 ms（−22.11%）与 34.45→20.77 ms（−39.72%）。端到端只动 TPOT——2,048/1,024 档 21.41→18.67 ms，把唯一的未通过项翻成通过，达标并发从 &lt;5 到 8；代价是短输入档 TTFT P50 变差 +65%／+20%，而 900 秒会话回放里收益只剩 +2.26%。">
+<meta property="og:description" content="decode 端 TP16 必然横跨两台机，每层要跨机同步两次、每次只搬 12–48 KB。把全组 AllGather／ReduceScatter 拆成「同位置 rank 跨机配对 1 轮 + 机内 8 卡 7 轮」，串行轮数 15→8：每验证轮通信 37.79→29.44 ms 与 34.45→20.77 ms，TPOT 21.41→18.67 ms，达标并发 &lt;5→8；代价是短输入档 TTFT P50 +65%／+20%，900 秒会话回放只剩 +2.26%。">
 <meta property="og:url" content="https://qqtang-code.github.io/show-me/comm-parallel/decode-tp16-2level-comm/index.html">
 <link rel="canonical" href="https://qqtang-code.github.io/show-me/comm-parallel/decode-tp16-2level-comm/index.html">
 <meta name="twitter:card" content="summary">
 <!-- show-me:shell:end -->
-<meta name="description" content="4 机 32 卡 1P1D 部署里，decode 端 TP16 必然横跨两台机，于是每层都要跨机同步两次、每次只搬 12–48 KB。把 16 卡全组 AllGather／ReduceScatter 拆成「同位置 rank 跨机配对 1 轮 + 机内 8 卡集合通信 7 轮」，串行轮数从 15 降到 8：D 端每验证轮通信 37.79→29.44 ms（−22.11%）与 34.45→20.77 ms（−39.72%）。端到端只动 TPOT——2,048/1,024 档 21.41→18.67 ms，把唯一的未通过项翻成通过，达标并发从 &lt;5 到 8；代价是短输入档 TTFT P50 变差 +65%／+20%，而 900 秒会话回放里收益只剩 +2.26%。">
+<meta name="description" content="decode 端 TP16 必然横跨两台机，每层要跨机同步两次、每次只搬 12–48 KB。把全组 AllGather／ReduceScatter 拆成「同位置 rank 跨机配对 1 轮 + 机内 8 卡 7 轮」，串行轮数 15→8：每验证轮通信 37.79→29.44 ms 与 34.45→20.77 ms，TPOT 21.41→18.67 ms，达标并发 &lt;5→8；代价是短输入档 TTFT P50 +65%／+20%，900 秒会话回放只剩 +2.26%。">
 <style>
   /* ============ 全站共用设计变量（三篇保持一致） ============ */
   :root{
@@ -441,7 +441,7 @@
 </style>
 <!-- show-me:shell:end --></head>
 <body><!-- show-me:shell:begin -->
-<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">23 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-04</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-comm-parallel" style="--sm-cat:#0b6b3f" title="通信与并行"><i class="sm-dot" aria-hidden="true"></i><span>通信与并行</span></a><div class="sm-right"><span class="sm-min">23 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-04</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
 try{(function(){var b=document.getElementById('sm-progress'),
 u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
 p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
@@ -452,6 +452,17 @@ if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e
 e.preventDefault();g()});
 addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
 e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
 </script>
 <!-- show-me:shell:end --><!-- show-me:shell:begin -->
 <nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 7 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../comm-parallel/decode-tp16-2level-comm/index.html" style="--sm-cat:#0b6b3f" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">D 端 TP16 分层通信：把 16 卡集合通信拆成「跨机配对 + 机内 8 卡」</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/sglang-tp8-ep1-4-8-mixtral/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--tp 8 --ep 1/4/8 的切分与通信：SGLang v0.5.23 里的 Mixtral-8x7B</span><span class="sm-rail-m">18 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/a2a-ar-ag-sglang/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">三种集合通信的落点：all2all、allreduce、allgather 与 GLM-5.3 的一条 forward</span><span class="sm-rail-m">40 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/ar-compute-overlap-moe-chunk/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">注意力 AllReduce 与 MoE 计算重叠：改的是一层内部的指令排布</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/prefill-cp8-decode-tp8/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Prefill CP8 / Decode TP8：为什么 CP 能拿到收益</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/cuda-ipc-direct-push/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">CUDA IPC 直推：decode 小消息换的是「固定开销」，不是带宽</span><span class="sm-rail-m">12 分钟</span></a><a class="sm-rail-a" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html" style="--sm-cat:#0b6b3f"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</span><span class="sm-rail-m">8 分钟</span></a></div></nav>

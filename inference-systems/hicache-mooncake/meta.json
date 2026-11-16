@@ -3,7 +3,15 @@
   "slug": "hicache-mooncake",
   "category": "inference-systems",
   "date": "2026-09-18",
-  "tags": ["KV Cache", "HiCache", "Mooncake", "SGLang", "分层缓存", "前缀复用", "PD 分离"],
+  "tags": [
+    "KV Cache",
+    "HiCache",
+    "Mooncake",
+    "SGLang",
+    "分层缓存",
+    "前缀复用",
+    "PD 分离"
+  ],
   "one_liner": "用存储层级的容量/带宽阶梯解释 decode 为什么是纯访存瓶颈；SGLang HiCache 把 radix 树从 HBM 延伸到主机与集群，Mooncake 是其中一种 L3 实现（同时还是 PD 分离的默认传输后端），二者是策略层与数据面的正交关系。",
   "artifact": "index.html",
   "extra_files": [],
@@ -13,5 +21,6 @@
     "辅以本地 SGLang 开发分支的代码核对（前缀树、缓存控制器、L3 存储接口）"
   ],
   "visibility": "public",
+  "publish": true,
   "enriched": "2026-09-19"
 }

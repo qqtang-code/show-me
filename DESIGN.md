@@ -58,7 +58,9 @@ shell 段用注释标记包裹，重复运行不会叠加：
 entry = {
     # ── 来自 meta.json ──
     "title", "slug", "category", "date", "tags", "one_liner",
-    "artifact", "extra_files", "session_ref", "sources", "visibility",
+    "artifact", "extra_files", "session_ref", "sources",
+    "visibility",   # public / internal —— 原始材料的敏感度
+    "publish",      # true / false —— 这一页是否已批准公开
     # ── build 时补 ──
     "_dir": "inference-systems/sglang-stream-interval",  # 相对仓库根
     "_root": "../../",                                   # 回到仓库根的相对前缀
@@ -171,15 +173,26 @@ footer               │ 生成方式 / meta.json 说明 / 许可              �
 2026-09-24 · notes.md · 阅读 →
 ```
 
-搜索（⌘K）：输入即搜，命中粒度到**小节**，结果显示「条目标题 → 命中小节标题 → 片段（命中词高亮）」，
-回车进 `/…/#section`。支持 ↑↓ 选择、Esc 关闭、点击遮罩关闭；URL `?q=` 可以预填（文章页的搜索按钮靠这个）。
+门户自顶向下：hero → 最近更新 → 阅读路线 → 全部条目 → 页脚。**最近更新**是固定入口：
+阅读路线只覆盖一部分条目，新写的文章不该只靠「翻到某个分类底部」才被发现。
+
+搜索（⌘K）：输入即搜，命中粒度到**小节**，但**结果按文章分组**——一篇一条主行，
+它命中的其余小节折叠成「展开另外 N 处」。三条规则决定顺序：
+
+1. **别名归一**：查询词编译成宽松正则，词内允许空格 / 连字符 / 下划线，
+   于是 `allreduce`、`all-reduce`、`all_reduce` 是同一个词，高亮仍落在原文真实位置；
+2. **词边界**：4 个字母以内的纯字母缩写要求字母边界，`TP` 不再命中 `http` 这类词内部；
+3. **打分**：标题 > 标签 > 摘要 > 小节标题 > 正文，同分按日期新→旧。
+
+回车进 `/…/#section`，↑↓ 只在**当前可见**的命中行之间移动。URL `?q=` 可以预填（文章页的搜索按钮靠这个）。
 
 ---
 
 ## 五、验收
 
 - `python3 build_index.py` 幂等：连跑两次，`git status` 除时间戳外无差异。
-- `python3 check_links.py` 全绿。
+- `python3 check_links.py` 全绿 —— 它同时校验**页内锚点**（`index.html#cat-<category>` 必须真有对应 id），
+  不只是「文件存在」。`sync.sh` 在这一关失败时**不提交**，push 失败也返回非零。
 - `python3 verify_site.py`：
   - 每个文章页 390 / 560 / 640 / 900 / 1280 / 1440 六档无横向溢出；
   - 门户在 390px 下 `scrollWidth === clientWidth`，卡片单列；

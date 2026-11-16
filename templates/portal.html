@@ -9,6 +9,9 @@
 <style>
 __TOKENS__
   *{box-sizing:border-box}
+  /* .card / .hit 等元素自带 display，会盖掉浏览器对 [hidden] 的默认 display:none ——
+     标签筛选、搜索命中、空状态全靠 hidden 属性切换，所以这里必须显式压住。 */
+  [hidden]{display:none!important}
   html{scroll-behavior:smooth;scroll-padding-top:108px}
   body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.7 var(--sans);
        -webkit-font-smoothing:antialiased}
@@ -89,6 +92,7 @@ __TOKENS__
   .path-h p{color:var(--dim);font-size:12.5px;line-height:1.7;margin-top:6px}
   .path-n{display:inline-block;margin-top:8px;font:10.5px var(--mono);color:var(--dim2);
           border:1px solid var(--line2);border-radius:999px;padding:2px 8px}
+  .path-n.kind{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
   .path-items{list-style:none;padding:0;display:grid;gap:7px;
               grid-template-columns:repeat(auto-fill,minmax(196px,1fr));align-content:start}
   .path-items a{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 9px;
@@ -102,6 +106,19 @@ __TOKENS__
   .path-items .pm{grid-column:1 / -1;display:flex;align-items:center;gap:5px;
                   font:10px var(--mono);color:var(--dim2)}
   .path-items .pm i{width:5px;height:5px;border-radius:50%;background:var(--c,var(--accent))}
+
+  /* 最近更新 */
+  .recent{display:grid;gap:1px;border:1px solid var(--line);border-radius:13px;
+          background:var(--line2);overflow:hidden}
+  .recent-a{display:grid;grid-template-columns:auto 7px minmax(0,1fr) auto;gap:11px;
+            align-items:center;padding:11px 15px;background:var(--panel);min-width:0}
+  .recent-a:hover{background:var(--panel2)}
+  .recent-a .rd{font:11px var(--mono);color:var(--dim2);white-space:nowrap}
+  .recent-a .rc{width:7px;height:7px;border-radius:50%;background:var(--c,var(--accent))}
+  .recent-a .rt{font-size:13.5px;color:var(--ink);font-weight:550;line-height:1.45;
+                overflow-wrap:anywhere}
+  .recent-a .rm{font:10.5px var(--mono);color:var(--dim2);white-space:nowrap}
+  .recent-a:hover .rt{color:var(--accent)}
 
   /* 工具条 */
   .tools{position:sticky;top:56px;z-index:30;display:flex;align-items:center;gap:10px;
@@ -218,6 +235,15 @@ __TOKENS__
   .hit-x{font-size:12.5px;line-height:1.75;color:var(--dim);margin-top:5px;
          overflow-wrap:anywhere}
   .hit-x mark{background:#fff2bf;color:inherit;border-radius:3px;padding:0 1px}
+  /* 一篇一组：主行 + 折叠的其余小节命中 */
+  .hitgrp{border:1px solid transparent;border-radius:11px}
+  .hitgrp + .hitgrp{margin-top:2px}
+  .hit-extra{margin:-2px 0 0 14px;border-left:2px solid var(--line2);
+             border-radius:0 10px 10px 0}
+  .hitmore{display:block;margin:0 0 4px 26px;padding:2px 0;
+           font:11px var(--mono);color:var(--dim2)}
+  .hitmore:hover{color:var(--accent);text-decoration:underline}
+  .hitgrp:last-child .hitmore{margin-bottom:8px}
 
   /* 页脚 */
   .foot{margin:56px 0 0;padding:22px 0 46px;border-top:1px solid var(--line2);
@@ -292,6 +318,7 @@ __TOKENS__
   <div class="head-in">
     <a class="brand" href="./index.html"><span class="mk">▤</span><b>show-me</b><span class="sub">知识库</span></a>
     <nav class="hnav" aria-label="站内导航">
+      <a href="#recent">最近更新</a>
       <a href="#paths">阅读路线</a>
       <a href="#all">全部条目</a>
       <a href="#tagwrap-open">标签索引</a>
@@ -310,10 +337,9 @@ __TOKENS__
   <div class="shell">
     <span class="kicker"><i aria-hidden="true"></i>图解 · 推导 · 实测数字</span>
     <h1>show-me 知识库</h1>
-    <p class="promise">一次讲清一个机制：结论在前，推导带真实数字，配图替代长段落。</p>
-    <p class="what">一篇一个目录。<code>index.html</code> 是产物本体（自包含，可直接发出去），
-      <code>notes.md</code> 是纯文字存档，<code>meta.json</code> 是元数据。
-      每篇都按「速览 → 机制 → 实测 → 常见误解 → 自测」展开，读完应能自己复述、自己算一遍。</p>
+    <p class="promise">一篇讲清一个机制：先给结论，再给带真实数字的推导，配图替代长段落。</p>
+    <p class="what">写给做推理与多卡部署的实践者。每篇都从一条具体请求、一次改动或一段源码出发，
+      给出可复算的数字、出错时的报错原文，以及结论的适用边界 —— 读完应该能自己复述、自己算一遍。</p>
     <div class="cta">
       <a class="btn pri" href="__START_HREF__">从推荐路线开始 →</a>
       <button class="btn ghost" id="hero-search">搜索全库 <kbd>⌘K</kbd></button>
@@ -329,19 +355,28 @@ __TOKENS__
 
 <main class="shell">
 
+  <section class="sec" id="recent">
+    <div class="sec-h">
+      <span class="eyebrow">01 / 最近更新</span>
+      <h2>新写的几篇</h2>
+    </div>
+    <p class="sec-d">阅读路线只覆盖一部分条目 —— 不在路线里的新文章在这里出现，不用翻分类去找。</p>
+    __RECENT_HTML__
+  </section>
+
   <section class="sec" id="paths">
     <div class="sec-h">
-      <span class="eyebrow">01 / 阅读路线</span>
+      <span class="eyebrow">02 / 阅读路线</span>
       <h2>按主题编组，不按时间倒序</h2>
     </div>
-    <p class="sec-d">每个条目都能单读；如果你想成体系地看，按下面三条路线走，前一篇是后一篇的前置。
-       路线没覆盖到的条目，在「全部条目」里按分类浏览。</p>
+    <p class="sec-d">标「路线」的按顺序读，前一篇是后一篇的前置；标「合集」的是同一方法下的几篇，
+       可以挑着看。每个条目也都能单读。</p>
     __PATHS_HTML__
   </section>
 
   <section class="sec" id="all">
     <div class="sec-h">
-      <span class="eyebrow">02 / 全部条目</span>
+      <span class="eyebrow">03 / 全部条目</span>
       <h2>__TOTAL__ 篇，按分类归档</h2>
     </div>
     <p class="sec-d">搜索框和 ⌘K 都是全库检索，粒度为小节 —— 输入机制名（如 AllReduce、prefix、rendezvous）
@@ -372,10 +407,13 @@ __TOKENS__
   </section>
 
   <footer class="foot">
+    <p>每篇一个目录：<code>index.html</code> 是产物本体（自包含，可直接发出去），
+      <code>notes.md</code> 是纯文字存档（部分条目附），<code>meta.json</code> 是元数据。
+      内容按「速览 → 机制 → 实测 → 常见误解 → 自测」的常见结构展开，具体小节以页面为准。</p>
     <p>由 <code>build_index.py</code> 从各目录 <code>meta.json</code> 生成：
-      分类、标签、阅读时长、检索索引都来自构建期解析，不经手改。</p>
+      分类、标签、阅读时长、检索索引都来自构建期解析，不经手改。标签按 <code>taxonomy.json</code> 归并同义写法。</p>
     <p>公开学习资料，内部主机名、路径与模型版本标识已脱敏；每条目的脱敏范围记在它自己的
-      <code>meta.json</code> 里。</p>
+      <code>meta.json</code> 里。<code>visibility</code> 记原料敏感度，<code>publish</code> 记是否已批准公开。</p>
     <div class="links">
       <a href="https://github.com/qqtang-code/show-me">GitHub 仓库</a>
       <a href="https://github.com/qqtang-code/show-me/blob/main/README.md">README</a>
@@ -417,22 +455,49 @@ __TOKENS__
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ESC[c]; });
   }
-  function terms(q) {
-    return String(q).toLowerCase().split(/\s+/).filter(Boolean);
+  /* ── 查询解析 ─────────────────────────────────────── */
+  /* 一个查询词编译成一个宽松正则：词内允许空格 / 连字符 / 下划线，于是
+     allreduce、all-reduce、all_reduce 是同一个词；这也让高亮直接落在原文的
+     真实位置上（不需要另建一份归一化文本去映射偏移）。
+     4 个字母以内的纯字母缩写再加字母边界，避免 TP 命中 http、EP 命中 deep 这类词内部。 */
+  var SEP = "[\\s\\-_]*";
+  function fold(s) { return String(s).toLowerCase().replace(/[\s\-_]+/g, ""); }
+  function buildMatcher(term) {
+    var chars = fold(term).split("");
+    if (!chars.length) return null;
+    var body = chars.map(function (c) {
+      return c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }).join(SEP);
+    var short = /^[a-z]+$/.test(fold(term)) && fold(term).length <= 4;
+    if (short) body = "(?:^|[^a-z])(" + body + ")(?=[^a-z]|$)";
+    return { test: new RegExp(body, "i"), scan: new RegExp(body, "gi") };
   }
-  function hitAll(hay, ts) {
-    for (var i = 0; i < ts.length; i++) if (hay.indexOf(ts[i]) === -1) return false;
-    return true;
+  function matchers(q) {
+    var seen = {}, out = [];
+    String(q).toLowerCase().split(/\s+/).forEach(function (t) {
+      if (!t || seen[t]) return;
+      seen[t] = 1;
+      var m = buildMatcher(t);
+      if (m) out.push(m);
+    });
+    return out;
   }
-  /* 在原文上求命中区间，再分段转义 —— 这样 <code> 之类的字符不会被拼坏 */
-  function mark(text, ts) {
-    var low = text.toLowerCase(), ranges = [];
-    for (var i = 0; i < ts.length; i++) {
-      var t = ts[i], p = 0, at;
-      if (!t) continue;
-      while ((at = low.indexOf(t, p)) !== -1) {
-        ranges.push([at, at + t.length]);
-        p = at + t.length;
+  function hitAll(text, ms) {
+    for (var i = 0; i < ms.length; i++) if (!ms[i].test.test(text)) return false;
+    return ms.length > 0;
+  }
+  function rangesOf(text, ms) {
+    var ranges = [];
+    for (var i = 0; i < ms.length; i++) {
+      var re = ms[i].scan, m, guard = 0;
+      re.lastIndex = 0;
+      while ((m = re.exec(text)) !== null && guard++ < 200) {
+        var whole = m[0], cap = (m.length > 1 && m[1] != null) ? m[1] : whole;
+        if (cap.length) {
+          var start = m.index + (whole.length - cap.length);
+          ranges.push([start, start + cap.length]);
+        }
+        if (re.lastIndex === m.index) re.lastIndex++;
       }
     }
     ranges.sort(function (a, b) { return a[0] - b[0]; });
@@ -442,7 +507,11 @@ __TOKENS__
       if (last && ranges[j][0] <= last[1]) last[1] = Math.max(last[1], ranges[j][1]);
       else merged.push(ranges[j].slice());
     }
-    var out = "", cur = 0;
+    return merged;
+  }
+  /* 在原文上求命中区间，再分段转义 —— 这样 <code> 之类的字符不会被拼坏 */
+  function mark(text, ms) {
+    var merged = rangesOf(text, ms), out = "", cur = 0;
     for (var k = 0; k < merged.length; k++) {
       out += esc(text.slice(cur, merged[k][0])) + "<mark>" +
              esc(text.slice(merged[k][0], merged[k][1])) + "</mark>";
@@ -450,61 +519,129 @@ __TOKENS__
     }
     return out + esc(text.slice(cur));
   }
-  function snip(text, ts, width) {
+  function snip(text, ms, width) {
     width = width || 112;
-    var low = text.toLowerCase(), at = -1;
-    for (var i = 0; i < ts.length && at === -1; i++) at = low.indexOf(ts[i]);
-    if (at === -1) return mark(text.slice(0, width), ts);
-    var s = Math.max(0, at - 34), e = Math.min(text.length, s + width);
+    var hit = rangesOf(text, ms)[0];
+    if (!hit) return mark(text.slice(0, width), ms);
+    var s = Math.max(0, hit[0] - 34), e = Math.min(text.length, s + width);
     if (e - s < width) s = Math.max(0, e - width);
-    return (s > 0 ? "…" : "") + mark(text.slice(s, e), ts) +
+    return (s > 0 ? "…" : "") + mark(text.slice(s, e), ms) +
            (e < text.length ? "…" : "");
   }
 
-  /* ── 索引：条目级 + 小节级 ─────────────────────────── */
-  var FLAT = [];
-  ENTRIES.forEach(function (e) {
-    FLAT.push({ e: e, s: null, hay: (e.title + " " + e.one + " " + (e.tags || []).join(" ") +
-                " " + e.catZh).toLowerCase() });
+  /* ── 打分：标题 > 标签 > 小节标题 > 正文 ─────────────
+     原来只做「全部词是否出现过」的布尔判断，结果按分类与日期排；
+     于是搜 AllReduce 时标题就叫 AllReduce 的那篇不一定在最前。 */
+  function scoreEntry(e, ms) {
+    var title = e.title.toLowerCase(),
+        tags = (e.tags || []).join(" ").toLowerCase(),
+        one = (e.one || "").toLowerCase(),
+        cat = (e.catZh || "").toLowerCase();
+    var score = 0, inTitle = 0;
+    for (var i = 0; i < ms.length; i++) {
+      var t = ms[i].test;
+      if (t.test(title)) { score += 300; inTitle++; }
+      else if (t.test(tags)) score += 120;
+      else if (t.test(one)) score += 40;
+      else if (t.test(cat)) score += 10;
+      else return 0;
+    }
+    if (inTitle === ms.length) score += 200;   // 所有词都落在标题上
+    return score;
+  }
+  function scoreSection(s, ms) {
+    var head = (s.title || "").toLowerCase(), body = (s.text || "").toLowerCase();
+    var score = 0, inHead = 0;
+    for (var i = 0; i < ms.length; i++) {
+      var t = ms[i].test;
+      if (t.test(head)) { score += 80; inHead++; }
+      else if (t.test(body)) score += 12;
+      else return 0;
+    }
+    return inHead === ms.length ? score + 60 : score;
+  }
+
+  /* ── 分组：一篇一条，小节命中折在条目下面 ─────────── */
+  var HIT_LIMIT = 12;
+  function buildGroup(e, ms) {
+    var entryScore = scoreEntry(e, ms), secs = [];
     (e.sections || []).forEach(function (s) {
-      FLAT.push({ e: e, s: s,
-                  hay: (s.title + " " + s.text).toLowerCase() });
+      var sc = scoreSection(s, ms);
+      if (sc) secs.push({ s: s, score: sc });
     });
-  });
-
-  function search(q) {
-    var ts = terms(q);
-    if (!ts.length) return [];
-    var rows = [];
+    if (!entryScore && !secs.length) return null;
+    secs.sort(function (a, b) { return b.score - a.score; });
+    var best = secs.length ? secs[0].score : 0;
+    /* 条目级命中（标题/标签/摘要）优先做主行；否则主行就是最佳小节 */
+    var useEntry = entryScore >= best || !secs.length;
+    return {
+      e: e,
+      score: Math.max(entryScore, best * 2) + (entryScore ? 60 : 0),
+      entryHit: entryScore > 0,
+      primary: useEntry ? null : secs[0].s,
+      extras: (useEntry ? secs : secs.slice(1)).slice(0, 4),
+      total: secs.length
+    };
+  }
+  function searchGroups(q) {
+    var ms = matchers(q), groups = [], sections = 0;
+    if (!ms.length) return { ms: ms, groups: groups, sections: 0, total: 0 };
     ENTRIES.forEach(function (e) {
-      var own = { e: e, s: null,
-                  hay: (e.title + " " + e.one + " " + (e.tags || []).join(" ") +
-                        " " + e.catZh).toLowerCase() };
-      var secHits = [];
-      (e.sections || []).forEach(function (s) {
-        if (hitAll((s.title + " " + s.text).toLowerCase(), ts)) secHits.push(s);
-      });
-      if (hitAll(own.hay, ts)) rows.push(own);
-      secHits.slice(0, 2).forEach(function (s) { rows.push({ e: e, s: s }); });
+      if (!inScope(e)) return;
+      var g = buildGroup(e, ms);
+      if (!g) return;
+      sections += g.total;
+      groups.push(g);
     });
-    return rows;
+    groups.sort(function (a, b) {
+      return b.score - a.score || (a.e.date < b.e.date ? 1 : a.e.date > b.e.date ? -1 : 0);
+    });
+    return { ms: ms, groups: groups, sections: sections, total: groups.length };
   }
 
-  function rowHTML(row, ts, sel) {
-    var e = row.e, s = row.s;
-    var title = '<div class="hit-t"><i class="cd" style="--c:' + esc(e.color) +
-                '"></i>' + esc(e.title) + "</div>";
-    var secLine = s
-      ? '<div class="hit-s">' + (s.n ? '<span class="num">' + esc(s.n) + "</span>" : "") +
-        "<span>" + esc(s.title) + "</span></div>" +
-        '<div class="hit-x">' + snip(s.text, ts) + "</div>"
-      : '<div class="hit-s"><span>' + esc(e.catZh) + " · " + e.minutes + " 分钟</span></div>" +
-        '<div class="hit-x">' + snip(e.one, ts) + "</div>";
-    var href = e.dir + "/" + (s ? "#" + encodeURIComponent(s.id || "") : "");
-    return '<a class="hit" href="' + esc(href) + '"' +
-           (sel ? ' aria-selected="true"' : "") + ' data-dir="' + esc(e.dir) + '">' +
-           title + secLine + "</a>";
+  function hrefFor(e, s) {
+    return e.dir + "/" + (s ? "#" + encodeURIComponent(s.id || "") : "");
   }
+  function rowHTML(e, s, ms, extra) {
+    var title = '<div class="hit-t"><i class="cd" style="--c:' + esc(e.color) +
+                '"></i>' + mark(e.title, ms) + "</div>";
+    var body = s
+      ? '<div class="hit-s">' + (s.n ? '<span class="num">' + esc(s.n) + "</span>" : "") +
+        "<span>" + mark(s.title, ms) + "</span></div>" +
+        '<div class="hit-x">' + snip(s.text, ms) + "</div>"
+      : '<div class="hit-s"><span>' + esc(e.catZh) + " · " + e.minutes + " 分钟</span></div>" +
+        '<div class="hit-x">' + snip(e.one, ms) + "</div>";
+    return '<a class="hit' + (extra ? " hit-extra" : "") + '"' +
+           (extra ? " hidden" : "") +
+           ' href="' + esc(hrefFor(e, s)) + '"' +
+           ' data-dir="' + esc(e.dir) + '">' + title + body + "</a>";
+  }
+  function groupHTML(g, ms, index) {
+    var rows = [rowHTML(g.e, g.primary, ms, false)];
+    g.extras.forEach(function (x) {
+      rows.push(rowHTML(g.e, x.s, ms, true));
+    });
+    var more = "";
+    if (g.extras.length) {
+      more = '<button type="button" class="hitmore" aria-expanded="false">展开另外 ' +
+             g.extras.length + ' 处</button>';
+    }
+    return '<div class="hitgrp"' + (index === 0 ? ' data-first=""' : "") + ">" +
+           rows.join("") + more + "</div>";
+  }
+  /* 展开/收起某一篇的其余命中 */
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest(".hitmore") : null;
+    if (!btn) return;
+    var grp = btn.closest(".hitgrp");
+    if (!grp) return;
+    var open = btn.getAttribute("aria-expanded") === "true";
+    var extras = grp.querySelectorAll(".hit-extra");
+    for (var i = 0; i < extras.length; i++) extras[i].hidden = open;
+    btn.setAttribute("aria-expanded", String(!open));
+    btn.textContent = open ? btn.textContent.replace("收起", "展开")
+                           : btn.textContent.replace("展开", "收起");
+  });
 
   /* ── 状态 ─────────────────────────────────────────── */
   var state = { q: "", cat: "all", tag: null, hits: [], sel: -1 };
@@ -552,32 +689,52 @@ __TOKENS__
   ENTRIES.forEach(function (e) { BYDIR[e.dir] = e; });
   function byDir(d) { return BYDIR[d]; }
 
-  function renderHits(ts) {
-    var rows = search(state.q).filter(function (r) { return inScope(r.e); });
-    state.hits = rows;
-    state.sel = rows.length ? 0 : -1;
-    $hits.innerHTML = rows.length
-      ? rows.map(function (r, i) { return rowHTML(r, ts, i === 0); }).join("")
-      : '<div class="hintrow">没有匹配 —— 试试 AllReduce、prefix、rendezvous、KV</div>';
+  function renderHits(q) {
+    var res = searchGroups(q);
+    state.sel = res.groups.length ? 0 : -1;
+    if (!res.groups.length) {
+      $hits.innerHTML = '<div class="hintrow">没有匹配 —— 试试 AllReduce、prefix、rendezvous、KV</div>';
+    } else {
+      var shown = res.groups.slice(0, HIT_LIMIT);
+      var html = shown.map(function (g, i) { return groupHTML(g, res.ms, i); }).join("");
+      if (res.total > shown.length) {
+        html += '<div class="hintrow">另有 ' + (res.total - shown.length) +
+                ' 篇未列出 —— 再加一个词缩小范围</div>';
+      }
+      $hits.innerHTML = html;
+      paintSelection();
+    }
     $hits.classList.add("on");
     $list.hidden = true;
-    $cnt.textContent = rows.length + " 处匹配";
+    $cnt.textContent = res.total + " 篇 · " + res.sections + " 处小节命中";
     $noresult.hidden = true;
-    return rows.length;
+    return res.groups.length;
+  }
+
+  /* 键盘选择只走「当前可见的命中行」：折叠起来的小节命中不参与上下键 */
+  function visibleRows(container) {
+    var out = [], rows = container.querySelectorAll(".hit");
+    for (var i = 0; i < rows.length; i++) if (!rows[i].hidden) out.push(rows[i]);
+    return out;
+  }
+  function paintSelection() {
+    var rows = visibleRows($hits);
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].setAttribute("aria-selected", String(i === state.sel));
+    }
   }
 
   function clearSearch() {
     $hits.classList.remove("on");
     $hits.innerHTML = "";
     $list.hidden = false;
-    state.hits = [];
     state.sel = -1;
   }
 
   function refresh() {
     document.body.classList.toggle("has-query", !!state.q.trim());
     if (state.q.trim()) {
-      renderHits(terms(state.q));
+      renderHits(state.q);
     } else {
       clearSearch();
       var n = applyList();
@@ -670,24 +827,25 @@ __TOKENS__
   });
   $q.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape") { $q.value = ""; state.q = ""; refresh(); }
-    if (ev.key === "Enter" && state.hits.length && state.sel >= 0) {
-      var row = state.hits[state.sel];
-      location.href = row.e.dir + "/" + (row.s ? "#" + encodeURIComponent(row.s.id || "") : "");
+    if (ev.key === "Enter") {
+      var hit = visibleRows($hits)[state.sel];
+      if (hit) location.href = hit.getAttribute("href");
     }
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
-      if (!state.hits.length) return;
+      if (!visibleRows($hits).length) return;
       ev.preventDefault();
       moveSel(ev.key === "ArrowDown" ? 1 : -1, $hits);
     }
   });
 
   function moveSel(d, container) {
-    var rows = container.querySelectorAll(".hit");
+    var rows = visibleRows(container);
     if (!rows.length) return;
     state.sel = (state.sel + d + rows.length) % rows.length;
-    for (var i = 0; i < rows.length; i++) rows[i].setAttribute("aria-selected", String(i === state.sel));
-    var el = rows[state.sel];
-    el.scrollIntoView({ block: "nearest" });
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].setAttribute("aria-selected", String(i === state.sel));
+    }
+    rows[state.sel].scrollIntoView({ block: "nearest" });
   }
 
   /* ── ⌘K 弹窗 ──────────────────────────────────────── */
@@ -697,19 +855,29 @@ __TOKENS__
       $kcount = document.getElementById("kcount");
 
   function runDialog() {
-    var ts = terms($kq.value);
-    if (!ts.length) {
+    var res = searchGroups($kq.value);
+    if (!matchers($kq.value).length) {
       $kbody.innerHTML = '<div class="hintrow">试试：AllReduce · prefix · rendezvous · KV · MoE</div>';
       $kcount.textContent = ENTRIES.length + " 篇";
-      state.hits = []; state.sel = -1;
+      state.sel = -1;
       return;
     }
-    var rows = search($kq.value);
-    state.hits = rows; state.sel = rows.length ? 0 : -1;
-    $kbody.innerHTML = rows.length
-      ? rows.map(function (r, i) { return rowHTML(r, ts, i === 0); }).join("")
-      : '<div class="hintrow">没有匹配 —— 换个说法，或只输入一半的词</div>';
-    $kcount.textContent = rows.length + " 处匹配";
+    state.sel = res.groups.length ? 0 : -1;
+    if (!res.groups.length) {
+      $kbody.innerHTML = '<div class="hintrow">没有匹配 —— 换个说法，或只输入一半的词</div>';
+    } else {
+      var shown = res.groups.slice(0, HIT_LIMIT);
+      var html = shown.map(function (g, i) { return groupHTML(g, res.ms, i); }).join("");
+      if (res.total > shown.length) {
+        html += '<div class="hintrow">另有 ' + (res.total - shown.length) + ' 篇未列出</div>';
+      }
+      $kbody.innerHTML = html;
+      var rows = visibleRows($kbody);
+      for (var i = 0; i < rows.length; i++) {
+        rows[i].setAttribute("aria-selected", String(i === 0));
+      }
+    }
+    $kcount.textContent = res.total + " 篇 · " + res.sections + " 处小节";
   }
 
   function openDialog(prefill) {
@@ -732,12 +900,12 @@ __TOKENS__
   $kq.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape") { closeDialog(); }
     else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
-      if (!state.hits.length) return;
+      if (!visibleRows($kbody).length) return;
       ev.preventDefault();
       moveSel(ev.key === "ArrowDown" ? 1 : -1, $kbody);
-    } else if (ev.key === "Enter" && state.sel >= 0 && state.hits[state.sel]) {
-      var row = state.hits[state.sel];
-      location.href = row.e.dir + "/" + (row.s ? "#" + encodeURIComponent(row.s.id || "") : "");
+    } else if (ev.key === "Enter") {
+      var hit = visibleRows($kbody)[state.sel];
+      if (hit) location.href = hit.getAttribute("href");
     }
   });
   document.addEventListener("keydown", function (ev) {
@@ -770,15 +938,15 @@ __TOKENS__
       bar.classList.remove("on");
     }
   }
-  $list.addEventListener("click", function (ev) {
-    var a = ev.target.closest("a");
+  /* 记录「已打开」的入口不止卡片：推荐路线、最近更新、搜索结果都会跳到条目页。
+     统一挂在 document 上，靠 data-dir 识别，避免每个列表各写一遍。 */
+  document.addEventListener("click", function (ev) {
+    var a = ev.target.closest ? ev.target.closest("a[data-dir]") : null;
     if (!a) return;
-    var card = a.closest(".card");
-    if (!card) return;
     try {
-      var set = opened();
-      if (set.indexOf(card.dataset.dir) === -1) {
-        set.push(card.dataset.dir);
+      var dir = a.getAttribute("data-dir"), set = opened();
+      if (set.indexOf(dir) === -1) {
+        set.push(dir);
         localStorage.setItem(KEY, JSON.stringify(set));
       }
     } catch (e) {}

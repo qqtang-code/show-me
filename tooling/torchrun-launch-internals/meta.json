@@ -13,7 +13,7 @@
     "源码走读",
     "容错重启"
   ],
-  "one_liner": "沿着 torch.distributed.run → elastic_launch → LocalElasticAgent 这条链把 torchrun 拆开：第 2 步就把单节点命令改为 c10d + localhost:0；RANK 不是参数算出来的，而是 rendezvous 分配的结果（RANK = GROUP_RANK × LOCAL_WORLD_SIZE + LOCAL_RANK）；注入给 worker 的是一份环境变量字典而非命令行参数；--master-addr/--master-port/--node-rank 只在 static 模式下有效 —— c10d 模式下训练 store 的地址由 rendezvous 决定并广播；--max-restarts 重启的是整个 worker group，且成员变更不消耗该额度。术语约定：翻译后易产生歧义的词保留英文原词。",
+  "one_liner": "沿 torch.distributed.run → elastic_launch → LocalElasticAgent 拆开 torchrun：第 2 步就把单节点命令改为 c10d + localhost:0；RANK 不是参数算出来的，而是 rendezvous 分配的结果（RANK = GROUP_RANK × LOCAL_WORLD_SIZE + LOCAL_RANK）；注入给 worker 的是环境变量字典而非命令行参数。",
   "artifact": "index.html",
   "extra_files": [
     "notes.md"
@@ -27,6 +27,7 @@
     "术语约定：rank / group / store / rendezvous / agent / worker group / elastic / quorum / complete / heartbeat / communicator / watchdog / checkpoint 等保留英文原词，变量名与函数名保持源码原样"
   ],
   "visibility": "public",
+  "publish": true,
   "redactions": [],
   "enriched": "2026-10-13"
 }

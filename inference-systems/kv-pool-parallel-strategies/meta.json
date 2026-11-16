@@ -13,7 +13,7 @@
     "容量模型",
     "Attention DP"
   ],
-  "one_liner": "把 KV 池容量写成 B/b 一个公式后，每条并行策略只需要回答它动了分子还是分母：TP 只靠权重分片放大 B（普通 MLA 的 b 不变），PP 同时把本地层数从 78 变 39 所以 8 卡下容量翻倍，CP 会挤掉 attention TP 吃掉 B 而普通池不省 b（只有 DSA 层分片按 ceil(L/CP)+1 才缩分母），EP 在固定 TP 组宽时只换存法不改份额，Attention DP 则把 8 份重复的 latent 换成 8 个独立池使唯一 token 容量从约 N 到约 8N —— 而 PP 的多 stage 取 MIN，分层不均衡直接吃掉整个实例。源码侧的 13 处引用已按 v0.5.21 逐条核对通过。",
+  "one_liner": "把 KV 池容量写成 B/b 之后，每条并行策略只需回答它动了分子还是分母：TP 只靠权重分片放大 B，PP 把本地层数 78→39 使 8 卡容量翻倍，CP 挤掉 attention TP 会吃掉 B，EP 在固定 TP 组宽时只换存法，Attention DP 把 8 份重复 latent 换成 8 个独立池（唯一 token 容量约 N→8N）；而 PP 多 stage 取 MIN，分层不均衡会吃掉整个实例。",
   "artifact": "index.html",
   "extra_files": [
     "notes.md"
@@ -26,6 +26,7 @@
     "num_effective_layers 在 layer_setup.py:158–159 另有 ×loop_num 一层，默认 loop_num=1 不影响本页算术"
   ],
   "visibility": "public",
+  "publish": true,
   "redactions": [],
   "enriched": "2026-10-21"
 }

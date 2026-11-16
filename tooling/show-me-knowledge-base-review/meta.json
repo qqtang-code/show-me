@@ -3,14 +3,24 @@
   "slug": "show-me-knowledge-base-review",
   "category": "tooling",
   "date": "2026-11-16",
-  "tags": ["信息架构", "全库搜索", "发布检查", "脱敏", "标签治理", "阅读路线", "站点验收"],
-  "one_liner": "对 18 篇条目的实测审查：视觉与单文件架构不用重做，先修 23 处失效分类锚点、5 篇标 internal 的公开条目与 4 份含本机绝对路径的公开元数据；再把搜索从「匹配很多」改成「最相关在前」（TP 现返回 44 处、AllReduce 两种拼写结果集不同），把平均 262 字符的卡片摘要压到可横向比较的长度，并用受控词表收敛 95 个标签里 75 个只出现一次的标签。附 P0/P1/P2 顺序与可执行的验收判据。",
+  "tags": [
+    "信息架构",
+    "全库搜索",
+    "发布检查",
+    "脱敏",
+    "标签治理",
+    "阅读路线",
+    "站点验收"
+  ],
+  "one_liner": "对 18 篇条目做的实测审查与随后的落地：先修失效的分类锚点、模糊的 visibility/publish 语义与含本机路径的公开元数据，再把搜索改成别名归一 + 词边界 + 打分排序并按文章分组，最后收敛标签、区分路线与合集、让「已打开」在文章页也记账。每条都附了验收判据和实测数字。",
   "artifact": "index.html",
-  "extra_files": ["notes.md"],
+  "extra_files": [
+    "notes.md"
+  ],
   "session_ref": "",
   "cwd": "",
   "sources": [
-    "线上门户 https://qqtang-code.github.io/show-me/ 与 18 份公开 meta.json（含门户分类区块的实际 id 形态）",
+    "线上门户 https://qqtang-code.github.io/show-me/ 与 18 份既有条目的公开 meta.json（本页为第 19 条）",
     "本地 templates/portal.html：搜索索引 buildTags/search/renderHits 与「已打开」localStorage 写入点（唯一写入在 $list 卡片点击监听内）",
     "本地 build_index.py：load_entries/portal_payload 的字段装配与阅读时长口径；shell.py: _bar() 生成的分类链接 href",
     "本地 check_links.py（只校验文件存在、strip # 与 ? 后比较，不解析 fragment）与 sync.sh（坏链接仅告警、push 失败仍 exit 0）",
@@ -19,7 +29,8 @@
     "headless Chrome 1440px 截图：门户首屏与文章页（含左栏同期目录、正文表格与 callout）",
     "本页所有结论均为对站点结构、文案与构建脚本的审查，未逐条核验各篇文章的技术结论；internal 一项只指出状态语义与公开元数据的一致性，不等同于判定正文未脱敏"
   ],
-  "visibility": "public-ok",
+  "visibility": "public",
+  "publish": true,
   "redactions": [
     "指出问题的条目所在目录时不复述其正文与内部主题词，只以计数与字段名呈现",
     "审查中发现的 4 份含本机绝对路径的 meta.json 不回显路径内容，公开构建应清空该字段"

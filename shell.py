@@ -310,6 +310,17 @@ if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e
 e.preventDefault();g()});
 addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
 e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\\.html$/,'').replace(/\\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
 </script>"""
 
 
@@ -333,7 +344,7 @@ def _bar(entry: dict) -> str:
         '<div class="sm-bar-in">'
         f'<a class="sm-brand" href="{_esc(root)}index.html">show-me</a>'
         '<i class="sm-div" aria-hidden="true"></i>'
-        f'<a class="sm-cat" href="{_esc(root)}index.html#{_esc(cat)}"'
+        f'<a class="sm-cat" href="{_esc(root)}index.html#cat-{_esc(cat)}"'
         f' style="--sm-cat:{_esc(color)}" title="{_esc(cat_zh)}">'
         '<i class="sm-dot" aria-hidden="true"></i>'
         f"<span>{_esc(cat_zh)}</span></a>"

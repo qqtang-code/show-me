@@ -3,10 +3,20 @@
   "slug": "ar-compute-overlap-moe-chunk",
   "category": "comm-parallel",
   "date": "2026-09-22",
-  "tags": ["AllReduce", "通信计算重叠", "张量并行", "MoE", "流水线并行", "预填充", "PCIe"],
+  "tags": [
+    "AllReduce",
+    "通信计算重叠",
+    "张量并行",
+    "MoE",
+    "流水线并行",
+    "预填充",
+    "PCIe"
+  ],
   "one_liner": "把 MoE 前的那次全量 AllReduce 切成两片扔到侧流，主流拿第一片就先算：藏住 1.77 ms、付出 0.64+0.35 ms，净赚 0.78 ms/层（实测整层 −0.79，逐位吻合）；同容器 A/B 端到端 +2.8%/6.8%/7.7%（C=8/16/32），但同一补丁在 TP2×PP4 上净 ≈ 0 —— 收益正比于「被暴露的通信时长」，不是模型规模。",
   "artifact": "index.html",
-  "extra_files": ["notes.md"],
+  "extra_files": [
+    "notes.md"
+  ],
   "session_id": "",
   "cwd": "",
   "sources": [
@@ -15,6 +25,7 @@
     "原始报告未公开；本页保留全部数字与推导，仅去除主机名、模型版本号、内部文档与环境变量标识"
   ],
   "visibility": "public",
+  "publish": true,
   "redactions": [
     "内部主机名与机器编号",
     "模型版本号（改为「78 层 MoE + 稀疏注意力模型」）",
