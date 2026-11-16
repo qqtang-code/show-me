@@ -1,0 +1,28 @@
+{
+  "title": "SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank",
+  "slug": "sglang-layer-split",
+  "category": "inference-systems",
+  "date": "2026-11-16",
+  "tags": ["SGLang", "LayerSplit", "DSA", "prefill CP", "PD disaggregation", "KV cache", "MLA", "并行策略"],
+  "one_liner": "LayerSplit 不新增并行维度，也不改任何 kernel 的计算形状 —— 它只挪动「第 l 层的 KV 落在哪张卡上」。每 rank 只 materialize ceil(L/S) 层加 1 层 remote scratch，非 owner 层靠 owner 广播整层 buffer 来读（搬的是整个 token pool，不是本批次 page）。只对 PD prefill worker 生效，要求 interleave CP、PP=1、mooncake 后端；S=4 时省 72%，同显存下 token 容量约 ×3.6。附层归属公式、五道门控的原文错误串、以及「PyNcclCommunicator 默认 disabled 导致 broadcast 静默 no-op」这个坑。",
+  "artifact": "index.html",
+  "extra_files": ["notes.md"],
+  "session_ref": "",
+  "cwd": "inference-systems/sglang-layer-split",
+  "sources": [
+    "SGLang v0.5.23 源码：mem_cache/dsa_cache_layer_split.py、layers/cp/utils.py、mem_cache/kv_cache_configurator.py、model_executor/pool_configurator.py",
+    "SGLang v0.5.23 源码：arg_groups/{fields/parallel.py, model_hook.py, choices.py}、configs/model_config.py",
+    "SGLang v0.5.23 源码：disaggregation/{prefill.py, common/conn.py}、layers/attention/dsa/utils.py",
+    "SGLang v0.5.23 文档：docs/docs/advanced_features/prefill_cp.mdx、docs/cookbook/autoregressive/GLM/GLM-5.2.mdx",
+    "SGLang 用例：test/registered/e2e/models/test_dsa_glm52_pd_mtp_cp_layersplit.py、test/registered/unit/mem_cache/{test_dsa_layer_shard_utils.py, test_dsa_layer_split_broadcast.py}",
+    "版本边界：flag 于 v0.5.16 引入（PR #29421，2026-07-09 合入 main）；v0.5.15 及更早无此文件与 flag",
+    "5.4 节示例算例由 5.1/5.2 的式子推导，非运行时实测"
+  ],
+  "visibility": "public",
+  "redactions": [
+    "本地 checkout 的绝对路径（正文只保留仓库相对路径）",
+    "内部 fork 的仓库地址与分支名（只保留 upstream 版本号与 commit 短哈希）",
+    "会话标识"
+  ],
+  "enriched": "2026-11-16"
+}

@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</title><!-- show-me:shell:begin -->
+<meta name="description" content="LayerSplit 不新增并行维度，也不改任何 kernel 的计算形状 —— 它只挪动「第 l 层的 KV 落在哪张卡上」。每 rank 只 materialize ceil(L/S) 层加 1 层 remote scratch，非 owner 层靠 owner 广播整层 buffer 来读（搬的是整个 token pool，不是本批次 page）。只对 PD prefill worker 生效，要求 interleave CP、PP=1、mooncake 后端；S=4 时省 72%，同显存下 token 容量约 ×3.6。附层归属公式、五道门控的原文错误串、以及「PyNcclCommunicator 默认 disabled 导致 broadcast 静默 no-op」这个坑。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank">
+<meta property="og:description" content="LayerSplit 不新增并行维度，也不改任何 kernel 的计算形状 —— 它只挪动「第 l 层的 KV 落在哪张卡上」。每 rank 只 materialize ceil(L/S) 层加 1 层 remote scratch，非 owner 层靠 owner 广播整层 buffer 来读（搬的是整个 token pool，不是本批次 page）。只对 PD prefill worker 生效，要求 interleave CP、PP=1、mooncake 后端；S=4 时省 72%，同显存下 token 容量约 ×3.6。附层归属公式、五道门控的原文错误串、以及「PyNcclCommunicator 默认 disabled 导致 broadcast 静默 no-op」这个坑。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/inference-systems/sglang-layer-split/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/inference-systems/sglang-layer-split/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  @media (max-width:640px){ code{overflow-wrap:anywhere} }
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:11px 14px;font-size:13.5px;color:#4a3a1c;margin:16px 0}
+  .note b{color:#7a3f00}
+  .conv{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:13px 16px;margin:16px 0;font-size:13.5px;color:#3b4860}
+  .conv .h{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:0 0 7px}
+  .conv ul{margin:0;padding-left:18px}
+  .conv li{margin:4px 0}
+
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:left;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);display:block;padding:0 0 3px;color:var(--dim2);font-size:11px;
+               letter-spacing:.04em;text-transform:uppercase;font-family:var(--mono)}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px}
+    td.k::before{content:none}
+  }
+
+  .flow{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .flow .step{display:grid;grid-template-columns:26px minmax(0,1fr);gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52;min-width:0;overflow-wrap:anywhere}
+  .flow .step .t b{color:var(--ink)}
+  .flow .step .t .where{font:11.5px var(--mono);color:var(--dim2);margin-top:4px;display:block;overflow-wrap:anywhere}
+
+  /* 层归属条：每层一个等宽段，段内不放字，标签交给下方图例 */
+  .own{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0;min-width:0}
+  .own .cap{font:600 11.5px var(--mono);letter-spacing:.05em;color:var(--dim2);text-transform:uppercase;margin:0 0 8px}
+  .own .strip{display:flex;gap:2px;min-height:34px;min-width:0}
+  .own .strip i{flex:1 1 0;min-width:0;border-radius:2px;display:block}
+  .own .legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:12px;font-size:12.5px;color:var(--dim);min-width:0}
+  .own .legend span{display:inline-flex;align-items:center;gap:6px;min-width:0}
+  .own .legend i{width:11px;height:11px;border-radius:3px;flex:none;border:1px solid #00000012}
+  .own .legend code{font-size:11.5px}
+  .r0{background:#7c9fe0} .r1{background:#8fd8c4} .r2{background:#f3c168} .r3{background:#e8a1c8}
+  .r4{background:#a9c8f5} .r5{background:#c9e8a8} .r6{background:#f0c9a0} .r7{background:#c7b3ea}
+
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:180px minmax(0,1fr) 104px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:minmax(0,1fr) 84px;gap:4px 10px}
+    .calc .ctl label{grid-column:1/-1}.calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent);min-width:0}
+  .calc select{padding:5px 8px;border:1px solid var(--line);border-radius:7px;font:13px var(--mono);background:#fff;color:var(--fg);max-width:100%}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .calc .row.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  @media (max-width:620px){.calc .row.g2,.calc .row.g3{grid-template-columns:minmax(0,1fr)}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px;min-width:0}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:17px/1.35 var(--mono);font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+  .calc .cell .v.good{color:var(--good)} .calc .cell .v.warn{color:var(--waste)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .calc .upd{font-size:12.5px;color:var(--dim);margin-top:14px}
+  .verdictbox{margin-top:14px;border-radius:10px;padding:11px 14px;font-size:13.5px;border:1px solid}
+  .verdictbox.ok{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .verdictbox.no{background:#fff4ec;border-color:#f0d9c8;color:#9a4d06}
+
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+
+  .fail{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:14px 16px;margin:12px 0;min-width:0}
+  .fail .msg{font:12px/1.7 var(--mono);color:#8a2f10;background:#fdf1ec;border:1px solid #f2dcd2;
+             border-radius:7px;padding:9px 11px;overflow-wrap:anywhere;margin:0 0 9px}
+  .fail .lay{font:11.5px var(--mono);color:var(--dim2);margin:0 0 8px;overflow-wrap:anywhere}
+  .fail ol{margin:0;padding-left:19px;font-size:13.5px;color:#3b4860}
+  .fail li{margin:4px 0}
+
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">17 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 11 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/decode-dp-attention-dcp/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-layer-split/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/deepinfer-vs-sglang/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-rail-m">43 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me</a><span class="sep">/</span>
+    <a href="../../index.html#cat-inference-systems">inference-systems</a><span class="sep">/</span>
+    <span>sglang-layer-split</span>
+  </div>
+
+  <h1>SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</h1>
+
+  <div class="metarow">
+    <span>2026-11-16</span>
+    <span>SGLang v0.5.23</span>
+    <span>DSA · PD · CP</span>
+    <span>读源码</span>
+  </div>
+
+  <p class="lead">SGLang 里叫 <code>layer split</code> 的东西只有一个：<code>--enable-dsa-cache-layer-split</code>。
+    它不新增并行维度，也不改变任何一个 kernel 的计算形状 —— 它只挪动一件事：<b>第 l 层的 KV 落在哪张卡上</b>。
+    本页把这条机制从层归属公式、buffer 分配、owner 广播、PD 传输出口的顺序走一遍，
+    并把「它和 TP / PP / DP 到底什么关系」按源码里的实际约束说清楚。</p>
+
+  <div class="tldr">
+    <h4>TL;DR · 五条</h4>
+    <ul>
+      <li><b>切的是 cache 的归属，不是计算。</b>TP 宽度、CP 的 token 分配、请求到 rank 的映射全都不变；
+        变的只有「第 <code>l</code> 层的 KV 存在谁手里」。</li>
+      <li><b>每 rank 只 materialize <code>ceil(L/S)</code> 层</b>（<code>S = attn_cp_size</code>），
+        外加 <b>1 层 remote scratch</b>；因此单卡 KV 从 <code>L</code> 层降到 <code>ceil(L/S)+1</code> 层。</li>
+      <li><b>只有 PD 的 prefill worker 能开。</b>必须 <code>--disaggregation-mode prefill</code>、
+        <code>--enable-prefill-cp --cp-strategy interleave</code>、<code>--attn-cp-size &gt; 1</code>、
+        <code>--pp-size 1</code>、transfer backend 为 mooncake。</li>
+      <li><b>非 owner 层的读 = owner 广播整层 buffer。</b>广播的张量是整个 <code>(size + page_size)</code> 行，
+        不是本批次用到的 page —— 这是这条路径上最容易被低估的通信量。</li>
+      <li><b>它买的是 prefill 侧的容量，不是单请求延迟。</b>同显存下 token 容量约 ×<code>S</code>；
+        代价是每读一层远程层就要搬一整层。</li>
+    </ul>
+  </div>
+
+  <div class="conv">
+    <div class="h">术语约定</div>
+    <ul>
+      <li><b>LayerSplit</b>：本页只指 <code>--enable-dsa-cache-layer-split</code> 打开的那套机制。
+        它与 PP 帮助文本里那句 <code>"the model is split by layer"</code> 不是一回事 —— 后者切的是计算图，
+        LayerSplit 切的是 KV cache 的归属，见 <a href="#s07">06 节</a>。</li>
+      <li><b>rank / owner</b>：CP 组内的序号与「拥有某层 KV 的 rank」；<b>scratch</b>：每个 rank 保留的那一份整层远程 buffer。</li>
+      <li><b>DSA</b>（DeepSeek Sparse Attention）、<b>MLA</b>（multi-head latent attention）、
+        <b>PD</b>（prefill/decode 分离）、<b>CP</b>（context parallel）保持英文，因为它们在日志与参数名里就是英文。</li>
+      <li>行号对应 <b>v0.5.23</b>；核心实现文件与本地 vendored snapshot 逐字节一致（见页脚）。</li>
+    </ul>
+  </div>
+
+  <h2 id="s01"><span class="n">01</span>它要解决的问题：MLA 的 KV 在 TP 组内是复制的</h2>
+
+  <p>先把前提摆清楚，否则后面每一步都像在讲优化，其实是在讲一个不得不做的取舍。</p>
+
+  <p>SGLang 的 MLA 后端里，每个 TP rank 都持有<b>完整的</b> KV cache —— 不是 <code>1/TP</code>。
+    多头潜在注意力把 K/V 压成一个共享的 latent（<code>kv_lora_rank + qk_rope_head_dim</code>），
+    各 head 读同一份 latent，所以按 head 切没有意义，TP 只切权重与计算。
+    结论：<b>加宽 TP 不会让 KV 变小，只会让算力变大。</b></p>
+
+  <p>DSA 模型在这之上还有一份 indexer 的 index-K cache，同样逐层、同样在 TP 组内复制。
+    prefill 侧要处理的是整段长上下文，KV + indexer 一起把显存吃满，
+    于是 <code>max_total_num_tokens</code>（也就是 radix cache 能装多少 token）被压下来，
+    prefill 吞吐直接跟着掉。</p>
+
+  <p>LayerSplit 的做法很直接：既然 KV 是「层 × token × dim」的三维张量，而层这个维度在 TP 组内本来就一模一样，
+    那就<b>把层按 CP rank 分掉</b>。第 <code>l</code> 层的 KV 只由它的 owner 写，
+    别的 rank 要读就向 owner 广播一份到 scratch。复制变成了按层分持。</p>
+
+  <div class="note">
+    <b>为什么必须挂在 CP 上，而不是 TP 上？</b>
+    因为分完之后每张卡都缺一部分层，读远程层必须有一次集合通信把整层搬过来。
+    CP 组本来就是「同一次前向里、处理同一批 token 的若干 rank」，天然是这次广播的合适作用域；
+    而且 PD 的传输侧本来就要按 CP rank 分片发。源码里广播组的选法就是 <code>get_parallel().attn_cp_group</code>
+    （<code>mem_cache/dsa_cache_layer_split.py:253-269</code>）。
+  </div>
+
+  <h2 id="s02"><span class="n">02</span>角色与边界：谁持有什么，谁不参与</h2>
+
+  <p>把参与方列全，后面读代码时就不会把「池子」和「通信器」搞混。</p>
+
+  <table>
+    <thead>
+      <tr><th>角色</th><th>谁</th><th>持有什么</th><th>落点</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="k">owner rank</td>
+        <td>按连续区间分到的那个 CP rank</td>
+        <td>该层<b>完整</b>的 <code>(size + page_size, 1, kv_dim)</code> 行</td>
+        <td class="v">dsa_cache_layer_split.py:222</td>
+      </tr>
+      <tr>
+        <td class="k">非 owner rank</td>
+        <td>其余 CP rank</td>
+        <td>该层一个 <b>0 行</b>占位，只为了让 <code>kv_buffer</code> 的下标仍然对齐层号</td>
+        <td class="v">dsa_cache_layer_split.py:306-320</td>
+      </tr>
+      <tr>
+        <td class="k">remote scratch</td>
+        <td>每个 rank 各一份</td>
+        <td>正好<b>一整层</b>：<code>remote_kv_buffer</code>（indexer 侧还有一份 <code>remote_buffer</code>）</td>
+        <td class="v">dsa_cache_layer_split.py:320-330</td>
+      </tr>
+      <tr>
+        <td class="k">广播通信器</td>
+        <td><code>attn_cp_group</code> 上的 <code>PyNcclCommunicator</code></td>
+        <td>一条专用 NCCL communicator + 一条 <code>kv_broadcast_stream</code>（用于一层预取）</td>
+        <td class="v">dsa_cache_layer_split.py:253-269</td>
+      </tr>
+      <tr>
+        <td class="k">PD 传输口</td>
+        <td>每个 prefill CP rank</td>
+        <td>只上报<b>自己拥有的那段连续层</b>（<code>layer_shard_start</code> 起）</td>
+        <td class="v">disaggregation/prefill.py:272-299</td>
+      </tr>
+      <tr>
+        <td class="k">不参与</td>
+        <td>draft worker（MTP / EAGLE 草稿）</td>
+        <td>保持完整 cache；门控里第一项就是 <code>not model_runner.is_draft_worker</code></td>
+        <td class="v">layers/cp/utils.py:45-56</td>
+      </tr>
+      <tr>
+        <td class="k">不参与</td>
+        <td>decode worker</td>
+        <td>普通本地 decode cache；开在 decode 上会直接报错，见 <a href="#s09">09 节</a></td>
+        <td class="v">arg_groups/model_hook.py:365-380</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="s03"><span class="n">03</span>机制：从层归属到广播，五步走完</h2>
+
+  <h3 class="mini">3.1 层归属：连续、均衡、前 rem 个 rank 多一层</h3>
+
+  <p>整个机制的地基是一个纯函数，没有任何通信：</p>
+
+<pre><code>get_layer_shard_range(rank, S, L):
+  base  = L // S
+  rem   = L %  S
+  start = rank * base + min(rank, rem)
+  end   = start + base + (1 if rank &lt; rem else 0)
+  return start, end</code></pre>
+  <p class="hint"><code>layers/cp/utils.py:97-106</code>；<code>get_layer_owner()</code> 是它的反函数（<code>:108-126</code>）。</p>
+
+  <p>取 <code>L = 10, S = 4</code>，区间与归属是（单测里逐项断言过，<code>test/registered/unit/mem_cache/test_dsa_layer_shard_utils.py:14-27</code>）：</p>
+
+<pre><code>r0 → [0, 3)   r1 → [3, 6)   r2 → [6, 8)   r3 → [8, 10)
+owner(layer 0..9) = [0,0,0, 1,1,1, 2,2, 3,3]</code></pre>
+
+  <div class="own">
+    <p class="cap">层 → owner 的分布（滑块在下方 05 节，改 <code>L</code> / <code>S</code> 这里会跟着变）</p>
+    <div class="strip" id="strip" aria-hidden="true"></div>
+    <div class="legend" id="striplegend"></div>
+  </div>
+
+  <p>注意这个函数对「层数不能被 S 整除」是良定义的：<code>L = 2, S = 4</code> 时后面两个 rank 拿到空区间
+    <code>[2, 2)</code>，它们自己的 scratch 仍然存在，只是所有层都要广播。
+    <code>get_layer_owner()</code> 对空区间不会返回那个 rank，因为它的判据是 <code>start &lt;= i &lt; end</code>。</p>
+
+  <h3 class="mini">3.2 分配：owner 拿满，别人拿 0 行，另备一份 scratch</h3>
+
+<pre><code>kv_buffer[i] = (size + page_size, 1, kv_dim)   if _is_layer_owned(start_layer + i)
+             = (0,              1, kv_dim)     otherwise      # 0 行占位，保持层号对齐
+
+remote_kv_buffer = (size + page_size, 1, kv_dim)                # 全 rank 各一份</code></pre>
+  <p class="hint"><code>dsa_cache_layer_split.py:306-343</code>。</p>
+
+  <p>「0 行占位」这个细节值得停一下：它让 <code>kv_buffer[layer_id - start_layer]</code> 这个寻址方式完全不用改，
+    所有既有的按层遍历（<code>move_kv_cache</code>、HiCache 的 CPU offload、PD 的 buffer 上报）都能原样工作 ——
+    只是遇到 0 行的层直接 <code>continue</code>。</p>
+
+  <p>而 <code>+1</code> 这个 scratch 也进了显存账：KV 池的 cell size 是按
+    <code>effective_num_layers = max(1, ceil(L/S) + 1)</code> 算的（<code>layers/cp/utils.py:76-95</code>，
+    被 <code>model_executor/pool_configurator.py:349</code> 调用）。
+    所以「省了多少」的准确式子不是 <code>1 - 1/S</code>，而是：</p>
+
+  <div class="note">
+    <code>单卡 KV 占比 = (ceil(L/S) + 1) / L</code>，省下 <code>1 - (ceil(L/S) + 1) / L</code>。
+    GLM 的 cookbook 里写的「up to 75%」（<code>docs/cookbook/autoregressive/GLM/GLM-5.2.mdx:337</code>）
+    是忽略 scratch 的渐近值 <code>1 - 1/S</code>，在 <code>S = 4</code> 时等于 75%。
+    同一显存下 token 容量约涨到 <code>L / (ceil(L/S) + 1)</code> 倍。
+  </div>
+
+  <h3 class="mini">3.3 写：只有 owner 落盘，写会作废远程副本</h3>
+
+  <p><code>set_kv_buffer()</code> / <code>set_mla_kv_buffer()</code> 在写完本 rank 的 buffer 之后，
+    若发现 <code>remote_kv_layer_id == layer_id</code>，就直接把它置 <code>None</code>（<code>:395-420</code>、<code>:422-448</code>）。
+    理由很朴素：scratch 里那份可能已经旧了，下次读必须重新广播。
+    同一个道理，indexer 侧有自己的 <code>invalidate()</code>（<code>:129-132</code>），靠 <code>remote_layer_id</code> 判断。</p>
+
+  <h3 class="mini">3.4 读：owner 广播进 scratch，且提前一层预取</h3>
+
+  <p>读路径是这条机制里唯一有通信的地方：</p>
+
+<pre><code>get_key_buffer(l) / get_value_buffer(l)
+  └─ _get_broadcastable_kv_buffer(l)                    # :507
+       if remote_kv_layer_id == l: return remote_kv_buffer   # 命中，直接用
+       src = kv_buffer[l] if _is_layer_owned(l) else None
+       _broadcast_tensor_from_owner(remote_kv_buffer, l, src_tensor=src)   # :271
+       remote_kv_layer_id = l
+       return remote_kv_buffer</code></pre>
+
+  <p>而 <code>_broadcast_tensor_from_owner()</code> 里那句 <code>comm.broadcast(tensor, src=owner_rank)</code>
+    广播的是 <b><code>remote_kv_buffer</code> 整个张量</b> —— 也就是 <code>size + page_size</code> 行全量，
+    不是本批次命中的那几页。这一点直接决定了 04 节的通信账，也是这条路径最反直觉的地方。</p>
+
+  <p>真正让它可用的是一层预取。<code>DeepseekV2DecoderLayer</code> 在做第 <code>l</code> 层注意力之前，
+    会先把第 <code>l+1</code> 层的广播踢出去（<code>layers/attention/dsa/utils.py:312-328</code> 的
+    <code>maybe_prefetch_next_full_attention_kv()</code> → <code>prefetch_kv_buffer()</code>，<code>:461-505</code>）：</p>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t"><b>当前 stream</b> 上算第 <code>l</code> 层的注意力
+      <span class="where">读的是 remote_kv_buffer 里已经就位的那一层</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t"><b>kv_broadcast_stream</b> 上同时发起第 <code>l+1</code> 层的广播
+      <span class="where">prefetch_kv_buffer()：先 wait_stream(current)，再切到专用 stream 做 broadcast</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t">第 <code>l+1</code> 层要读时，<code>_finalize_pending_kv_broadcast()</code> 把
+      pending 提升成 <code>remote_kv_layer_id</code>，并让当前 stream <code>wait_stream</code> 广播流
+      <span class="where">:450-459；广播与计算重叠，等待只发生在真正需要数据的那一刻</span></div></div>
+  </div>
+
+  <p>owner rank 自己也走这条路：它的 <code>src_tensor</code> 是自己那份满 buffer，
+    于是 <code>tensor.copy_(src_tensor)</code> 先拷进 scratch，再作为 broadcast 的 source 参与集合通信 ——
+    集合通信必须所有 rank 都进，owner 不能缺席，只能多拷一次。</p>
+
+  <h3 class="mini">3.5 PD 传输：每个 rank 只报自己那段连续层</h3>
+
+  <p>prefill 侧算完的 KV 要经 PD 传给 decode。LayerSplit 之后没有任何一个 rank 持有完整 cache，
+    于是三处语义一起改：</p>
+
+  <table>
+    <thead><tr><th>改动</th><th>原来</th><th>LayerSplit 下</th><th>落点</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">上报哪些层</td>
+        <td>全部层的 buffer 指针</td>
+        <td>只报 owned 层（0 行的层天然被跳过）</td>
+        <td class="v">dsa_cache_layer_split.py:362-375</td>
+      </tr>
+      <tr>
+        <td class="k">层段标签</td>
+        <td><code>start_layer</code> / <code>end_layer</code></td>
+        <td><code>layer_shard_start</code> 起，长度 = 上报的指针个数</td>
+        <td class="v">disaggregation/prefill.py:282-299</td>
+      </tr>
+      <tr>
+        <td class="k">谁发</td>
+        <td>CP 组内只有 rank 0 发（CP 复制状态只发一份）</td>
+        <td><b>全 CP rank 都发</b>：<code>cp_sharded_prefill</code> 把 <code>enable_all_cp_ranks_for_transfer</code> 置真</td>
+        <td class="v">disaggregation/common/conn.py:385-391</td>
+      </tr>
+      <tr>
+        <td class="k">CP 复制状态</td>
+        <td>非 0 号 rank 跳过</td>
+        <td>不跳过 —— 每个 rank 拥有的是不同的状态层</td>
+        <td class="v">disaggregation/common/conn.py:513-526</td>
+      </tr>
+      <tr>
+        <td class="k">draft cache</td>
+        <td>—</td>
+        <td>只由最后一个 shard rank 发（draft 不切层，得有人替它发全量）</td>
+        <td class="v">disaggregation/prefill.py:277-279</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>第 4 行那条注释把话说得很直白：<code>"Cache layer split is the exception because each CP rank owns
+    different state layers."</code> —— 这不是优化，是正确性要求：漏发就会让 decode 侧少掉一部分状态层。</p>
+
+  <h2 id="s04"><span class="n">04</span>配置项、默认值与取值范围</h2>
+
+  <p>下面这张表的「要求」一列不是建议，是 <code>ServerArgs</code> 里逐条 raise 出来的硬约束。
+    默认值取自 <code>arg_groups/fields/*.py</code>。</p>
+
+  <table>
+    <thead><tr><th>参数</th><th>默认</th><th>取值</th><th>LayerSplit 下的要求</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">--enable-dsa-cache-layer-split</td><td class="v">False</td><td class="v">bool</td>
+        <td>必须显式打开</td>
+      </tr>
+      <tr>
+        <td class="k">--enable-prefill-cp</td><td class="v">False</td><td class="v">bool</td>
+        <td>必须打开，否则报「requires --enable-prefill-cp」</td>
+      </tr>
+      <tr>
+        <td class="k">--cp-strategy</td><td class="v">None</td><td class="v">zigzag | interleave</td>
+        <td>必须 <code>interleave</code>；<code>zigzag</code> 与 LayerSplit 组合直接拒绝</td>
+      </tr>
+      <tr>
+        <td class="k">--attn-cp-size</td><td class="v">1</td><td class="v">int &gt; 1</td>
+        <td>必须 &gt; 1，它就是 <code>S</code>；运行时门控里 <code>shard_size &lt;= 1</code> 会静默退回不切</td>
+      </tr>
+      <tr>
+        <td class="k">--tp</td><td class="v">1</td><td class="v">int</td>
+        <td>需被 <code>dp × attn_cp_size</code> 整除；DSA interleave 的推荐拓扑是 DP=1、CP=TP</td>
+      </tr>
+      <tr>
+        <td class="k">--disaggregation-mode</td><td class="v">null</td><td class="v">prefill | decode | null</td>
+        <td>必须是 <code>prefill</code>；<code>decode</code> 与 null 各有独立报错文案</td>
+      </tr>
+      <tr>
+        <td class="k">--disaggregation-transfer-backend</td><td class="v">mooncake</td>
+        <td class="v">mooncake | nixl | ascend | fake | mori | mooncake_tcp</td>
+        <td>只接受 <code>mooncake</code> / <code>mooncake_tcp</code>（mori/nixl 明确写着 later）</td>
+      </tr>
+      <tr>
+        <td class="k">--pp-size</td><td class="v">1</td><td class="v">int</td>
+        <td>必须为 1；&gt; 1 直接拒绝</td>
+      </tr>
+      <tr>
+        <td class="k">模型架构</td><td class="v">—</td><td class="v">—</td>
+        <td>须落在 <code>is_deepseek_dsa()</code> 白名单且带 <code>index_topk</code></td>
+      </tr>
+      <tr>
+        <td class="k">--kv-cache-dtype</td><td class="v">auto</td><td class="v">fp8_e4m3 等</td>
+        <td>无强制；e2e 用例用 <code>fp8_e4m3</code>（indexer 的 index-K 另算 128+4 字节/层/token）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>架构白名单在 <code>configs/model_config.py:191-212</code>，判据是「arch 命中列表 <b>且</b>
+    <code>index_topk is not None</code>」。列表里同时包含 DeepSeek V3.2 / V4 系、GLM 的 MoE-DSA 系、
+    LongCat-Flash、dots3、Hunyuan-V4、Mistral Large 3 等 —— 共同点是它们都真的带一个稀疏 indexer。
+    换句话说：<b>这不是「MLA 就能开」，是「有 DSA indexer 才能开」</b>。</p>
+
+  <div class="note">
+    <b>「静默退回」值得单独记一笔。</b>
+    <code>get_glm_dsa_cp_layer_shard_info()</code> 在 <code>attn_cp_size &lt;= 1</code> 时返回 <code>(None, 1)</code>，
+    于是 <code>kv_cache_configurator.py:2352</code> 的 <code>elif</code> 不成立、退回普通 pool。
+    也就是说：<b>flag 开了但没给 <code>--attn-cp-size</code>，服务能起来、日志不吵，只是什么也没切。</b>
+    排查时先看 <code>Layer shard plan (continuous)</code> 那行 INFO 在不在。
+  </div>
+
+  <h2 id="s05"><span class="n">05</span>显存 / 通信 / 吞吐 / 延迟：把账算出来</h2>
+
+  <h3 class="mini">5.1 显存：一个式子，两个加数</h3>
+
+<pre><code>per_token_per_layer = (kv_lora_rank + qk_rope_head_dim) × dtype_bytes   # MLA latent
+                    + (index_head_dim + index_head_dim/128 × 4)        # DSA index-K + scale，fp8
+                    = 576 + 132 = 708 B                                  # fp8 示例
+
+单卡 KV = (ceil(L/S) + 1) × tokens × per_token_per_layer
+基线    =  L              × tokens × per_token_per_layer</code></pre>
+  <p class="hint">indexer 那项来自 <code>model_executor/pool_configurator.py:560-571</code>（<code>quant_block_size = 128</code>，
+    <code>memory_pool.py:5280</code>；<code>index_kpool</code> 默认 1）。index-K 用独立的 fp8 buffer，不跟 <code>--kv-cache-dtype</code> 走。</p>
+
+  <h3 class="mini">5.2 通信：每次远程层读 = 一整层</h3>
+
+  <p>因为广播的是整个 <code>remote_kv_buffer</code>（见 3.4），单次远程层读的字节数是
+    <code>(size + page_size) × per_token_per_layer</code>，与这批请求实际命中多少 page <b>无关</b>。
+    一次前向里被读的远程层约 <code>L - ceil(L/S)</code> 层，于是：</p>
+
+<pre><code>每次前向的广播量 ≈ (L - ceil(L/S)) × (size + page_size) × per_token_per_layer</code></pre>
+
+  <p>这笔账的量级完全由 <code>size</code>（也就是 <code>max_total_num_tokens</code>）决定 ——
+    而 LayerSplit 恰好把这个池子撑大了 <code>S</code> 倍。这是它最需要被理解的一处张力：
+    <b>容量与广播量同向增长</b>。缓解手段是那层预取（把广播塞进计算空档）与
+    <code>S</code> 不要盲目加大（<code>S</code> 越大，远程层占比越高）。</p>
+
+  <h3 class="mini">5.3 吞吐与延迟</h3>
+
+  <table>
+    <thead><tr><th>维度</th><th>方向</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td class="k">prefill 吞吐</td><td>↑ 约 ×S</td><td>同显存下 <code>max_total_num_tokens</code> 涨，能并行的 prefill token 变多</td></tr>
+      <tr><td class="k">prefill 单层延迟</td><td>↑ 一点</td><td>远程层的读要等广播；预取把等待压到一次 stream 同步</td></tr>
+      <tr><td class="k">prefill 显存</td><td>↓ 到 <code>(ceil(L/S)+1)/L</code></td><td>3.2 的式子</td></tr>
+      <tr><td class="k">decode 延迟</td><td>不变</td><td>LayerSplit 不在 decode worker 上运行，decode 收的是完整分片</td></tr>
+      <tr><td class="k">PD 传输量</td><td>不变</td><td>要传的还是同一份 KV，只是换了发送方：从 1 个 rank 发全量，变成 S 个 rank 各发自己那段</td></tr>
+    </tbody>
+  </table>
+
+  <p>最后一行容易被误解成「传输量变多」。没有：<code>get_contiguous_buf_infos()</code> 报的是
+    owned 层，S 个 rank 报的是<b>互不相交</b>的层段，加起来正好是原来那一份。
+    变的是<b>并发度</b>（S 条连接各发 1/S），不是总量。</p>
+
+  <h3 class="mini">5.4 自己算一遍</h3>
+
+  <div class="calc">
+    <div class="glabel">输入</div>
+    <div class="ctl">
+      <label for="inL">模型层数 L</label>
+      <input id="inL" type="range" min="16" max="128" step="1" value="61">
+      <span id="outL">61</span>
+    </div>
+    <div class="ctl">
+      <label for="inS">attn_cp_size S</label>
+      <input id="inS" type="range" min="2" max="16" step="1" value="4">
+      <span id="outS">4</span>
+    </div>
+    <div class="ctl">
+      <label for="inT">max_total_num_tokens</label>
+      <input id="inT" type="range" min="4096" max="262144" step="4096" value="65536">
+      <span id="outT">65536</span>
+    </div>
+    <div class="ctl">
+      <label for="inD">KV dtype</label>
+      <select id="inD">
+        <option value="1" selected>fp8_e4m3 (1 B)</option>
+        <option value="2">bf16 (2 B)</option>
+      </select>
+      <span></span>
+    </div>
+    <div class="ctl">
+      <label for="inB">有效互连带宽 GB/s</label>
+      <input id="inB" type="range" min="100" max="1800" step="50" value="600">
+      <span id="outB">600</span>
+    </div>
+
+    <div class="glabel">结果</div>
+    <div class="row g3">
+      <div class="cell"><span class="k">每 rank 拥有层数</span><span class="v" id="rOwned">—</span><span class="d" id="rOwnedD">ceil(L/S)+1</span></div>
+      <div class="cell"><span class="k">单卡 KV</span><span class="v" id="rRank">—</span><span class="d">含 1 层 scratch</span></div>
+      <div class="cell"><span class="k">基线（L 层）</span><span class="v" id="rBase">—</span><span class="d">不切层时单卡持有</span></div>
+    </div>
+    <div class="row g3" style="margin-top:12px">
+      <div class="cell"><span class="k">省下</span><span class="v good" id="rSave">—</span><span class="d" id="rSaveD">1 − (ceil(L/S)+1)/L</span></div>
+      <div class="cell"><span class="k">每次前向远程层数</span><span class="v" id="rRemote">—</span><span class="d">L − ceil(L/S)</span></div>
+      <div class="cell"><span class="k">每次前向广播量</span><span class="v warn" id="rBcast">—</span><span class="d" id="rBcastD">按整层 buffer 估</span></div>
+    </div>
+    <div class="row g2" style="margin-top:12px">
+      <div class="cell"><span class="k">按给定带宽的广播时间</span><span class="v" id="rTime">—</span><span class="d">最坏情况：不外溢到计算空档</span></div>
+      <div class="cell"><span class="k">token 容量倍数</span><span class="v" id="rCap">—</span><span class="d">同显存下 L / (ceil(L/S)+1)</span></div>
+    </div>
+
+    <div class="verdictbox ok" id="verdict">—</div>
+  </div>
+
+  <p class="hint" style="margin-top:10px">所有数字都是<b>由上面两个式子推出来的</b>，不是实测。
+    <code>size + page_size</code> 里的 <code>page_size</code> 按 1 计（相对 <code>size</code> 可忽略）；
+    带宽是你在上面自己填的有效值，不是任何一张卡的规格。</p>
+
+  <h2 id="s06"><span class="n">06</span>它和 TP / PP / DP 到底什么关系</h2>
+
+  <p>先把最容易混的一处讲掉：<b>SGLang 里「按层切」有两种，帮助文本里都出现过 layer 这个词，但切的东西完全不同。</b></p>
+
+  <table>
+    <thead><tr><th>维度</th><th>切什么</th><th>谁持有第 l 层的<b>权重</b></th><th>谁持有第 l 层的<b>KV</b></th><th>通信原语</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">TP</td><td>每层的权重矩阵（按 head / 列切）</td>
+        <td>全部 rank 各持 1/TP</td><td><b>全部 rank 各持一份完整</b>（MLA）</td>
+        <td>all-reduce / all-gather</td>
+      </tr>
+      <tr>
+        <td class="k">PP<br><span class="hint">「model is split by layer」</span></td>
+        <td>计算图按层段切成 stage</td>
+        <td>只有该 stage 的 rank 持有这段层</td><td>只有该 stage 的 rank 持有这段层的 KV</td>
+        <td>点对点 <code>send_tensor_dict</code></td>
+      </tr>
+      <tr>
+        <td class="k">DP</td><td>请求批次</td><td>每个副本都完整</td><td>每个副本都完整（各自装自己的请求）</td>
+        <td>无（只在负载均衡层）</td>
+      </tr>
+      <tr>
+        <td class="k">CP<br><span class="hint">prefill CP</span></td>
+        <td>一条序列的 token（interleave / zigzag）</td>
+        <td>每个 CP rank 都完整</td><td>每个 CP rank 都完整</td>
+        <td>all-gather（attention 的 KV）</td>
+      </tr>
+      <tr style="background:#f7faff">
+        <td class="k">LayerSplit</td>
+        <td><b>KV/indexer cache 的层归属</b></td>
+        <td>不变（仍由 TP 决定）</td>
+        <td><b>只有 owner 持有，其余 rank 读 scratch</b></td>
+        <td>broadcast（owner → CP 组）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>一句话概括：<b>TP / PP / DP / CP 是「谁来算」，LayerSplit 是「谁存」。</b>
+    前四者改变计算图、改变每个 kernel 的形状；LayerSplit 一个 kernel 都不改，
+    它只是给 <code>kv_buffer</code> 装了一个「按层查表 — 查不到就去 owner 拿」的间接层。</p>
+
+  <h3 class="mini">6.1 组合关系</h3>
+
+  <table>
+    <thead><tr><th>组合</th><th>能不能</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="k">× TP</td><td>必须</td><td><code>S = attn_cp_size</code> 嵌在 TP 世界里；推荐拓扑 CP=TP、DP=1，此时 <code>S = TP</code></td></tr>
+      <tr><td class="k">× CP</td><td>寄生</td><td>没有 CP 就没有 owner 广播的作用域；<code>--enable-prefill-cp</code> 是硬前提</td></tr>
+      <tr><td class="k">× PP</td><td><b>不行</b></td><td><code>pp_size &gt; 1</code> 直接 raise；原文是「CP + PP has not been validated for this feature」</td></tr>
+      <tr><td class="k">× DP attention</td><td>受限</td><td>DSA interleave 的文档口径是「keep DP=1」；e2e 里 DP 只出现在 decode 侧的变体上</td></tr>
+      <tr><td class="k">× PD</td><td>必须</td><td>只有 prefill worker 能开，且必须是 PD 部署 —— 光开 prefill CP 不构成 PD</td></tr>
+      <tr><td class="k">× EAGLE / MTP</td><td>并存但不切</td><td>draft worker 保持完整 cache；门控第一项就是 <code>not is_draft_worker</code></td></tr>
+      <tr><td class="k">× EP / MoE A2A</td><td>正交</td><td>e2e 的 mixed-MoE 变体在 decode 侧叠了 <code>--ep-size 4 --moe-a2a-backend deepep</code>，prefill 侧不受影响</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="s07"><span class="n">07</span>最小配置示例</h2>
+
+  <p>下面这份是 e2e 用例的骨架（<code>test/registered/e2e/models/test_dsa_glm52_pd_mtp_cp_layersplit.py:38-91</code>），
+    4 卡 prefill + 4 卡 decode。注意 <code>--tp 4</code> 与 <code>--attn-cp-size 4</code> 相等 ——
+    这就是文档里「CP=TP」的那个推荐拓扑，此时 <code>S = 4</code>，每卡持有 <code>ceil(L/4)+1</code> 层。</p>
+
+<pre><code># ── prefill worker：开 LayerSplit 的那一侧 ────────────────────────────
+python -m sglang.launch_server \
+  --model-path nvidia/GLM-5.2-NVFP4 \
+  --tp 4 --attn-cp-size 4 \
+  --enable-prefill-cp --cp-strategy interleave \
+  --enable-dsa-cache-layer-split \
+  --dsa-prefill-backend trtllm \
+  --kv-cache-dtype fp8_e4m3 \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend mooncake \
+  --mem-fraction-static 0.85 \
+  --chunked-prefill-size 4096 --max-prefill-tokens 4096 \
+  --speculative-algorithm EAGLE --speculative-num-steps 5 \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens 6
+
+# ── decode worker：普通本地 cache，靠 PD 收完整分片 ───────────────────
+python -m sglang.launch_server \
+  --model-path nvidia/GLM-5.2-NVFP4 \
+  --tp 4 --dsa-decode-backend trtllm \
+  --kv-cache-dtype fp8_e4m3 \
+  --disaggregation-mode decode \
+  --base-gpu-id 4 \
+  --mem-fraction-static 0.85 \
+  --speculative-algorithm EAGLE --speculative-num-steps 5 \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens 6</code></pre>
+
+  <p>起服务后先确认这三件事，任何一条不对就说明没真正生效：</p>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t">日志里有 <code>Layer shard plan (continuous): layer_num=…, shard_size=4, rank=…, local=[…), global=[…), partitions=…</code>
+      <span class="where">dsa_cache_layer_split.py:237-251；没有这行 = pool 没换成 LayerSplit 版本</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t">日志里有 <code>Initialized dedicated layer-shard broadcast NCCL communicator: rank=…, world_size=…</code>
+      <span class="where">:253-269；world_size 应等于 <code>--attn-cp-size</code></span></div></div>
+    <div class="step"><div class="i">3</div><div class="t">各 rank 的 <code>global=[a, b)</code> 区间<b>互不相交且并起来是 <code>[0, L)</code></b>
+      <span class="where">把 4 个 rank 的这行拼起来对齐一次，比任何猜测都快</span></div></div>
+  </div>
+
+  <h2 id="s08"><span class="n">08</span>限制、注意事项与易错点</h2>
+
+  <p>下面每条都带原文错误串。诊断顺序是「先看报错属于哪一层」，因为 <code>ServerArgs</code> 的校验是有先后顺序的，
+    同时违反两条时只会看到先触发的那条。</p>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split is only supported for DSA (DeepSeek Sparse Attention) models.</p>
+    <p class="lay">arg_groups/model_hook.py:187 · 模型架构门</p>
+    <ol>
+      <li>确认 <code>architectures[0]</code> 在 <code>is_deepseek_dsa()</code> 白名单里。</li>
+      <li>确认 <code>hf_config.index_topk is not None</code> —— 白名单命中但没有 <code>index_topk</code> 同样为假。</li>
+      <li>普通 MLA 模型（无 indexer）没有这条路，别找替代开关。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split is not supported on decode workers. This flag is a prefill-CP optimization; decode receives full cache shards through PD transfer.</p>
+    <p class="lay">arg_groups/model_hook.py:365-375 · PD 角色门</p>
+    <ol>
+      <li><code>--disaggregation-mode decode</code> 上不要加这个 flag，删掉即可。</li>
+      <li>它不是「decode 侧也能省显存」的开关；decode 的 cache 是 PD 传过来的完整分片。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split is only supported on PD prefill workers. Non-PD workers also run decode and require ordinary local decode cache semantics.</p>
+    <p class="lay">arg_groups/model_hook.py:376-380 · 同一道门的 else 分支</p>
+    <ol>
+      <li>没写 <code>--disaggregation-mode</code>（unified 部署）时触发这一条。</li>
+      <li>unified 部署里同一个 worker 既要 prefill 又要 decode，而非 owner rank 没有完整 cache，decode 会读到错的层 —— 这是拒绝而不是警告的原因。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split requires --enable-prefill-cp and --cp-strategy interleave.</p>
+    <p class="lay">arg_groups/model_hook.py:381-387 · CP 形状门</p>
+    <ol>
+      <li>两个 flag 缺一不可；<code>--cp-strategy zigzag</code> 同样触发。</li>
+      <li>GLM 的 cookbook 里另有一条：GLM-5.2 的 zigzag prefill CP 本身暂不可用，只能用 <code>interleave</code>。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split currently only supports the mooncake transfer backend (mooncake / mooncake_tcp). Got --disaggregation-transfer-backend 'nixl'. mori/nixl support will be added later by the community.</p>
+    <p class="lay">arg_groups/model_hook.py:388-401 · 传输后端门</p>
+    <ol>
+      <li>原因是这条路径依赖「mooncake 的全 CP rank KV/indexer 传输」；源码注释直接写明 mori/nixl 是临时限制。</li>
+      <li>默认值就是 <code>mooncake</code>，所以只有显式改过后端时才会撞上。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split is not supported with pipeline parallelism (pp_size &gt; 1) yet. It requires prefill context parallelism, and CP + PP has not been validated for this feature.</p>
+    <p class="lay">arg_groups/model_hook.py:402-408 · PP 门</p>
+    <ol>
+      <li>PP 与 CP 的组合在别处是支持的（prefill CP × PP 有文档），但叠上 LayerSplit 就没有验证过。</li>
+      <li>要跨机放 stage 时，只能用「单机内 CP 组 + PP 放不同 stage」，不能同时开 LayerSplit。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">LayerSplitDSATokenToKVPool requires layer_shard_size &gt; 1</p>
+    <p class="lay">mem_cache/dsa_cache_layer_split.py:203-205 · 构造函数断言</p>
+    <ol>
+      <li>正常路径下 <code>get_glm_dsa_cp_layer_shard_info()</code> 已经把 <code>shard_size &lt;= 1</code> 挡在外面（返回 <code>None</code> 从而不进这个分支）。</li>
+      <li>看到这条断言说明有人绕过门控直接构造池子 —— 通常是测试或 patch 里的问题。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">（无报错，但 attention 结果错乱 / 远程层读到旧数据）</p>
+    <p class="lay">dsa_cache_layer_split.py:289-295 的源码注释描述的坑</p>
+    <ol>
+      <li><code>PyNcclCommunicator</code> 默认 <code>disabled=True</code>，只在 CUDA graph capture 期间由 <code>change_state</code> 打开。</li>
+      <li>如果直接 <code>comm.broadcast(...)</code>，它是一个<b>静默 no-op</b>：非 owner rank 读到的还是 scratch 里的旧内容，不报错、不崩、只是算错。</li>
+      <li>所以源码在广播处显式包了一层 <code>with comm.change_state(enable=True)</code>。改这条路径时，这行不能省。</li>
+      <li>诊断信号：GSM8K 之类的精度在「偶发、与 batch 组成相关」地掉；单请求、短序列可能完全正常。</li>
+    </ol>
+  </div>
+
+  <div class="note">
+    <b>还有一条不是错误、但会误导人的现象：</b>开了 flag 却没给 <code>--attn-cp-size</code>，
+    服务正常启动、没有 warning、也没有 <code>Layer shard plan</code> 日志 —— 因为池子根本没换。
+    见 04 节末尾那条「静默退回」。
+  </div>
+
+  <h2 id="s09"><span class="n">09</span>常见误解</h2>
+
+  <div class="myth">
+    <div class="w">「LayerSplit 就是 PP 的另一种叫法。」</div>
+    <div class="r">PP 的帮助文本确实写着 <code>"the model is split by layer"</code>，但那句话描述的是<b>计算图切段</b>：
+      第 l 层的权重只在一个 stage 上。LayerSplit 不动权重、不动计算图，
+      它切的是 KV cache 的<b>归属</b>，而且恰恰要求 <code>pp_size == 1</code>。
+      两者同名不同物，<a href="#s06">06 节</a>那张表就是为这句话准备的。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「S 越大省得越多，所以往大了开。」</div>
+    <div class="r">显存确实单调下降（<code>(ceil(L/S)+1)/L</code>），但<b>远程层占比 <code>1 - ceil(L/S)/L</code> 同时在涨</b>，
+      而每次远程层读要搬一整层。S 从 4 加到 8，显存再多省一点，广播量却接近翻倍。
+      S 的上界由 <code>tp % (dp × attn_cp_size) == 0</code> 和机器规模决定，
+      但真正的上限是互连带宽，不是这个整除条件。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「广播只传这批请求命中的那几页 KV。」</div>
+    <div class="r">不是。<code>_broadcast_tensor_from_owner(self.remote_kv_buffer, …)</code> 广播的是
+      <code>remote_kv_buffer</code> <b>整个张量</b>（<code>size + page_size</code> 行），
+      与 batch 命中多少 page 无关。这也是为什么「预取一层」不是锦上添花而是必需 ——
+      否则每个远程层都要在关键路径上等一次全量拷贝。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「decode 侧也能开，反正也是 KV 太大。」</div>
+    <div class="r">decode 侧开不了，而且是被<b>显式拒绝</b>的（<a href="#s08">08 节</a>第二条）。
+      原因不是性能而是语义：非 owner rank 上没有完整 cache，而 decode 的每一步都要全层 KV。
+      PD 传输把完整分片送到 decode 之后，decode 侧就是普通本地 cache。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「开了 prefill CP 就等于配好了 PD。」</div>
+    <div class="r">文档专门写了这句：<i>"enabling prefill CP alone does not configure a PD deployment"</i>。
+      LayerSplit 要求的是<b>两者的交集</b>：prefill CP 提供广播作用域，PD 提供「每个 rank 只发自己那段」的传输模型。
+      只开前者，<code>--disaggregation-mode</code> 那两道门会先把你拦下来。</div>
+  </div>
+
+  <h2 id="s10"><span class="n">10</span>自测</h2>
+
+  <details>
+    <summary>Q1 · <code>L = 61, S = 8</code>，每张卡实际持有几层？省了多少？和 cookbook 的「up to 75%」对得上吗？</summary>
+    <div class="ans"><b><code>ceil(61/8) + 1 = 9</code> 层</b>，占 <code>9/61 ≈ 14.8%</code>，省 <b>约 85%</b>。
+      cookbook 的 75% 是 <code>S = 4</code> 时的渐近值 <code>1 - 1/S</code>（忽略 scratch 那 +1 层）；
+      同一式子 <code>S = 4</code> 得 <code>(16+1)/61 ≈ 27.9%</code>，省 72.1%。
+      两个数都对，只是口径不同 —— <b>引用时务必说清 <code>S</code> 和是否含 scratch</b>。</div>
+  </details>
+
+  <details>
+    <summary>Q2 · owner rank 自己也读自己那层，为什么还要 <code>copy_</code> 进 scratch？</summary>
+    <div class="ans">因为 <code>comm.broadcast()</code> 是集合通信：<b>所有 rank 都必须进</b>，
+      包括 source。owner 不能跳过，只能把自己的满 buffer 拷进 scratch 再作为 source 参与。
+      少进一个 rank 就是死锁，不是「少拷一次」。见 <code>_broadcast_tensor_from_owner()</code> 里
+      <code>assert src_tensor is not None</code> 之后那段 <code>copy_</code>。</div>
+  </details>
+
+  <details>
+    <summary>Q3 · 为什么 <code>get_contiguous_buf_infos()</code> 要重写，而 <code>get_kv_size_bytes()</code> 可以直接累加？</summary>
+    <div class="ans">因为非 owner 层是 <b>0 行</b>而不是不存在。
+      <code>get_kv_size_bytes()</code> 遍历 <code>kv_buffer</code> 求和，0 行张量贡献 0 字节，天然正确；
+      而 <code>get_contiguous_buf_infos()</code> 要把「第几层对应哪个指针」交给 PD 传输，
+      必须只上报 owned 层再配 <code>layer_shard_start</code> 作为起点 —— 否则对端会把 0 行当成一层。</div>
+  </details>
+
+  <details>
+    <summary>Q4 · 为什么 draft（MTP / EAGLE）不跟着切？</summary>
+    <div class="ans">因为 draft worker 的池子是<b>另一套</b>，而且 <code>is_glm_dsa_cache_layer_split_enabled()</code>
+      第一项就是 <code>not model_runner.is_draft_worker</code>。draft 层数少、KV 占比低，
+      切它收益有限却要在 draft 前向里引入一次广播，得不偿失。
+      对应地，PD 传输侧由<b>最后一个 shard rank</b> 替 draft 发全量 cache
+      （<code>prefill.py:277-280</code>）。</div>
+  </details>
+
+  <details>
+    <summary>Q5 · LayerSplit 之后，PD 的传输总量会变吗？</summary>
+    <div class="ans"><b>不会。</b>S 个 rank 上报的是互不相交的连续层段，并起来正好等于原来那一份。
+      变的是并发度：从「1 个 rank 发全量」变成「S 个 rank 各发 1/S」。
+      代价是 CP 复制的状态（线性注意力状态之类）不能再只由 rank 0 发 —— 每个 rank 拥有的是不同的状态层，
+      见 <code>conn.py:513-526</code> 的注释。</div>
+  </details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/decode-dp-attention-dcp/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</b></span></a><a class="sm-pn-a sm-next" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../inference-systems/decode-dp-attention-dcp/index.html"><span class="sm-more-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html"><span class="sm-more-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-more-m">32 分钟<i aria-hidden="true"></i>2026-10-27</span></a><a class="sm-more-a" href="../../inference-systems/deepinfer-vs-sglang/index.html"><span class="sm-more-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-more-m">43 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html"><span class="sm-more-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-more-m">14 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/sglang-stream-interval/index.html"><span class="sm-more-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-24</span></a><a class="sm-more-a" href="../../inference-systems/moe-a2a-megamoe/index.html"><span class="sm-more-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-09-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-prefetch-prediction/index.html"><span class="sm-more-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/sglang-request-lifecycle/index.html"><span class="sm-more-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-more-m">19 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/hicache-mooncake/index.html"><span class="sm-more-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-18</span></a><a class="sm-more-a" href="../../inference-systems/dflash-pp-adaptation/index.html"><span class="sm-more-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-16</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p>本页由读源码产出，<b>未做运行时实测</b>。所有行号对应 <b>SGLang v0.5.23</b>（2026-11-02 发布）。
+      其中 <code>mem_cache/dsa_cache_layer_split.py</code>、<code>layers/cp/utils.py</code>、
+      <code>arg_groups/model_hook.py</code>、<code>layers/attention/dsa/utils.py</code> 四个文件
+      与本地 vendored snapshot（upstream main <code>fd5c5258</code>）<b>逐字节一致</b>；
+      <code>kv_cache_configurator.py</code>、<code>pool_configurator.py</code>、
+      <code>disaggregation/prefill.py</code>、<code>disaggregation/common/conn.py</code> 四个文件
+      与 v0.5.23 存在差异（snapshot 更新，含 page-interleave DSA pool、WAR barrier、
+      <code>carries_draft_state</code> 等与 LayerSplit 无关的改动），
+      本页引用的行号已按 v0.5.23 重校，所述符号两边都在。</p>
+    <p>主要阅读路径：<code>python/sglang/srt/mem_cache/dsa_cache_layer_split.py</code>、
+      <code>layers/cp/utils.py</code>、<code>mem_cache/kv_cache_configurator.py</code>、
+      <code>model_executor/pool_configurator.py</code>、<code>arg_groups/{fields/parallel.py, model_hook.py, choices.py}</code>、
+      <code>disaggregation/{prefill.py, common/conn.py}</code>、<code>layers/attention/dsa/utils.py</code>、
+      <code>configs/model_config.py</code>；文档 <code>docs/docs/advanced_features/prefill_cp.mdx</code> 与
+      <code>docs/cookbook/autoregressive/GLM/GLM-5.2.mdx</code>；用例
+      <code>test/registered/e2e/models/test_dsa_glm52_pd_mtp_cp_layersplit.py</code>、
+      <code>test/registered/unit/mem_cache/test_dsa_layer_shard_utils.py</code>、
+      <code>test/registered/unit/mem_cache/test_dsa_layer_split_broadcast.py</code>。</p>
+    <p>版本边界：该 flag 在 <b>v0.5.16</b> 引入（PR #29421，2026-07-09 合入 main）；v0.5.15 及更早没有这个文件、也没有这个 flag。
+      05 节计算器的所有输出都是由 5.1 / 5.2 的式子推出来的派生量，不是任何一次 benchmark 的读数。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var RANK = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+  var $ = function (id) { return document.getElementById(id); };
+
+  function shardRange(rank, S, L) {
+    var base = Math.floor(L / S);
+    var rem = L % S;
+    var start = rank * base + Math.min(rank, rem);
+    var extra = rank < rem ? 1 : 0;
+    return [start, start + base + extra];
+  }
+
+  function ownerOf(layer, S, L) {
+    for (var r = 0; r < S; r++) {
+      var rg = shardRange(r, S, L);
+      if (layer >= rg[0] && layer < rg[1]) return r;
+    }
+    return -1;
+  }
+
+  function fmtBytes(b) {
+    var u = ["B", "KiB", "MiB", "GiB", "TiB"];
+    var i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return (b >= 100 ? b.toFixed(0) : b.toFixed(2)) + " " + u[i];
+  }
+
+  function fmtInt(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function readInputs() {
+    return {
+      L: parseInt($("inL").value, 10),
+      S: parseInt($("inS").value, 10),
+      T: parseInt($("inT").value, 10),
+      D: parseFloat($("inD").value),
+      B: parseInt($("inB").value, 10)
+    };
+  }
+
+  function renderStrip(L, S) {
+    var strip = $("strip");
+    var legend = $("striplegend");
+    var html = "";
+    var i;
+    for (i = 0; i < L; i++) {
+      var r = ownerOf(i, S, L);
+      html += '<i class="' + (r >= 0 ? RANK[r % 8] : "r0") + '"></i>';
+    }
+    strip.innerHTML = html;
+
+    var items = "";
+    for (i = 0; i < S; i++) {
+      var rg = shardRange(i, S, L);
+      var n = rg[1] - rg[0];
+      items += '<span><i class="' + RANK[i % 8] + '"></i>r' + i +
+        ' <code>[' + rg[0] + ", " + rg[1] + ")</code> · " + n + " 层</span>";
+    }
+    legend.innerHTML = items;
+  }
+
+  function update() {
+    var v = readInputs();
+    var L = v.L, S = v.S, T = v.T, D = v.D, B = v.B;
+
+    $("outL").textContent = L;
+    $("outS").textContent = S;
+    $("outT").textContent = fmtInt(T);
+    $("outB").textContent = B;
+
+    renderStrip(L, S);
+
+    var ownedLayers = Math.ceil(L / S);
+    var perTokenLayer = 576 * D + 132;          // MLA latent + DSA index-K(fp8)
+    var layerBytes = T * perTokenLayer;
+
+    var perRank = (ownedLayers + 1) * layerBytes;
+    var base = L * layerBytes;
+    var save = (1 - perRank / base) * 100;
+
+    var remote = L - ownedLayers;
+    var bcast = remote * layerBytes;
+    var ms = (bcast / (B * 1e9)) * 1000;
+    var cap = L / (ownedLayers + 1);
+
+    $("rOwned").textContent = String(ownedLayers + 1) + " 层";
+    $("rOwnedD").textContent = "ceil(" + L + "/" + S + ") + 1 = " + (ownedLayers + 1);
+    $("rRank").textContent = fmtBytes(perRank);
+    $("rBase").textContent = fmtBytes(base);
+    $("rSave").textContent = save.toFixed(1) + "%";
+    $("rSaveD").textContent = "1 − " + (ownedLayers + 1) + "/" + L;
+    $("rRemote").textContent = String(remote) + " 层";
+    $("rBcast").textContent = fmtBytes(bcast);
+    $("rBcastD").textContent = remote + " × " + fmtBytes(layerBytes);
+    $("rTime").textContent = ms.toFixed(2) + " ms";
+    $("rCap").textContent = cap.toFixed(2) + "×";
+
+    var box = $("verdict");
+    if (S > L) {
+      box.className = "verdictbox no";
+      box.textContent = "S (" + S + ") 大于 L (" + L + ")：大部分 rank 分到空区间，" +
+        "每层都要广播，显存只剩 scratch 的优势。这不是有效配置。";
+    } else if (remote > L * 0.7) {
+      box.className = "verdictbox no";
+      box.textContent = "远程层占比 " + Math.round(remote / L * 100) + "%：广播量偏大，" +
+        "预取只有一层，关键路径上仍会有明显等待。";
+    } else {
+      box.className = "verdictbox ok";
+      box.textContent = "远程层 " + remote + "/" + L + "（" + Math.round(remote / L * 100) +
+        "%），每次前向搬 " + fmtBytes(bcast) + "；按 " + B + " GB/s 约 " + ms.toFixed(2) +
+        " ms，可被一层预取部分隐藏。";
+    }
+  }
+
+  ["inL", "inS", "inT", "inD", "inB"].forEach(function (id) {
+    var el = $(id);
+    el.addEventListener("input", update);
+    el.addEventListener("change", update);
+  });
+
+  update();
+})();
+</script>
+</body>
+</html>
