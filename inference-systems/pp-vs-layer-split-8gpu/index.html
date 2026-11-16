@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>单机 8 卡：PP2 还是 LayerSplit —— 以 6000D 为例的选型</title><!-- show-me:shell:begin -->
+<meta name="description" content="TP8+LayerSplit 在单机 8 卡上不是一个可部署配置：LayerSplit 只存在于 PD prefill worker，而 PD 两端的有效 TP 宽度必须一致，TP8 prefill 就要 8 卡 decode（16 卡）。排除它之后真正的三选一是 TP8 unified、TP4×PP2、PD 4+4；PP2 把每卡 KV 砍半（容量 ×1.97），PD 4+4 一点没多（decode 侧仍是 L 层/卡），换来的是 TTFT 隔离。6000D（SM120）上第一个会炸的是 DSA 后端：GLM DSA + FP8 KV 只允许 flashinfer_sparse_mla / triton_sparse_mla，trtllm 被拒。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="单机 8 卡：PP2 还是 LayerSplit —— 以 6000D 为例的选型">
+<meta property="og:description" content="TP8+LayerSplit 在单机 8 卡上不是一个可部署配置：LayerSplit 只存在于 PD prefill worker，而 PD 两端的有效 TP 宽度必须一致，TP8 prefill 就要 8 卡 decode（16 卡）。排除它之后真正的三选一是 TP8 unified、TP4×PP2、PD 4+4；PP2 把每卡 KV 砍半（容量 ×1.97），PD 4+4 一点没多（decode 侧仍是 L 层/卡），换来的是 TTFT 隔离。6000D（SM120）上第一个会炸的是 DSA 后端：GLM DSA + FP8 KV 只允许 flashinfer_sparse_mla / triton_sparse_mla，trtllm 被拒。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/inference-systems/pp-vs-layer-split-8gpu/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/inference-systems/pp-vs-layer-split-8gpu/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  @media (max-width:640px){ code{overflow-wrap:anywhere} }
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:11px 14px;font-size:13.5px;color:#4a3a1c;margin:16px 0}
+  .note b{color:#7a3f00}
+  .conv{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:13px 16px;margin:16px 0;font-size:13.5px;color:#3b4860}
+  .conv .h{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:0 0 7px}
+  .conv ul{margin:0;padding-left:18px}
+  .conv li{margin:4px 0}
+
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c}
+  @media (max-width:600px){
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:4px 0;display:block;text-align:left;overflow-wrap:anywhere;white-space:normal}
+    td::before{content:attr(data-label);display:block;padding:0 0 3px;color:var(--dim2);font-size:11px;
+               letter-spacing:.04em;text-transform:uppercase;font-family:var(--mono)}
+    td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px;white-space:normal}
+    td.k::before{content:none}
+  }
+
+  .flow{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin:16px 0}
+  .flow .step{display:grid;grid-template-columns:26px minmax(0,1fr);gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .flow .step:last-child{border-bottom:0}
+  .flow .step .i{font:600 12px/22px var(--mono);color:#fff;background:var(--accent);border-radius:50%;
+                 width:22px;height:22px;text-align:center}
+  .flow .step .t{font-size:14px;color:#2c3a52;min-width:0;overflow-wrap:anywhere}
+  .flow .step .t b{color:var(--ink)}
+  .flow .step .t .where{font:11.5px var(--mono);color:var(--dim2);margin-top:4px;display:block;overflow-wrap:anywhere}
+
+  /* 三种拓扑 */
+  .topo{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px 16px;margin:14px 0;min-width:0}
+  .topo .cap{font:600 11.5px var(--mono);letter-spacing:.05em;color:var(--dim2);text-transform:uppercase;margin:0 0 10px}
+  .gpus{display:flex;flex-wrap:wrap;gap:4px;min-width:0}
+  .gpus i{flex:1 1 40px;min-width:0;height:30px;border-radius:4px;display:block}
+  .a1{background:#7c9fe0} .a2{background:#8fd8c4} .a3{background:#f3c168} .a4{background:#e8a1c8}
+  .topo .lg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12.5px;color:var(--dim);margin-top:10px;min-width:0}
+  .topo .lg span{display:inline-flex;align-items:center;gap:6px;min-width:0}
+  .topo .lg i{width:11px;height:11px;border-radius:3px;flex:none;border:1px solid #00000012}
+
+  .calc{border:1px solid var(--accent-line);border-radius:12px;background:var(--accent-soft);padding:18px 20px;margin:18px 0 0}
+  .calc .ctl{display:grid;grid-template-columns:200px minmax(0,1fr) 104px;gap:12px;align-items:center;margin:12px 0;font-size:13.5px}
+  @media (max-width:620px){.calc .ctl{grid-template-columns:minmax(0,1fr) 84px;gap:4px 10px}
+    .calc .ctl label{grid-column:1/-1}.calc .ctl span{text-align:right}}
+  .calc input[type=range]{width:100%;accent-color:var(--accent);min-width:0}
+  .calc .glabel{font:600 11.5px var(--mono);letter-spacing:.06em;color:var(--dim2);text-transform:uppercase;margin:18px 0 8px}
+  .calc .row{display:grid;gap:12px}
+  .calc .row.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .calc .row.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  @media (max-width:620px){.calc .row.g3,.calc .row.g2{grid-template-columns:minmax(0,1fr)}}
+  .calc .cell{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;
+              display:flex;flex-direction:column;gap:3px;min-width:0}
+  .calc .cell .k{font:11.5px var(--mono);color:var(--dim2);min-height:17px}
+  .calc .cell .v{font:17px/1.35 var(--mono);font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+  .calc .cell .v.good{color:var(--good)} .calc .cell .v.warn{color:var(--waste)}
+  .calc .cell .d{font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:auto}
+  .verdictbox{margin-top:14px;border-radius:10px;padding:11px 14px;font-size:13.5px;border:1px solid}
+  .verdictbox.ok{background:#eefbf8;border-color:#b7e3d8;color:#0b6b3f}
+  .verdictbox.no{background:#fff4ec;border-color:#f0d9c8;color:#9a4d06}
+
+  .myth{border:1px solid var(--line);border-left:3px solid #c2410c;border-radius:0 10px 10px 0;
+        background:var(--panel);padding:13px 16px;margin:12px 0}
+  .myth .w{font-size:13.5px;color:var(--waste);font-weight:600}
+  .myth .r{font-size:13.5px;color:#3b4860;margin-top:5px}
+  .myth .r b{color:var(--good)}
+  details{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink)}
+  details summary::marker{color:var(--dim2)}
+  details[open] summary{color:var(--accent)}
+  details .ans{margin-top:10px;font-size:13.5px;color:#3b4860;border-top:1px dashed var(--line);padding-top:10px}
+  details .ans b{color:var(--good)}
+
+  .fail{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:14px 16px;margin:12px 0;min-width:0}
+  .fail .msg{font:12px/1.7 var(--mono);color:#8a2f10;background:#fdf1ec;border:1px solid #f2dcd2;
+             border-radius:7px;padding:9px 11px;overflow-wrap:anywhere;margin:0 0 9px}
+  .fail .lay{font:11.5px var(--mono);color:var(--dim2);margin:0 0 8px;overflow-wrap:anywhere}
+  .fail ol{margin:0;padding-left:19px;font-size:13.5px;color:#3b4860}
+  .fail li{margin:4px 0}
+
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}
+  footer p{margin:0 0 6px}
+  footer .lic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">9 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 12 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/decode-dp-attention-dcp/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/pp-vs-layer-split-8gpu/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">单机 8 卡：PP2 还是 LayerSplit —— 以 6000D 为例的选型</span><span class="sm-rail-m">9 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-layer-split/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/deepinfer-vs-sglang/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-rail-m">43 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+  <div class="crumb">
+    <a href="../../index.html">show-me</a><span class="sep">/</span>
+    <a href="../../index.html#cat-inference-systems">inference-systems</a><span class="sep">/</span>
+    <span>pp-vs-layer-split-8gpu</span>
+  </div>
+
+  <h1>单机 8 卡：PP2 还是 LayerSplit —— 以 6000D 为例的选型</h1>
+
+  <div class="metarow">
+    <span>2026-11-16</span>
+    <span>SGLang v0.5.23</span>
+    <span>PP · LayerSplit · PD</span>
+    <span>读源码 + 推导</span>
+  </div>
+
+  <p class="lead">你给的两个候选里，<b><code>TP8 + LayerSplit</code> 在单机 8 卡上不是一个可部署的配置</b> ——
+    不是性能问题，是它根本起不来。把这条排除之后，真正的三选一是
+    <code>TP8 unified</code>、<code>TP4×PP2 unified</code>、<code>PD 4+4（prefill 侧带 LayerSplit）</code>，
+    而它们的差别可以算成一张每卡 KV 容量的账。</p>
+
+  <div class="tldr">
+    <h4>TL;DR · 四条</h4>
+    <ul>
+      <li><b><code>TP8 + LayerSplit</code> 需要 16 卡</b>：LayerSplit 只存在于 PD 的 prefill worker，
+        而 prefill 与 decode 的 TP 拓扑必须对齐 —— TP8 prefill 就是 8 卡，再加 8 卡 decode。
+        8 卡机上想用 LayerSplit，只能切成 4+4。</li>
+      <li><b>PP2 把每卡 KV 砍半（容量 ×1.97），PD 4+4 不会。</b>
+        PD 把一半卡让给 prefill，decode 侧仍是 <code>L</code> 层/卡 —— 换来的是 TTFT 隔离，
+        代价是 decode 算力减半。</li>
+      <li><b>6000D 上第一个会炸的是后端</b>：SM120/SM121 + GLM DSA + FP8 KV 只允许
+        <code>flashinfer_sparse_mla</code>（默认）或 <code>triton_sparse_mla</code>（prefill），
+        <code>--dsa-prefill-backend trtllm</code> 会被直接拒绝 —— 所以 B300 那份 e2e 配方照抄不过来。</li>
+      <li><b>默认就选 TP8 unified</b>；只有当你已经因为显存跑不到目标并发、且长上下文占主导时，
+        才上 <code>TP4×PP2</code>；LayerSplit 留给「prefill 与 decode 本来就分机」的场景。</li>
+    </ul>
+  </div>
+
+  <div class="conv">
+    <div class="h">术语约定</div>
+    <ul>
+      <li><b>LayerSplit</b> = <code>--enable-dsa-cache-layer-split</code>；<b>PP</b> = pipeline parallel（<code>--pp-size</code>）；
+        <b>CP</b> = <code>--attn-cp-size</code>（attention context parallel，嵌在 TP 世界内）；<b>PD</b> = prefill/decode 分离。</li>
+      <li><b>6000D</b> 按 <b>SM120（sm_120）</b> 处理 —— 这不是猜的，源码里 SM120/SM121 是 GLM DSA + FP8 KV 的
+        一等分支（<code>kernels/ops/attention/flash_mla_sm120.py:698-722</code>）。</li>
+      <li>行号对应 <b>v0.5.23</b>。所有容量数字都是公式推导，<b>未做运行时实测</b>；
+        互连带宽按你自己的机器填（本页不给 6000D 的带宽断言）。</li>
+    </ul>
+  </div>
+
+  <h2 id="s01"><span class="n">01</span>先把 <code>TP8 + LayerSplit</code> 排除掉</h2>
+
+  <p>三层约束串起来，它在 8 卡上就自动不成立了。每一层都是源码里的一条 <code>raise</code>，不是建议。</p>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t"><b>LayerSplit 只允许出现在 PD 的 prefill worker 上</b>
+      <span class="where">arg_groups/model_hook.py:365-380 —— <code>disaggregation_mode != "prefill"</code> 时，
+        decode 与非 PD 两条分支各有一个 raise</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t">因此一个开 LayerSplit 的部署<b>必然</b>还有一个 decode worker
+      <span class="where">doc 原话：decode 侧通过 PD 传输拿到完整分片（prefill_cp.mdx:92）</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t">而 PD 两端的「有效 TP 宽度」必须对得上
+      <span class="where">判据是 prefill 的 <code>attn_tp_size × attn_cp_size</code> 等于 decode 的 <code>attn_tp_size</code>；
+        对不上直接 <code>RuntimeError</code>（disaggregation/common/conn.py:1376-1388）——
+        CP 只改变这个乘积的分解方式，不改变它的值</span></div></div>
+    <div class="step"><div class="i">4</div><div class="t">于是 <code>TP8</code> prefill 需要 8 卡 decode → <b>合计 16 卡</b>
+      <span class="where">8 卡机上唯一能容纳的 PD 切法是 prefill 4 + decode 4</span></div></div>
+  </div>
+
+  <p>还有一条更硬的：LayerSplit 要求 <code>--pp-size 1</code>（<code>model_hook.py:402-408</code>）。
+    所以 <b>PP 和 LayerSplit 在配置层面就是互斥的</b> —— 你问的「PP 还是 LayerSplit」不是二选一的性能题，
+    而是先被一条断言判掉一半。</p>
+
+  <div class="note">
+    <b>反过来读这条结论更有用：</b>LayerSplit 的设计前提是「prefill 和 decode 已经是两拨机器」。
+    它在那种场景下才有意义 —— prefill 机的 KV 是纯成本（算完就传走），
+    用 LayerSplit 把它压到 <code>1/S</code>，代价是每读一层远程层要广播一整层。
+    单机 unified 部署里，prefill 用的 KV 就是 decode 要用的 KV，压它没有额外收益。
+  </div>
+
+  <h2 id="s02"><span class="n">02</span>真正可比的三张牌</h2>
+
+  <p>记 <code>L</code> = 层数，<code>b</code> = 每 token 每层的 KV 字节（MLA latent + DSA index-K），
+    <code>V</code> = 每卡留给 KV 的显存，<code>S</code> = <code>attn_cp_size</code>。
+    在 MLA 后端下 KV 在 TP 组内是<b>复制</b>的（这就是全部问题的起点），
+    所以「每卡持有几层」直接决定能装多少 token。</p>
+
+  <table>
+    <thead><tr><th>配置</th><th>每卡持有层数</th><th>可容纳 token</th><th>相对容量（vs A）</th><th>额外通信</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">A · TP8 unified</td>
+        <td class="v">L</td>
+        <td class="v">V / (L·b)</td>
+        <td class="v">1.00×</td>
+        <td>all-reduce（本来就有）</td>
+      </tr>
+      <tr style="background:#f7faff">
+        <td class="k">B · TP4 × PP2 unified</td>
+        <td class="v">⌈L/2⌉</td>
+        <td class="v">V / (⌈L/2⌉·b)</td>
+        <td class="v">≈ 1.97×</td>
+        <td>stage 边界 P2P（hidden states，量小）+ bubble</td>
+      </tr>
+      <tr>
+        <td class="k">C · PD 4+4，prefill 带 LayerSplit(S=4)</td>
+        <td class="v">decode L ／ prefill ⌈L/4⌉+1</td>
+        <td class="v">decode V/(L·b)</td>
+        <td class="v">1.00×（decode 侧）</td>
+        <td>prefill 侧每层广播一整层 + mooncake 传输</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>第三、四列是这张表的关键。**PP2 拿到的是近乎两倍的 token 容量，而 PD 4+4 一点也没多**
+    —— 它只是把 4 张卡从 decode 挪给了 prefill。所以除非你的瓶颈确实在 prefill（长 prompt、TTFT 主导），
+    否则 PD 4+4 是净亏：decode 算力减半，容量不变，还多一套 mooncake 与故障面。</p>
+
+  <div class="topo">
+    <p class="cap">三张牌的拓扑（每格一卡）</p>
+    <div class="gpus"><i class="a1"></i><i class="a1"></i><i class="a1"></i><i class="a1"></i><i class="a1"></i><i class="a1"></i><i class="a1"></i><i class="a1"></i></div>
+    <div class="lg"><span><i class="a1"></i>A · TP8：全卡同层，KV 8 份复制，容量 1×</span></div>
+
+    <div class="gpus" style="margin-top:12px"><i class="a2"></i><i class="a2"></i><i class="a2"></i><i class="a2"></i><i class="a3"></i><i class="a3"></i><i class="a3"></i><i class="a3"></i></div>
+    <div class="lg"><span><i class="a2"></i>B · stage0：layers [0, ⌈L/2⌉)</span><span><i class="a3"></i>B · stage1：layers [⌈L/2⌉, L)</span></div>
+
+    <div class="gpus" style="margin-top:12px"><i class="a4"></i><i class="a4"></i><i class="a4"></i><i class="a4"></i><i class="a1"></i><i class="a1"></i><i class="a1"></i><i class="a1"></i></div>
+    <div class="lg"><span><i class="a4"></i>C · prefill TP4×CP4 + LayerSplit</span><span><i class="a1"></i>C · decode TP4（完整 L 层）</span></div>
+  </div>
+
+  <h2 id="s03"><span class="n">03</span>6000D 特有的两个坑</h2>
+
+  <h3 class="mini">3.1 DSA 后端：trtllm 在这块卡上被拒绝</h3>
+
+  <p>LayerSplit 的 e2e 用例跑在 B300 上，用的是 <code>--dsa-prefill-backend trtllm</code>。
+    照抄到 SM120 上会在启动阶段直接失败：</p>
+
+<pre><code>GLM DSA with FP8 KV cache on NVIDIA SM120/SM121 supports only
+flashinfer_sparse_mla (default) or triton_sparse_mla (prefill), but got ['trtllm'].</code></pre>
+
+  <p class="hint">kernels/ops/attention/flash_mla_sm120.py:712-722；
+    自动选择在 arg_groups/overrides.py:641-654（<code>is_glm_sm12_fp8</code> 分支）。</p>
+
+  <p>所以 6000D 上的正确做法是<b>完全不写</b> <code>--dsa-prefill-backend</code>，
+    让它落到 <code>flashinfer_sparse_mla</code>；只有在已经确认过的组合里才显式指定
+    <code>triton_sparse_mla</code> 作为 prefill 替代。这不是调优项，是「不写才对」。</p>
+
+  <h3 class="mini">3.2 无 NVLink 时，LayerSplit 的通信形状和 PP 差两个数量级</h3>
+
+  <p>这个差别决定了同样的显存收益该买哪一张牌：</p>
+
+  <table>
+    <thead><tr><th></th><th>每次传输的字节</th><th>随什么增长</th><th>能否被计算盖住</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">PP2 的 stage 边界</td>
+        <td>hidden states：<code>tokens × hidden × dtype</code>（每 chunk 一次）</td>
+        <td>chunk 大小</td>
+        <td>能，异步 P2P + 双流重叠</td>
+      </tr>
+      <tr style="background:#fffaf5">
+        <td class="k">LayerSplit 的远程层读</td>
+        <td><b>整层 buffer：<code>(size + page_size) × b</code></b>（每个远程层一次）</td>
+        <td><b>整个 KV 池的容量</b>，与 batch 命中多少页无关</td>
+        <td>只能靠「提前一层」预取，深度 1</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>第二行那个「随容量增长」是这条路径最反直觉的地方：<b>你把池子撑得越大，每次前向的广播量越大</b>。
+    在 NVLink 机上这没关系（几十 GB 的广播摊到几百毫秒的 prefill 里只有几个百分点）；
+    在 PCIe 直连的机器上，它会和层计算时间正面竞争 —— 而预取深度只有 1 层，
+    一旦单层广播时间超过单层计算时间，就再也盖不住了。</p>
+
+  <p>所以判断方法很朴素：<b>测一次「一层 buffer 的 all-broadcast 时间」和「一层 prefill 的计算时间」，
+    前者必须明显小于后者。</b>下面的计算器把这两个量并列出来。</p>
+
+  <h2 id="s04"><span class="n">04</span>决策规则</h2>
+
+  <table>
+    <thead><tr><th>你的瓶颈</th><th>选</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">还没到显存墙</td>
+        <td><b>A · TP8 unified</b></td>
+        <td>没有 bubble、没有 PD 故障面、没有 mooncake 依赖；先把 TP8 跑满再谈切分</td>
+      </tr>
+      <tr>
+        <td class="k">长上下文 / 高并发把 KV 顶爆</td>
+        <td><b>B · TP4 × PP2</b></td>
+        <td>每卡层数减半 → 容量 ×1.97；代价是 <code>(pp−1)/(m+pp−1)</code> 的 bubble 与 stage 边界 P2P</td>
+      </tr>
+      <tr>
+        <td class="k">TTFT 主导（长 prompt、RAG、agent）且 decode 负载轻</td>
+        <td><b>C · PD 4+4 + LayerSplit</b></td>
+        <td>prefill 侧 KV 压到 <code>⌈L/4⌉+1</code> 层，CP4 换 TTFT；但要接受 decode 只剩 4 卡</td>
+      </tr>
+      <tr>
+        <td class="k">已经有第二台机器</td>
+        <td><b>PD 8+8 + LayerSplit</b></td>
+        <td>这才是这个特性的目标场景：prefill 侧 TP8×CP8，每卡 <code>⌈L/8⌉+1</code> 层</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>补一条 PP2 的调优口径（文档 <code>pipeline_parallelism.mdx</code> 给的）：
+    PP 的 bubble 主要来自 stage 间耗时不均，<code>--enable-dynamic-chunking</code> 就是为此存在的，
+    它按拟合出来的二次模型动态缩 chunk，<code>SGLANG_DYNAMIC_CHUNKING_SMOOTH_FACTOR</code> 默认 0.75。
+    层数除不尽时把多的那层放在<b>高</b> PP rank（<code>SGLANG_PP_LAYER_PARTITION</code>），
+    文档给的例子是 <code>15,15,15,16</code> 优于 <code>16,15,15,15</code>。</p>
+
+  <h2 id="s05"><span class="n">05</span>自己算一遍</h2>
+
+  <div class="calc">
+    <div class="glabel">输入</div>
+    <div class="ctl">
+      <label for="inL">层数 L</label>
+      <input id="inL" type="range" min="16" max="128" step="1" value="61">
+      <span id="outL">61</span>
+    </div>
+    <div class="ctl">
+      <label for="inB">每 token 每层字节 b</label>
+      <input id="inB" type="range" min="300" max="2400" step="12" value="708">
+      <span id="outB">708</span>
+    </div>
+    <div class="ctl">
+      <label for="inV">每卡 KV 预算 (GiB)</label>
+      <input id="inV" type="range" min="4" max="80" step="1" value="24">
+      <span id="outV">24</span>
+    </div>
+    <div class="ctl">
+      <label for="inW">互连有效带宽 (GB/s)</label>
+      <input id="inW" type="range" min="20" max="1200" step="10" value="55">
+      <span id="outW">55</span>
+    </div>
+    <div class="ctl">
+      <label for="inM">PP 微批次数 m</label>
+      <input id="inM" type="range" min="1" max="12" step="1" value="4">
+      <span id="outM">4</span>
+    </div>
+
+    <div class="glabel">每卡 KV 可容纳 token 数</div>
+    <div class="row g3">
+      <div class="cell"><span class="k">A · TP8</span><span class="v" id="rA">—</span><span class="d" id="rAd">V/(L·b)</span></div>
+      <div class="cell"><span class="k">B · TP4×PP2</span><span class="v good" id="rB">—</span><span class="d" id="rBd">V/(⌈L/2⌉·b)</span></div>
+      <div class="cell"><span class="k">C · PD decode 侧</span><span class="v warn" id="rC">—</span><span class="d">V/(L·b)，与 A 相同</span></div>
+    </div>
+
+    <div class="glabel">代价</div>
+    <div class="row g3">
+      <div class="cell"><span class="k">B 的 PP bubble</span><span class="v" id="rBub">—</span><span class="d" id="rBubD">(pp−1)/(m+pp−1)</span></div>
+      <div class="cell"><span class="k">C 的每层广播量</span><span class="v" id="rLb">—</span><span class="d">(size+page)·b，按满池估</span></div>
+      <div class="cell"><span class="k">C 的每层广播时间</span><span class="v" id="rLt">—</span><span class="d">@ 你填的带宽</span></div>
+    </div>
+
+    <div class="verdictbox ok" id="verdict">—</div>
+  </div>
+
+  <p class="hint" style="margin-top:10px">「每层广播时间」要和「一层 prefill 的计算时间」比：
+    预取深度只有 1 层，前者必须明显小于后者才盖得住。后者由你的模型与 chunk 大小决定，本页不给数 ——
+    它正是你该在机器上实测的那个量。</p>
+
+  <h2 id="s06"><span class="n">06</span>两条可执行命令</h2>
+
+  <h3 class="mini">B · TP4 × PP2（unified，8 卡全用上）</h3>
+
+<pre><code>python -m sglang.launch_server \
+  --model-path &lt;你的 GLM-DSA 权重&gt; \
+  --tp 4 --pp 2 \
+  --kv-cache-dtype fp8_e4m3 \
+  --mem-fraction-static 0.85 \
+  --chunked-prefill-size 8192 \
+  --enable-dynamic-chunking \
+  --speculative-algorithm EAGLE --speculative-num-steps 3 \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens 4</code></pre>
+
+  <p class="hint">不写 <code>--dsa-prefill-backend</code>：SM120 上它会自动落到
+    <code>flashinfer_sparse_mla</code>。<code>--enable-dynamic-chunking</code> 是给 PP bubble 用的，
+    PP1 时不需要。EAGLE 的 steps/topk 是保守起点，按你的命中率再调。</p>
+
+  <h3 class="mini">C · PD 4+4（prefill 带 LayerSplit）</h3>
+
+<pre><code># ── prefill：TP4 × CP4 + LayerSplit，4 卡 ──
+python -m sglang.launch_server \
+  --model-path &lt;你的 GLM-DSA 权重&gt; \
+  --tp 4 --attn-cp-size 4 \
+  --enable-prefill-cp --cp-strategy interleave \
+  --enable-dsa-cache-layer-split \
+  --kv-cache-dtype fp8_e4m3 \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend mooncake \
+  --base-gpu-id 0 --port 30000
+
+# ── decode：TP4，4 卡，收完整分片 ──
+python -m sglang.launch_server \
+  --model-path &lt;你的 GLM-DSA 权重&gt; \
+  --tp 4 \
+  --kv-cache-dtype fp8_e4m3 \
+  --disaggregation-mode decode \
+  --base-gpu-id 4 --port 30001</code></pre>
+
+  <p>起服务后按这三条确认是否真的生效（任一条不成立就说明退回了普通路径）：</p>
+
+  <div class="flow">
+    <div class="step"><div class="i">1</div><div class="t">日志有 <code>Layer shard plan (continuous): layer_num=…, shard_size=4, rank=…</code>
+      <span class="where">没有这行 = 池子没换成 LayerSplit 版本（最常见原因：漏了 <code>--attn-cp-size</code>，会静默退回）</span></div></div>
+    <div class="step"><div class="i">2</div><div class="t">有个 <code>layer-shard broadcast NCCL communicator</code>，<code>world_size</code> 等于 <code>--attn-cp-size</code>
+      <span class="where">它是每个 rank 一条专用 communicator + 一条专用 stream</span></div></div>
+    <div class="step"><div class="i">3</div><div class="t">4 个 rank 的 <code>global=[a, b)</code> 区间互不相交且并起来是 <code>[0, L)</code></div></div>
+  </div>
+
+  <h2 id="s07"><span class="n">07</span>最容易踩的四个坑</h2>
+
+  <div class="fail">
+    <p class="msg">GLM DSA with FP8 KV cache on NVIDIA SM120/SM121 supports only flashinfer_sparse_mla (default) or triton_sparse_mla (prefill), but got ['trtllm'].</p>
+    <p class="lay">kernels/ops/attention/flash_mla_sm120.py:712-722 · 后端门</p>
+    <ol>
+      <li>从 B300 的 e2e 配方照抄 <code>--dsa-prefill-backend trtllm</code> 就会撞上这条。</li>
+      <li>删掉这个参数即可 —— 默认值就是对的。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split is not supported with pipeline parallelism (pp_size &gt; 1) yet.</p>
+    <p class="lay">arg_groups/model_hook.py:402-408 · PP 门</p>
+    <ol>
+      <li>想「PP2 再加 LayerSplit」是拿不到双份收益的，两者互斥。</li>
+      <li>8 卡上要么 PP2（unified），要么 4+4 PD + LayerSplit。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">--enable-dsa-cache-layer-split is only supported on PD prefill workers. Non-PD workers also run decode and require ordinary local decode cache semantics.</p>
+    <p class="lay">arg_groups/model_hook.py:376-380 · PD 角色门</p>
+    <ol>
+      <li>unified 部署（不写 <code>--disaggregation-mode</code>）时触发。</li>
+      <li>根因不是性能而是语义：非 owner rank 上没有完整 cache，而 decode 每步都要全层 KV。</li>
+    </ol>
+  </div>
+
+  <div class="fail">
+    <p class="msg">（无报错，但 prefill 比预期慢，且随 KV 池变大而变慢）</p>
+    <p class="lay">LayerSplit 广播语义 · 容量与广播量同向增长</p>
+    <ol>
+      <li>远程层读广播的是整层 buffer（<code>size + page_size</code> 行），不是本批次命中的页。</li>
+      <li>所以把 <code>max_total_num_tokens</code> 调大，prefill 的每层广播时间会同步变大。</li>
+      <li>诊断：对比「一层 buffer 的 broadcast 时间」与「一层 prefill 计算时间」，前者不显著小于后者就是盖不住了。</li>
+    </ol>
+  </div>
+
+  <h2 id="s08"><span class="n">08</span>常见误解</h2>
+
+  <div class="myth">
+    <div class="w">「PP 和 LayerSplit 都是按层切，可以叠加。」</div>
+    <div class="r">不行，而且理由很直接：<code>pp_size &gt; 1</code> 时 LayerSplit 直接 raise。
+      两者的相似只停留在「都跟 layer 有关」—— PP 切<b>计算图</b>（每层权重只在一个 stage），
+      LayerSplit 切<b>KV 归属</b>（每层权重仍然处处都有）。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「8 卡上 TP8 比 TP4×PP2 省显存。」</div>
+    <div class="r">反了。PP2 让每张卡只放一半的层，KV 容量<b>接近翻倍</b>；
+      TP8 每张卡都要放全部 <code>L</code> 层。PP2 的代价是 pipeline bubble 和 stage 边界 P2P，
+      不是显存。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「PD 4+4 因为 prefill 侧有 LayerSplit，所以整体容量变大。」</div>
+    <div class="r">没有。决定并发的是 <b>decode 侧</b>的 KV 容量，而 decode 侧是普通 TP4、每卡 <code>L</code> 层 ——
+      和 TP8 unified 完全一样。PD 换来的是 TTFT 隔离，付出的是 decode 算力减半。</div>
+  </div>
+
+  <div class="myth">
+    <div class="w">「CP 也会把 KV 摊到各 rank 上。」</div>
+    <div class="r">CP 切的是 <b>token</b>（interleave/zigzag），不是层。每个 CP rank 仍然持有全部层的 KV，
+      只是处理的 token 少。真要摊层，必须显式开 LayerSplit。</div>
+  </div>
+
+  <h2 id="s09"><span class="n">09</span>自测</h2>
+
+  <details>
+    <summary>Q1 · 为什么 PD 4+4 的容量和 TP8 一样，却少了 4 张卡的算力？</summary>
+    <div class="ans">因为 KV 容量由「<b>单卡</b>持有几层」决定，而 PD 两侧都是普通 TP。
+      prefill 侧虽然有 LayerSplit（每卡 <code>⌈L/4⌉+1</code> 层），但 prefill 的 KV 是<b>过路</b>的 ——
+      算完就经 mooncake 传走，不承载并发。承载并发的是 decode 侧的 radix cache，
+      它每卡 <code>L</code> 层，和 TP8 一模一样。
+      所以 PD 4+4 是用一半算力换「prefill 不打断 decode」。</div>
+  </details>
+
+  <details>
+    <summary>Q2 · PP2 的 bubble 到底多大？什么时候可以忽略？</summary>
+    <div class="ans">粗略 <code>(pp−1)/(m+pp−1)</code>，<code>m</code> 是同时在飞的微批次数。
+      pp=2、m=4 时约 <b>20%</b>；m=8 时约 11%。这不是纯浪费 —— 它意味着 stage0 在等 stage1 时可以用别的请求填，
+      所以连续批处理下实际损失通常小于这个数。但一旦 <code>--chunked-prefill-size</code> 设得很大、
+      单 chunk 就吃满一个 stage，bubble 会向 50% 靠近。这就是 <code>--enable-dynamic-chunking</code> 的用武之地。</div>
+  </details>
+
+  <details>
+    <summary>Q3 · 如果我已经有第二台机器，8+8 怎么配？</summary>
+    <div class="ans">prefill 侧 <code>--tp 8 --attn-cp-size 8 --enable-prefill-cp --cp-strategy interleave
+      --enable-dsa-cache-layer-split --disaggregation-mode prefill --disaggregation-transfer-backend mooncake</code>，
+      每卡 <code>⌈L/8⌉+1</code> 层（L=61 时是 9 层，占 14.8%）；decode 侧 <code>--tp 8</code> 普通。
+      这才是 LayerSplit 的目标形态：prefill 的 KV 从「纯成本」压到 <code>1/S</code>，
+      而广播走的是机器内 NVLink 域 —— 前提是那台机器确实有 NVLink 域。</div>
+  </details>
+
+  <details>
+    <summary>Q4 · 6000D 上能不能开 <code>--enable-dp-attention</code> 来代替 PP？</summary>
+    <div class="ans">方向不同：DP attention 让每个 DP 组各自处理不同请求、attention 权重按组切，
+      它<b>不减少</b>每卡持有的层数，所以不解决 KV 容量。它是为了去掉 attention 的 TP 通信，
+      不是为了让 KV 变小。想要容量只有两条路：少放层（PP / LayerSplit）或不复制（那是另一套机制）。</div>
+  </details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../inference-systems/decode-dp-attention-dcp/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</b></span></a><a class="sm-pn-a sm-next" href="../../inference-systems/sglang-layer-split/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../inference-systems/decode-dp-attention-dcp/index.html"><span class="sm-more-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/sglang-layer-split/index.html"><span class="sm-more-t">SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html"><span class="sm-more-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-more-m">32 分钟<i aria-hidden="true"></i>2026-10-27</span></a><a class="sm-more-a" href="../../inference-systems/deepinfer-vs-sglang/index.html"><span class="sm-more-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-more-m">43 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html"><span class="sm-more-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-more-m">14 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/sglang-stream-interval/index.html"><span class="sm-more-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-24</span></a><a class="sm-more-a" href="../../inference-systems/moe-a2a-megamoe/index.html"><span class="sm-more-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-09-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-prefetch-prediction/index.html"><span class="sm-more-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/sglang-request-lifecycle/index.html"><span class="sm-more-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-more-m">19 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/hicache-mooncake/index.html"><span class="sm-more-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-18</span></a><a class="sm-more-a" href="../../inference-systems/dflash-pp-adaptation/index.html"><span class="sm-more-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-16</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p>本页由读源码 + 公式推导产出，<b>未做运行时实测</b>，也没有在 6000D 上跑过 benchmark。
+      行号对应 <b>SGLang v0.5.23</b>；SM120 相关分支同时参考了本地 vendored snapshot
+      （upstream main <code>fd5c5258</code>）与 SM120 DSA 的实测记录（EAGLE + GLM-NVFP4 DSA + FP8 KV 可跑通）。</p>
+    <p>主要阅读路径：<code>arg_groups/model_hook.py</code>（五道 LayerSplit 门控）、
+      <code>arg_groups/overrides.py:601-740</code>（DSA 后端按 arch 解析）、
+      <code>kernels/ops/attention/flash_mla_sm120.py:688-723</code>（SM120 白名单）、
+      <code>mem_cache/dsa_cache_layer_split.py</code>（广播语义）、
+      <code>disaggregation/common/conn.py</code>（PD 两端拓扑比对）、
+      <code>docs/docs/advanced_features/{prefill_cp.mdx, pipeline_parallelism.mdx}</code>。</p>
+    <p><b>没给的东西</b>：6000D 的互连带宽、GLM 该系列的层数 L 与每 token KV 字节，都不在本页做断言 ——
+      它们是 05 节计算器的输入，请用你机器上的实测值填。所有容量数字都是公式推导，不是 benchmark 读数。</p>
+    <p class="lic"><a href="../../index.html">← 返回 show-me 知识库</a><span>·</span><span>内容 CC BY 4.0 · 脚本 MIT</span></p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmtTokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(0) + "k";
+    return String(Math.round(n));
+  }
+  function fmtBytes(b) {
+    var u = ["B", "KiB", "MiB", "GiB"], i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return (b >= 100 ? b.toFixed(0) : b.toFixed(1)) + " " + u[i];
+  }
+
+  function update() {
+    var L = parseInt($("inL").value, 10);
+    var b = parseInt($("inB").value, 10);
+    var V = parseFloat($("inV").value) * 1024 * 1024 * 1024;
+    var W = parseFloat($("inW").value) * 1e9;
+    var m = parseInt($("inM").value, 10);
+
+    $("outL").textContent = L;
+    $("outB").textContent = b;
+    $("outV").textContent = $("inV").value;
+    $("outW").textContent = $("inW").value;
+    $("outM").textContent = m;
+
+    var half = Math.ceil(L / 2);
+    var quarter = Math.ceil(L / 4) + 1;
+
+    var tokA = V / (L * b);
+    var tokB = V / (half * b);
+    var tokC = V / (L * b);
+
+    $("rA").textContent = fmtTokens(tokA);
+    $("rAd").textContent = "V/(" + L + "·" + b + ")";
+    $("rB").textContent = fmtTokens(tokB);
+    $("rBd").textContent = "V/(" + half + "·" + b + ")";
+    $("rC").textContent = fmtTokens(tokC);
+
+    var bubble = (2 - 1) / (m + 2 - 1) * 100;
+    $("rBub").textContent = bubble.toFixed(1) + "%";
+    $("rBubD").textContent = "1/(" + m + "+1)";
+
+    // C 的每层广播：按满池 size = tokC 估
+    var layerBytes = tokC * b;
+    var layerMs = (layerBytes / W) * 1000;
+    $("rLb").textContent = fmtBytes(layerBytes);
+    $("rLt").textContent = layerMs.toFixed(2) + " ms";
+
+    var box = $("verdict");
+    var gain = tokB / tokA;
+    if (gain < 1.2) {
+      box.className = "verdictbox no";
+      box.textContent = "PP2 只多 " + gain.toFixed(2) + "× 容量，不值得付 bubble 与 stage 边界开销 —— 选 TP8 unified。";
+    } else if (layerMs > 5) {
+      box.className = "verdictbox no";
+      box.textContent = "PP2 容量 ×" + gain.toFixed(2) + "；但 LayerSplit 的单层广播 " +
+        layerMs.toFixed(1) + " ms 偏大（预取深度只有 1 层），这块卡上选 PP2，别选 C。";
+    } else {
+      box.className = "verdictbox ok";
+      box.textContent = "PP2 容量 ×" + gain.toFixed(2) + "，bubble " + bubble.toFixed(0) +
+        "%；C 的单层广播 " + layerMs.toFixed(2) + " ms 尚可被一层预取盖住 —— 但 C 只在 prefill 是瓶颈时才划算。";
+    }
+  }
+
+  ["inL", "inB", "inV", "inW", "inM"].forEach(function (id) {
+    var el = $(id);
+    el.addEventListener("input", update);
+    el.addEventListener("change", update);
+  });
+  update();
+})();
+</script>
+</body>
+</html>
