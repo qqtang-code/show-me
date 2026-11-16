@@ -1,0 +1,32 @@
+{
+  "title": "Decode 小 M 的 W4A4：几何门控、跨层共享 workspace，以及 draft 与大 prefill 为什么留在 FP8",
+  "slug": "decode-small-m-w4a4",
+  "category": "inference-systems",
+  "date": "2026-11-16",
+  "tags": [
+    "MoE",
+    "W4A4",
+    "MXFP4",
+    "decode",
+    "量化"
+  ],
+  "one_liner": "decode 的 target MoE 只在 M≤64 时走 fused W4A4，门控是几何的：E289/H4096/I256、SiLU 钳位 10、Triton block-quant，六条同时成立才走，否则整条回退 FP8（draft 与大 prefill 本来就在 FP8）。省的第二笔账是每层的分配与清洗——按 stream 跨层共享 workspace，前提是同一时刻只有一层在用。它是真实数值变化、质量门未闭合，证据只到「在跑」。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "decode 侧 MoE 量化优化的审计记录：几何门控条件（M≤64 / E289 / H4096 / I256 / SiLU 钳位 10 / Triton block-quant）",
+    "按 stream 跨层共享静态与动态 workspace 的实现要点",
+    "8 卡逐 rank 的 engagement / compression / prefill-FP8 / draft-FP8 四类回执计数"
+  ],
+  "visibility": "internal",
+  "publish": true,
+  "redactions": [
+    "内部主机名、内部仓库路径与运行时路径已移除",
+    "内部内核与组件代号已移除，统一写作「fused W4A4 内核」",
+    "内部环境变量名统一改写为 W4A4_DECODE_MOE / W4A4_RECEIPTS",
+    "未公开模型版本统一写作 GLM 系列"
+  ],
+  "enriched": "2026-11-16"
+}

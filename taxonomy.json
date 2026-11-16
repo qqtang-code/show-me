@@ -1,21 +1,103 @@
 {
   "_comment": "标签受控词表。左值是门户上显示的规范写法，右值是会被归并到它的变体；构建期合并，不改各篇 meta.json 里的原文。新增标签时若发现同义写法，加到这里而不是让两边并存。",
   "aliases": {
-    "AllReduce": ["allreduce", "all-reduce"],
-    "AllGather": ["allgather"],
-    "ReduceScatter": ["reducescatter"],
-    "all2all": ["all-to-all", "all_to_all"],
-    "prefix cache": ["前缀复用", "前缀缓存", "prefix-cache"],
-    "流水并行": ["流水线并行"],
-    "EP": ["专家并行", "expert parallel"],
-    "DSA": ["DSA 稀疏注意力"],
-    "GLM 系列": ["GLM 5.3", "GLM-5.3", "GLM5"],
-    "KV Cache": ["KVCache", "KV cache"],
-    "源码走读": ["源码分析"],
-    "Prefill": ["prefill", "prefill 阶段"],
-    "FP8": ["fp8", "FP-8"],
-    "FP4": ["fp4", "FP-4"],
-    "量化通信": ["quantized communication", "量化集合通信"],
-    "PD 分离": ["PD disaggregation", "PD分离", "pd-disaggregation"]
+    "AllReduce": [
+      "allreduce",
+      "all-reduce"
+    ],
+    "AllGather": [
+      "allgather"
+    ],
+    "ReduceScatter": [
+      "reducescatter"
+    ],
+    "all2all": [
+      "all-to-all",
+      "all_to_all"
+    ],
+    "prefix cache": [
+      "前缀复用",
+      "前缀缓存",
+      "prefix-cache"
+    ],
+    "流水并行": [
+      "流水线并行"
+    ],
+    "EP": [
+      "专家并行",
+      "expert parallel"
+    ],
+    "DSA": [
+      "DSA 稀疏注意力"
+    ],
+    "GLM 系列": [
+      "GLM 5.3",
+      "GLM-5.3",
+      "GLM5"
+    ],
+    "KV Cache": [
+      "KVCache",
+      "KV cache"
+    ],
+    "源码走读": [
+      "源码分析"
+    ],
+    "Prefill": [
+      "prefill",
+      "prefill 阶段"
+    ],
+    "FP8": [
+      "fp8",
+      "FP-8"
+    ],
+    "FP4": [
+      "fp4",
+      "FP-4"
+    ],
+    "量化通信": [
+      "quantized communication",
+      "量化集合通信"
+    ],
+    "PD 分离": [
+      "PD disaggregation",
+      "PD分离",
+      "pd-disaggregation"
+    ],
+    "量化": [
+      "quantization",
+      "量化改造"
+    ],
+    "decode": [
+      "decode 侧",
+      "Decode",
+      "解码"
+    ],
+    "W4A4": [
+      "w4a4",
+      "W4A4 MXFP4"
+    ],
+    "W8A8": [
+      "w8a8"
+    ],
+    "MXFP4": [
+      "mxfp4"
+    ],
+    "kernel": [
+      "内核",
+      "Kernel"
+    ],
+    "NCCL": [
+      "nccl"
+    ],
+    "NUMA": [
+      "numa"
+    ],
+    "SM120": [
+      "sm120"
+    ],
+    "主机侧": [
+      "host-side",
+      "宿主机"
+    ]
   }
 }

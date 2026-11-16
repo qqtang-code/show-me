@@ -48,6 +48,18 @@
     "inference-systems/sglang-stream-interval",
     "inference-systems/dflash-pp-adaptation"
    ]
+  },
+  {
+   "name": "调优取舍：哪些改动值得开",
+   "kind": "collection",
+   "desc": "同一套部署上的一批候选优化：每篇都先说门控（什么形状、什么版本下才成立），再说代价与证据强度。没有先后顺序，按当前问题挑一篇读——也有几篇是「先别急着试」的判负记录。",
+   "items": [
+    "inference-systems/decode-small-m-w4a4",
+    "tooling/host-side-knobs",
+    "inference-systems/prefill-online-w8a8",
+    "inference-systems/dsa-prepare-six-opts",
+    "inference-systems/sm120-sparse-mla-my-prefill"
+   ]
   }
  ],
  "unlisted": [

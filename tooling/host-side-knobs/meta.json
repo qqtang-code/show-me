@@ -1,0 +1,31 @@
+{
+  "title": "主机侧的四项：NCCL 的 SYS 路径、NUMA 绑定、CPU governor、host 分词",
+  "slug": "host-side-knobs",
+  "category": "tooling",
+  "date": "2026-11-16",
+  "tags": [
+    "NCCL",
+    "NUMA",
+    "CPU governor",
+    "主机侧"
+  ],
+  "one_liner": "四项都不改 GPU 计算：让 ring 不走错链路（128 MB all-reduce 7.60→5.75 ms，16K/512 的 C8 档 +10.4%）、按实测拓扑绑 NUMA、把 CPU 拉到 performance 并记得显式 restore（停服务不会自动恢复）、以及 host 分词（约 −0.39%，不是 GPU 加速）。共同点是都以本机拓扑为判据、不能抄配方，且失败时都不会报错。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "双 socket / 双 PCIe 组 8 卡部署的审计记录：NCCL 路径选择的 128 MB all-reduce 对照与 16K/512 C8 档端到端 +10.4%",
+    "NUMA 绑定表取值与 numactl -H 判据；CPU governor / EPP 的 128 项精确恢复记录",
+    "host 分词两项的配置与 D 侧单项顺序对照 8162.897→8131.237 ms",
+    "等效带宽 16.8 / 22.3 GB/s 由 128 MB ÷ 耗时反推，为换算而非独立测量"
+  ],
+  "visibility": "internal",
+  "publish": true,
+  "redactions": [
+    "内部主机名、机器编号、IP 与端口映射已移除",
+    "内部仓库路径、内部配置文件名与内部环境变量全名已移除（统一写作 NUMA_NODES / cpu-apply / cpu-restore / fastokens）",
+    "拓扑图为按「双 socket + 双四卡组」事实画的示意，非实机截图"
+  ],
+  "enriched": "2026-11-16"
+}

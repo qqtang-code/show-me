@@ -1,0 +1,31 @@
+{
+  "title": "SM120 上的 sparse-MLA prefill 内核：直接读 656 B/key 的布局",
+  "slug": "sm120-sparse-mla-my-prefill",
+  "category": "inference-systems",
+  "date": "2026-11-16",
+  "tags": [
+    "SM120",
+    "Sparse MLA",
+    "KV Cache",
+    "Prefill",
+    "kernel"
+  ],
+  "one_liner": "这套 KV 是 FP8 主 KV + 块级 scale + BF16 RoPE 交织成的 656 B/key。通用内核要先反量化重排再算，专用内核按原样读、dequant 折进读指令：kernel 1.32×、16K 的 c8/c16/c32 端到端 +2.9–3.3%，精度仍在原 band。五条形状门任一不满足即逐调用回退 FlashInfer，所以必须看统计行确认生效，换 KV 布局或 SM 架构要整条重验。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "D 端 sparse-MLA prefill 专用内核的审计记录：656 B/key 的 KV 布局（FP8 主 KV + 块级 FP32 scale + BF16 RoPE）",
+    "逐调用回退的五条条件（形状 / dtype / 布局 / T≤64 / skip_softmax）与统计行的判读方式",
+    "kernel 级 1.32×、16K 的 c8/c16/c32 三档端到端 +2.9–3.3%、精度仍在 stock numeric band 的定性结论"
+  ],
+  "visibility": "internal",
+  "publish": true,
+  "redactions": [
+    "内部主机名、内部仓库路径、内部内核与组件代号已移除，统一写作「sparse-MLA prefill 专用内核」",
+    "内部环境变量名已移除，统计标记统一写作 [MY-PREFILL-STAT]",
+    "656 B/key 的三段字节拆分原始记录未给出，页面用相对宽度示意，未编造精确比例"
+  ],
+  "enriched": "2026-11-16"
+}

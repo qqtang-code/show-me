@@ -1,0 +1,30 @@
+{
+  "title": "DSA 的准备阶段六项小优化：五项只在特定形状生效，一项是负向",
+  "slug": "dsa-prepare-six-opts",
+  "category": "inference-systems",
+  "date": "2026-11-16",
+  "tags": [
+    "DSA",
+    "稀疏注意力",
+    "Prefill",
+    "元数据"
+  ],
+  "one_liner": "六项都在「选 top-k 之前」：indexer 行块、SM wave 对齐、复用 absorbed-Q 布局、单页表视图、单 query 元数据、单请求批计划。五项只在 singleton + 大行数 + eager + SM120 下生效；indexer 分块 + Q 布局复用两项合计使 192K TTFT 约降 1.5%。单请求批计划单项曾 TTFT 只降 12 ms 而吞吐掉 3.94%——小优化叠多了会互相打架。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "P 端 DSA prefill 准备阶段的审计记录：六项元数据/分配层面的小优化及其生效条件（singleton + 大行数 + eager + SM120）",
+    "80 请求冷 C1 下 indexer 分块 + Q 布局复用两项合计使 192K TTFT 约降 1.5%",
+    "单请求批计划单项顺序对照：TTFT −12 ms、吞吐 −3.94%"
+  ],
+  "visibility": "internal",
+  "publish": true,
+  "redactions": [
+    "内部主机名、内部仓库路径、内部配方与镜像名已移除",
+    "内部环境变量名已移除，正文统一写作「indexer 行块」「SM wave 对齐」「Q 布局复用」「单页表视图」「单 query 元数据」「单请求批计划」",
+    "六项编号按数据流顺序重排，与原始记录编号不一一对应"
+  ],
+  "enriched": "2026-11-16"
+}

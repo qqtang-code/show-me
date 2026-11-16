@@ -1,0 +1,32 @@
+{
+  "title": "P 端在线 W8A8：shared expert 与 attention 的 q_b_proj / o_proj",
+  "slug": "prefill-online-w8a8",
+  "category": "inference-systems",
+  "date": "2026-11-16",
+  "tags": [
+    "W8A8",
+    "FP8",
+    "Prefill",
+    "MoE",
+    "量化"
+  ],
+  "one_liner": "在线量化=加载时转权重+运行期动态量化激活，checkpoint 仍是 BF16、随时可关。两个落点：shared expert（每个 token 都要过）与 attention 的 q_b_proj / o_proj（TP≤4）。顺序对照：一次 prefill_forward 8.05→7.83 s、196K/384 TTFT 8679→8463 ms。只 P 开、不扩到 dense FFN（实测中性）；最大缺口是没有全模型困惑度对比。",
+  "artifact": "index.html",
+  "extra_files": [],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "P 端量化优化的审计记录：shared expert 与 attention q_b_proj / o_proj 的在线 W8A8（加载时量化权重、激活动态量化、checkpoint 保 BF16）",
+    "quant-RS 之后对 shared expert 的单程序列对照：prefill_forward 8.05→7.83 s、196K/384 TTFT 8679→8463 ms、质量门 7/7",
+    "attention 两项的 release+port 组合读数：cold 192K 18.0→11.9 s、h85/192K/c5 TTFT P50 5891→5513 ms，以及 TP≤4 的定位",
+    "dense FFN 同类改动实测中性这一条负向对照"
+  ],
+  "visibility": "internal",
+  "publish": true,
+  "redactions": [
+    "内部主机名、内部仓库路径、内部配方与镜像名已移除",
+    "内部环境变量名统一改写为「在线 W8A8 开关」「shared expert 在线量化」「attention 投影在线 FP8」",
+    "未公开模型版本统一写作 GLM 系列"
+  ],
+  "enriched": "2026-11-16"
+}

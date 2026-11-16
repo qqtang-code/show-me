@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>主机侧的四项：NCCL 的 SYS 路径、NUMA 绑定、CPU governor、host 分词</title><!-- show-me:shell:begin -->
+<meta name="description" content="四项都不改 GPU 计算：让 ring 不走错链路（128 MB all-reduce 7.60→5.75 ms，16K/512 的 C8 档 +10.4%）、按实测拓扑绑 NUMA、把 CPU 拉到 performance 并记得显式 restore（停服务不会自动恢复）、以及 host 分词（约 −0.39%，不是 GPU 加速）。共同点是都以本机拓扑为判据、不能抄配方，且失败时都不会报错。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="主机侧的四项：NCCL 的 SYS 路径、NUMA 绑定、CPU governor、host 分词">
+<meta property="og:description" content="四项都不改 GPU 计算：让 ring 不走错链路（128 MB all-reduce 7.60→5.75 ms，16K/512 的 C8 档 +10.4%）、按实测拓扑绑 NUMA、把 CPU 拉到 performance 并记得显式 restore（停服务不会自动恢复）、以及 host 分词（约 −0.39%，不是 GPU 加速）。共同点是都以本机拓扑为判据、不能抄配方，且失败时都不会报错。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/tooling/host-side-knobs/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/tooling/host-side-knobs/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)} .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  pre .cm{color:#7b8aa3} pre .hl{color:#12489c;font-weight:600}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:6px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+  .note{background:#fdf7ec;border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+        padding:12px 16px;margin:16px 0;font-size:14px;color:#4a3a1f}
+  .note b{color:#7a4a06}
+  .oknote{background:#f1f8f4;border-left:3px solid var(--good);border-radius:0 8px 8px 0;
+        padding:12px 16px;margin:16px 0;font-size:14px;color:#20452f}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .panel h4{margin:0 0 10px;font-size:14.5px;color:var(--ink)}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin:12px 0}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+  th{font:12px var(--mono);color:var(--dim2);font-weight:600}
+  td.num,th.num{text-align:right;font-family:var(--mono);font-size:13px}
+  tr.em td{background:var(--accent-soft)}
+  .good{color:var(--good);font-weight:600} .flat{color:var(--dim2)}
+  footer{margin-top:52px;border-top:1px solid var(--line);padding-top:16px;color:var(--dim2);font-size:13px}
+  footer .lic{font:12px var(--mono);display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  footer .lic a{color:var(--accent);text-decoration:none}
+  @media (max-width:640px){
+    table.cardmode thead{display:none}
+    table.cardmode tr{display:block;border:1px solid var(--line);border-radius:10px;
+                      margin-bottom:10px;padding:6px 10px;background:var(--panel)}
+    table.cardmode td{display:block;text-align:right;overflow-wrap:anywhere;border:0;padding:3px 0}
+    table.cardmode td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;
+                              color:var(--dim2);font:12px var(--mono)}
+    table.cardmode td.k{display:block;text-align:left;font-weight:600;color:var(--ink);
+                        border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:4px}
+    table.cardmode td.k::before{content:none}
+    table.cardmode tr.em td{background:none}
+  }
+  .flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:14px 0;align-items:stretch}
+  .flow .st{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+  .flow .st h6{margin:0 0 4px;font:600 11.5px var(--mono);color:var(--dim2);letter-spacing:.04em}
+  .flow .st p{margin:0;font-size:13px;color:var(--fg);line-height:1.55}
+  .flow .st .q{font:11px var(--mono);color:var(--accent);margin-top:5px}
+  .flow .st .w{font:11px var(--mono);color:var(--waste);margin-top:5px}
+  .flow .st .g{font:11px var(--mono);color:var(--good);margin-top:5px}
+  .wbars{margin:14px 0 6px}
+  .wb{margin:10px 0}
+  .wb .cap{display:flex;justify-content:space-between;gap:12px;font:12px var(--mono);color:var(--dim2);
+           margin-bottom:5px;min-width:0}
+  .wb .cap b{font-family:var(--mono);color:var(--ink)}
+  .wb .track{display:flex;height:26px;border-radius:6px;overflow:hidden;background:#eef2f9;min-width:0}
+  .wb .seg{height:100%;display:flex;align-items:center;justify-content:center;
+           font:11px var(--mono);color:#fff;overflow:hidden;white-space:nowrap;flex:none}
+  .lg{display:flex;gap:14px;flex-wrap:wrap;font:11.5px var(--mono);color:var(--dim2);margin-top:8px}
+  .lg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .calc{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:12px 0}
+  .cbox{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+  .cbox h5{margin:0 0 8px;font:600 12px var(--mono);color:var(--dim2);letter-spacing:.03em}
+  .cbox .row{display:flex;justify-content:space-between;gap:10px;font-size:13.5px;margin:5px 0;min-width:0}
+  .cbox .row span:first-child{color:var(--dim)}
+  .cbox .row span:last-child{font-family:var(--mono);color:var(--ink);font-weight:600;text-align:right}
+  .knob{margin:6px 0 12px}
+  .knob label{display:block;font-size:13.5px;color:var(--dim);margin-bottom:4px}
+  .knob input[type=range]{width:100%}
+  .knob select{font:13px var(--mono);padding:5px 8px;border:1px solid #dbe2ee;border-radius:8px;
+               background:#f8fafc;color:#28374f;max-width:100%}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{font:12.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;border-radius:8px;
+              padding:5px 12px;color:#3f4c63;cursor:pointer}
+  .seg button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
+  .stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+  .stat div{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+  .stat .k{font:11.5px var(--mono);color:var(--dim2);letter-spacing:.03em;margin-bottom:4px}
+  .stat .v{font:600 19px/1.2 var(--mono);color:var(--ink)}
+  .stat .d{font-size:12.5px;color:var(--dim);margin-top:4px}
+  .stat .v.good{color:var(--good)}
+
+  .topo{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+  .topo .row{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0;align-items:stretch}
+  .topo .node{flex:1 1 240px;min-width:0;background:var(--panel);border:1px solid var(--line);
+              border-radius:10px;padding:10px 12px}
+  .topo .node h6{margin:0 0 6px;font:600 11.5px var(--mono);color:var(--dim2);letter-spacing:.03em}
+  .topo .gpus{display:flex;gap:5px;flex-wrap:wrap}
+  .topo .gpus i{font:11px var(--mono);font-style:normal;background:#eef4fd;border:1px solid #d5e2f6;
+                border-radius:6px;padding:4px 8px;color:#1d4ed8;flex:none}
+  .topo .bridge{text-align:center;font:11.5px var(--mono);color:var(--waste);padding:6px 0}
+  .topo .bridge span{background:#fdf3ec;border:1px dashed #e3c3ab;border-radius:999px;padding:3px 12px}
+  @media (max-width:640px){.topo .node{flex:1 1 100%}}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-tooling" style="--sm-cat:#a35a06" title="工具与方法"><i class="sm-dot" aria-hidden="true"></i><span>工具与方法</span></a><div class="sm-right"><span class="sm-min">8 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 3 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../tooling/host-side-knobs/index.html" style="--sm-cat:#a35a06" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">主机侧的四项：NCCL 的 SYS 路径、NUMA 绑定、CPU governor、host 分词</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../tooling/show-me-knowledge-base-review/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">show-me 知识库体检：改了什么，以及为什么这么改</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../tooling/torchrun-launch-internals/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-rail-m">20 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+<div class="crumb">
+  <a href="../../index.html">show-me 知识库</a><span class="sep">/</span>
+  <span>tooling</span><span class="sep">/</span>
+  <span>host-side-knobs</span>
+</div>
+
+<h1>主机侧的四项：NCCL 的 SYS 路径、NUMA 绑定、CPU governor、host 分词</h1>
+
+<div class="metarow">
+  <span>2026-11-16</span>
+  <span>NCCL</span>
+  <span>NUMA</span>
+  <span>CPU governor</span>
+  <span>主机侧</span>
+  <span>口径</span>
+</div>
+
+<p class="lead">这四项都不改 GPU 上的任何一个 kernel。它们改的是四件更底层的事：<b>集合通信的 ring 走哪条链路</b>、<b>进程的显存与 CPU 落在哪个 NUMA 节点</b>、<b>CPU 会不会被节能策略降频</b>、<b>prompt 在哪台机器上分词</b>。共同点是：收益看起来零散、容易被记成「调参玄学」，而实际的判据只有一条 —— <b>这台机器的拓扑事实</b>。这一页把四项放在一起讲，因为它们同属一类错误：把拓扑事实当通用配方抄走。</p>
+
+<div class="nav">
+  <a href="#tldr">速览</a>
+  <a href="#why">为什么单独一页</a>
+  <a href="#sys">NCCL 的 SYS 路径</a>
+  <a href="#numa">NUMA 绑定</a>
+  <a href="#cpu">CPU governor</a>
+  <a href="#tok">host 分词</a>
+  <a href="#table">四项的适用前提</a>
+  <a href="#calc">计算器</a>
+  <a href="#myth">常见误解</a>
+  <a href="#quiz">自测</a>
+</div>
+
+<div class="panel">
+  <p style="margin:0"><b>术语约定</b>：<code>ring</code>、<code>rail</code>、<code>socket</code>、<code>NUMA node</code>、<code>governor</code>、<code>PIN</code>、<code>tokenizer</code> 保留英文；<code>P</code> = prefill 角色、<code>D</code> = decode 角色。<b>本页不做数据图</b>：四项的单位分别是 ms、百分比、NUMA 编号和行数，画在同一张图上只会伪造可比性 —— 该说的地方用表和量纲明确的数值说。</p>
+</div>
+
+<h2 id="tldr"><span class="n">01</span>速览</h2>
+
+<div class="tldr">
+  <h4>TL;DR</h4>
+  <ul>
+    <li><b>NCCL 的 SYS 路径买的是「ring 不走错链路」。</b> 双 socket / 双 PCIe 组的机器上，默认策略可能让 ring 混用快慢链路，一次 128 MB all-reduce 从 7.60 ms 降到 5.75 ms；对应到 16K/512 的 C8 档，端到端 +10.4%。</li>
+    <li><b>NUMA 绑定是拓扑事实，不是调参。</b> 每张卡绑到它物理最近的 CPU node；这套机器上是 <code>0,0,0,0,2,2,2,2</code>，换机器必须用 <code>numactl -H</code> 重新查，抄数字没有意义。</li>
+    <li><b>CPU governor 的坑在「恢复」而不是「设置」。</b> 要显式 apply，停服务不会自动 restore —— 一次没恢复干净，下一次测量的基线就变了。验收记录里是 128 项 governor/EPP 精确回读。</li>
+    <li><b>host 分词只有几十毫秒。</b> 单项 8162.897 → 8131.237 ms，约 −0.39%；它的价值是「别把它算成 GPU 收益」，以及知道边界不安全时必须回退。</li>
+    <li><b>四项都不能「上次有效这次照抄」。</b> 它们全部以本机拓扑、宿主权限、tokenizer 配置为前提；换机器/换镜像/换模板都要重新确认。</li>
+  </ul>
+</div>
+
+<h2 id="why"><span class="n">02</span>为什么这四项要单独一页</h2>
+
+<p>因为它们有一个共同的失败模式：<b>看起来像通用参数，实际是本机事实</b>。</p>
+
+<p><code>NCCL_P2P_LEVEL=SYS</code> 写进配置很容易，但它在单 socket 机器上可能什么都没变、在别的拓扑上还可能变慢；NUMA 那串数字抄错两位，性能会悄悄掉一半却没人报错；CPU governor 忘了恢复，第二天所有对比实验都不可信；分词加速更是典型的「改对了没感觉、改错了看不出」。</p>
+
+<p>所以这一页的写法是：<b>每项先给判据（什么情况下它才成立），再给数字（有多大的量级），最后给回退/恢复责任（谁负责把它还原）</b>。照着顺序读，就不会出现「抄了参数、不知道为什么快」的情况。</p>
+
+<h2 id="sys"><span class="n">03</span>NCCL 的 SYS 路径：让 ring 不走错链路</h2>
+
+<p>先看这台机器的形状。<b>它没有 NVLink，8 张卡分处两个四卡 PCIe 组，跨组要过主机桥</b>：</p>
+
+<div class="topo">
+  <div class="row">
+    <div class="node"><h6>NUMA node 0 · 四卡组 A</h6><div class="gpus"><i>GPU0</i><i>GPU1</i><i>GPU2</i><i>GPU3</i></div></div>
+    <div class="node"><h6>NUMA node 2 · 四卡组 B</h6><div class="gpus"><i>GPU4</i><i>GPU5</i><i>GPU6</i><i>GPU7</i></div></div>
+  </div>
+  <div class="bridge"><span>组间通信过主机桥（socket 间互联）— 带宽与延迟都差一档</span></div>
+</div>
+
+<p>默认的 ring 构造可能在两个组之间来回跳：rank0→rank1（组内快）→rank2（组内快）……一旦排布跨了组，每一圈都有一跳走慢链路，而集合通信的耗时由<b>最慢那一跳</b>决定。</p>
+
+<p><code>NCCL_P2P_LEVEL=SYS</code> 的作用是让 P2P 走系统级路径（经主机），而不是让它误以为可以走更快的点对点；配套再关掉组内网络路径。这样 ring 的连通性选择和实际拓扑对齐，不会出现「以为在走组内、其实在绕桥」的错配。</p>
+
+<div class="stat">
+  <div><div class="k">128 MB ALL-REDUCE</div><div class="v">7.60 → 5.75 ms</div><div class="d">同一台机器、同一消息大小</div></div>
+  <div><div class="k">16K/512 · C8 档</div><div class="v good">+10.4%</div><div class="d">端到端吞吐</div></div>
+  <div><div class="k">等效带宽（反推）</div><div class="v">16.8 → 22.3 GB/s</div><div class="d">128 MB ÷ 耗时，线性口径</div></div>
+</div>
+
+<p class="hint">最后一格是从前两格反推出来的等效带宽（128 MB ÷ 7.60 ms 与 ÷ 5.75 ms），用来给第 08 节的计算器做标尺 —— 它不是独立测量值。</p>
+
+<div class="oknote">
+  <b>D 侧还有一件同族的事</b>：decode 端的集合通信还额外开了 PCIe-IPC 直推（小消息换成固定开销更低的内核），并且 <b>P / D 两侧都设 SYS</b>。那件事的原理在 <a href="../../comm-parallel/cuda-ipc-direct-push/index.html">CUDA IPC 直推</a> 那篇，这里只记一句配置事实，避免两处各讲一半。
+</div>
+
+<h2 id="numa"><span class="n">04</span>NUMA 绑定：0,0,0,0,2,2,2,2 是怎么来的</h2>
+
+<p>绑定的目的只有一个：<b>让进程读写的显存和它跑的 CPU 在同一个 node 上</b>。跨 node 访问内存要多走一跳 socket 互联，在 decode 这种每步都要同步、每步都有小规模主机侧工作的负载上，这一跳会以抖动和 P99 的形式还回来。</p>
+
+<p>所以绑定表的来源只能是拓扑查询，不是经验值：</p>
+
+<pre><code><span class="cm"># 先查这张卡属于哪个 node，再定绑定</span>
+numactl -H | grep -E 'available|node [0-9]+ cpus'
+nvidia-smi topo -m                  <span class="cm"># 看 GPU 之间的连接方式（SYS / PIX / PHB …）</span>
+
+<span class="cm"># 查完才写进 inventory：前四张卡绑 node 0，后四张绑 node 2</span>
+<span class="hl">NUMA_NODES=0,0,0,0,2,2,2,2</span></code></pre>
+
+<p><b>为什么是 0 和 2 而不是 0 和 1？</b>因为这台机器上 CPU 侧的 node 编号本来就不连续（有未暴露的插槽/内存域），这是它的事实，不是规律。同一份配置搬到 2 socket 的普通机器上很可能直接绑错 —— 绑错了不会报错，只会变慢。</p>
+
+<div class="note">
+  <b>这类配置最危险的地方是「静默」。</b> NUMA 绑错、绑到不存在的 node、或者忘了加亲和 —— 三种情况都不会让服务起不来，只会让延迟和抖动慢慢变差。所以它是必须写进部署清单、并在换机器时逐条复核的那一类。
+</div>
+
+<h2 id="cpu"><span class="n">05</span>CPU governor：设置容易，恢复才是关键</h2>
+
+<p>第三项是把 CPU 从节能策略拉到性能策略（performance governor / EPP）。目的是去掉降频带来的抖动 —— 它不是让计算变快，而是让<b>主机侧的等待时间变得可预期</b>。</p>
+
+<p>坑有两个：</p>
+
+<div class="flow">
+  <div class="st"><h6>① 必须显式 apply</h6><p>不会因为「服务起来了」就自动生效，要单独执行一次策略应用</p><div class="q">cpu-apply</div></div>
+  <div class="st"><h6>② 必须显式 restore</h6><p>停服务<b>不会</b>自动恢复；没恢复的机器会一直跑在 performance 上</p><div class="q">cpu-restore</div></div>
+  <div class="st"><h6>③ 需要宿主权限</h6><p>容器内通常改不动，要宿主机配合，且要能读回原值</p><div class="q">先快照，再改</div></div>
+  <div class="st"><h6>④ 要能回读验</h6><p>验收不是「我设了」，而是「逐项回读等于原值」</p><div class="q">128 项精确恢复</div></div>
+</div>
+
+<p>为什么「恢复」比「设置」重要：<b>下一次测量的基线是上一轮留下的状态</b>。如果一台机器上残留了 performance governor，之后所有「默认配置」的对照都不是默认配置。这类污染不会报错，只会让数字缓慢漂移。</p>
+
+<h2 id="tok"><span class="n">06</span>host 分词：两项、几十毫秒、不是 GPU 加速</h2>
+
+<p>第四项最容易记错性质。它是<b>主机侧</b>的优化：长 prompt 的分词在主线程上做，CPU 一慢就挡在 GPU 前面。</p>
+
+<table class="cardmode">
+  <thead><tr><th>角色</th><th>做法</th><th>为什么不两边都开</th></tr></thead>
+  <tbody>
+    <tr class="em"><td class="k">P（prefill）</td><td data-label="做法">换更快的 tokenizer 后端（<code>fastokens</code>）</td><td data-label="为什么不两边都开">P 侧 prompt 最长，收益在这里</td></tr>
+    <tr><td class="k">D（decode）</td><td data-label="做法">并行 prompt encode（<b>关</b>在 P、<b>开</b>在 D）</td><td data-label="为什么不两边都开">并行只在 tokenizer / 分段边界安全时才成立，P 侧不开更保守</td></tr>
+  </tbody>
+</table>
+
+<div class="stat">
+  <div><div class="k">D 侧并行分词（单项）</div><div class="v">−0.39%</div><div class="d">8162.897 → 8131.237 ms</div></div>
+  <div><div class="k">性质</div><div class="v">主机侧</div><div class="d">不是 GPU / kernel 优化</div></div>
+  <div><div class="k">回退条件</div><div class="v">边界不安全即回退</div><div class="d">tokenizer 包装 / special tokens / pre-tokenizer</div></div>
+</div>
+
+<p>它值得进知识库的理由不是那 0.39%，而是两条判断：<b>①别把主机侧的收益记进 GPU 收益</b>；<b>②换 tokenizer 或对话模板后，要重新核对 token ID 与数据集是否对齐</b> —— 这条比性能重要得多，因为它会让「同一份输入」在两个版本上变成不同 token。</p>
+
+<h2 id="table"><span class="n">07</span>四项的适用前提</h2>
+
+<table class="cardmode">
+  <thead><tr><th>项</th><th>判据（什么情况下才成立）</th><th>不成立的后果</th><th>谁负责还原</th></tr></thead>
+  <tbody>
+    <tr class="em"><td class="k">NCCL SYS 路径</td><td data-label="判据">双 socket / 双 PCIe 组，ring 可能跨桥</td><td data-label="后果">单组机器上可能无变化甚至变慢</td><td data-label="还原">改配置即回退</td></tr>
+    <tr><td class="k">NUMA 绑定</td><td data-label="判据">按 <code>numactl -H</code> 的实测拓扑逐卡绑</td><td data-label="后果">绑错静默变慢，不报错</td><td data-label="还原">改 inventory</td></tr>
+    <tr><td class="k">CPU governor</td><td data-label="判据">有宿主权限 + 能快照原值</td><td data-label="后果">残留污染下一轮基线</td><td data-label="还原"><b>显式</b> cpu-restore（停服务不会自动恢复）</td></tr>
+    <tr><td class="k">host 分词</td><td data-label="判据">tokenizer / 模板 / special tokens 边界安全</td><td data-label="后果">token 切分变化，输入语义漂移</td><td data-label="还原">关掉并行编码即回退</td></tr>
+  </tbody>
+</table>
+
+<h2 id="calc"><span class="n">08</span>计算器：一次 all-reduce 在两条链路上的耗时</h2>
+
+<div class="panel">
+  <div class="knob">
+    <label>消息大小：<b id="vMB">128</b> MB</label>
+    <input type="range" id="kMB" min="8" max="512" step="8" value="128">
+  </div>
+  <div class="calc">
+    <div class="cbox">
+      <h5>默认 ring</h5>
+      <div class="row"><span>等效带宽</span><span>16.8 GB/s</span></div>
+      <div class="row"><span>估计耗时</span><span id="oA">7.60 ms</span></div>
+    </div>
+    <div class="cbox">
+      <h5>SYS 路径</h5>
+      <div class="row"><span>等效带宽</span><span>22.3 GB/s</span></div>
+      <div class="row"><span>估计耗时</span><span id="oB">5.75 ms</span></div>
+    </div>
+    <div class="cbox">
+      <h5>差额</h5>
+      <div class="row"><span>省下</span><span id="oD">1.85 ms</span></div>
+      <div class="row"><span>比例</span><span id="oP">24.3%</span></div>
+    </div>
+  </div>
+  <p class="hint" style="margin:10px 0 0">两条等效带宽都由「128 MB 对应 7.60 / 5.75 ms」这一组实测反推，再按线性外推 —— <b>不是新测量</b>，也不是这条链路的物理上限。真实曲线在大消息上会因通道数与拥塞偏离线性。</p>
+</div>
+
+<script>
+(()=>{
+const kMB=document.getElementById('kMB');
+const BW_A=128/7.60, BW_B=128/5.75;      // MB per ms
+const render=()=>{
+  const mb=+kMB.value;
+  document.getElementById('vMB').textContent=mb;
+  const a=mb/BW_A, b=mb/BW_B;
+  document.getElementById('oA').textContent=a.toFixed(2)+' ms';
+  document.getElementById('oB').textContent=b.toFixed(2)+' ms';
+  document.getElementById('oD').textContent=(a-b).toFixed(2)+' ms';
+  document.getElementById('oP').textContent=((a-b)/a*100).toFixed(1)+'%';
+};
+kMB.addEventListener('input',render); render();
+})();
+</script>
+
+<h2 id="myth"><span class="n">09</span>常见误解</h2>
+
+<div class="panel">
+  <h4>①「TCP / NCCL 参数是一套可以复用的调优经验」</h4>
+  <p>不是。这一页四项里有三项（SYS 路径、NUMA、PCIe-IPC）本质是<b>拓扑描述</b>：它们之所以有效，是因为这台机器的卡分处两组、跨组过桥。换一台单组机器，同一份配置可能毫无变化。</p>
+</div>
+
+<div class="panel">
+  <h4>②「host 分词加速也算推理优化，可以并进 GPU 收益」</h4>
+  <p>不行。它省的是 GPU 空等的时间，量级是几十毫秒、约 0.4%。把它算进「模型变快了」会让收益归因错位，之后再做 GPU 侧的 A/B 就分不清谁的功劳。</p>
+</div>
+
+<div class="panel">
+  <h4>③「CPU governor 设一次就行」</h4>
+  <p>设一次可以，但<b>恢复</b>要单独做。停服务不会自动把它改回去；残留的 performance 状态会让后来所有「默认配置」的对照组失效。</p>
+</div>
+
+<div class="panel">
+  <h4>④「NUMA 那串数字照抄就好」</h4>
+  <p>那串 <code>0,0,0,0,2,2,2,2</code> 是这台机器的实测拓扑（CPU 侧 node 编号本身就不连续）。换机器不查 <code>numactl -H</code> 就抄，是绑错还查不出来的典型。</p>
+</div>
+
+<h2 id="quiz"><span class="n">10</span>自测</h2>
+
+<details>
+  <summary>为什么 <code>NCCL_P2P_LEVEL=SYS</code> 能提升集合通信？它到底改了哪一步？</summary>
+  <p>改的是 ring / 连通性的路径选择：让 P2P 走系统级路径，避免 ring 在双组拓扑上误用更快但实际会绕桥的通路。耗时由最慢那一跳决定，所以把错配的那一跳纠正过来，整次通信就跟着降。</p>
+</details>
+
+<details>
+  <summary>NUMA 绑定为什么必须现场查，而不能照抄？</summary>
+  <p>因为它描述的是「这张卡物理上离哪个 CPU node 最近」。这套机器上编号是 0 和 2（不连续），换机器就可能完全不同；绑错不会报错，只会让延迟与抖动慢慢变差。</p>
+</details>
+
+<details>
+  <summary>CPU governor 的两个动作是什么？为什么「恢复」更重要？</summary>
+  <p>apply 与 restore，两个都要显式执行。恢复更重要的原因是：下一轮测量的基线是这一轮留下的状态，残留的 performance governor 会让之后所有「默认配置」的对照都失真。</p>
+</details>
+
+<details>
+  <summary>host 分词值不值得单独记一条？</summary>
+  <p>值，但不是因为它快 0.4%。值得记的是两条判断：别把主机侧收益算成 GPU 收益；换 tokenizer / 模板后必须重新核对 token ID 与数据集是否对齐。</p>
+</details>
+
+<details>
+  <summary>这四项里有哪一项「失败时不会报错」？</summary>
+  <p>四项都不会报错。SYS 路径失效只是没加速；NUMA 绑错只是变慢；governor 残留只是污染基线；分词回退只是少了 0.4%。所以它们只能靠「实测 A/B + 逐项回读」验证，不能靠配置看起来对不对。</p>
+</details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</b></span></a><a class="sm-pn-a sm-next" href="../../tooling/show-me-knowledge-base-review/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#a35a06" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">show-me 知识库体检：改了什么，以及为什么这么改</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../tooling/show-me-knowledge-base-review/index.html"><span class="sm-more-t">show-me 知识库体检：改了什么，以及为什么这么改</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../tooling/torchrun-launch-internals/index.html"><span class="sm-more-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-more-m">20 分钟<i aria-hidden="true"></i>2026-10-13</span></a></div></section>
+<!-- show-me:shell:end --><footer>
+  <p><b>数据来源</b>：一套双 socket / 双 PCIe 组、8 卡的部署审计记录：NCCL 路径选择的 128 MB all-reduce 对照（7.60→5.75 ms）与 16K/512 C8 档 +10.4%；NUMA 绑定表的取值来源与 <code>numactl -H</code> 判据；CPU governor / EPP 的 128 项精确恢复记录；host 分词两项的配置与 D 侧单项顺序对照（8162.897→8131.237 ms）。等效带宽 16.8 / 22.3 GB/s 由 128 MB ÷ 耗时反推，是换算而非独立测量。</p>
+  <p><b>脱敏说明</b>：保留拓扑结论、字节数与实测耗时；去掉了内部主机名、机器编号、IP、内部仓库路径、内部配置文件名与内部环境变量全名（正文统一写作 <code>NUMA_NODES</code>、<code>cpu-apply</code> / <code>cpu-restore</code>、<code>fastokens</code>、并行 prompt encode）。</p>
+  <p><b>没做什么</b>：没有运行压测，没有重测这四项的单变量收益，也没有在不同拓扑上做对照——所有数字引自审计记录；页内那张拓扑图是按「双 socket + 双四卡组」的事实画的示意，不是实机拓扑截图。</p>
+  <div class="lic">
+    <span>内容 <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></span>
+    <span>·</span>
+    <span>代码 <a href="https://opensource.org/licenses/MIT">MIT</a></span>
+  </div>
+</footer>
+
+</div>
