@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light">
 <title>show-me 知识库体检：改了什么，以及为什么这么改</title><!-- show-me:shell:begin -->
 <meta property="og:type" content="article">
-<meta property="og:title" content="show-me 知识库体检：先修发布契约，再优化检索与导览">
+<meta property="og:title" content="show-me 知识库体检：改了什么，以及为什么这么改">
 <meta property="og:description" content="对 18 篇条目做的实测审查与随后的落地：先修失效的分类锚点、模糊的 visibility/publish 语义与含本机路径的公开元数据，再把搜索改成别名归一 + 词边界 + 打分排序并按文章分组，最后收敛标签、区分路线与合集、让「已打开」在文章页也记账。每条都附了验收判据和实测数字。">
 <meta property="og:url" content="https://qqtang-code.github.io/show-me/tooling/show-me-knowledge-base-review/index.html">
 <link rel="canonical" href="https://qqtang-code.github.io/show-me/tooling/show-me-knowledge-base-review/index.html">
@@ -217,7 +217,7 @@ if(!(set instanceof Array))set=[];
 if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
 </script>
 <!-- show-me:shell:end --><!-- show-me:shell:begin -->
-<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 2 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../tooling/show-me-knowledge-base-review/index.html" style="--sm-cat:#a35a06" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">show-me 知识库体检：先修发布契约，再优化检索与导览</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../tooling/torchrun-launch-internals/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-rail-m">20 分钟</span></a></div></nav>
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 2 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../tooling/show-me-knowledge-base-review/index.html" style="--sm-cat:#a35a06" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">show-me 知识库体检：改了什么，以及为什么这么改</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../tooling/torchrun-launch-internals/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-rail-m">20 分钟</span></a></div></nav>
 <!-- show-me:shell:end -->
 <main class="wrap">
   <div class="crumb"><a href="../../index.html">show-me</a><span class="sep">/</span><span>tooling</span><span class="sep">/</span><span>知识库体检</span></div>
