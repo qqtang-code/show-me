@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>show-me 知识库体检：先修发布契约，再优化检索与导览</title><!-- show-me:shell:begin -->
+<meta property="og:type" content="article">
+<meta property="og:title" content="show-me 知识库体检：先修发布契约，再优化检索与导览">
+<meta property="og:description" content="对 18 篇条目的实测审查：视觉与单文件架构不用重做，先修 23 处失效分类锚点、5 篇标 internal 的公开条目与 4 份含本机绝对路径的公开元数据；再把搜索从「匹配很多」改成「最相关在前」（TP 现返回 44 处、AllReduce 两种拼写结果集不同），把平均 262 字符的卡片摘要压到可横向比较的长度，并用受控词表收敛 95 个标签里 75 个只出现一次的标签。附 P0/P1/P2 顺序与可执行的验收判据。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/tooling/show-me-knowledge-base-review/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/tooling/show-me-knowledge-base-review/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<meta name="description" content="对 18 篇条目的实测审查：视觉与单文件架构不用重做，先修 23 处失效分类锚点、5 篇标 internal 的公开条目与 4 份含本机绝对路径的公开元数据；再把搜索从「匹配很多」改成「最相关在前」（TP 现返回 44 处、AllReduce 两种拼写结果集不同），把平均 262 字符的卡片摘要压到可横向比较的长度，并用受控词表收敛 95 个标签里 75 个只出现一次的标签。附 P0/P1/P2 顺序与可执行的验收判据。">
+<style>
+  :root{
+    --bg:#f5f7fb;--panel:#fff;--panel2:#f8fafc;--lane:#f3f6fb;--line:#dde3ee;
+    --fg:#131c2e;--ink:#0d1526;--dim:#4a5871;--dim2:#657389;
+    --accent:#1d4ed8;--accent-soft:#f7f9ff;--accent-line:#d9e2f5;
+    --good:#0b6b3f;--waste:#b23a10;--warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}html{scroll-behavior:smooth}[id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}.crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}.crumb a{color:var(--accent);text-decoration:none}.crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}h2:first-of-type{margin-top:32px}h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  p{margin:10px 0}.sub,.lead{color:var(--dim);font-size:14px}.hint{color:var(--dim);font-size:13.5px}b{color:var(--ink)}code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px;overflow-wrap:anywhere}pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font:12.5px/1.75 var(--mono);color:#28374f}pre code{background:none;color:inherit;padding:0}.metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}.metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;border-radius:999px;padding:4px 10px;color:#3f4c63}
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}.nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px}.nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}.tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:12px;padding:16px 20px}.tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}.tldr ul{margin:0;padding-left:18px}.tldr li{margin:6px 0;font-size:14px;color:#3b4860}.callout{border-left:3px solid var(--accent);background:#fff;border-radius:0 10px 10px 0;padding:12px 16px;margin:16px 0;font-size:14px;color:#3b4860}.callout.warn{border-left-color:var(--warn)}
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}tr:last-child td{border-bottom:0}td.k{font:600 12px var(--mono);color:#28374f}td.v{font-family:var(--mono);font-size:12.5px;color:#12489c}.pri{display:inline-block;font:700 10.5px var(--mono);border-radius:5px;padding:2px 7px;white-space:nowrap}.p0{background:#fff0e9;color:#9a3510}.p1{background:#e8effc;color:#17509e}.p2{background:#edf4ef;color:#0b6b3f}
+  table.plan th:first-child{width:92px;white-space:nowrap}table.plan td:first-child{white-space:nowrap}
+  .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 15px;min-width:0}.card h3{font-size:14px;line-height:1.45;margin:0 0 7px;color:var(--ink)}.card p{font-size:13px;line-height:1.65;color:var(--dim);margin:0}.card .num{font:700 22px/1.2 var(--mono);color:var(--accent);margin-bottom:6px}.flow{display:grid;gap:7px;margin:15px 0}.step{display:grid;grid-template-columns:30px minmax(0,1fr);gap:10px;align-items:start}.step .sn{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:#e6eefb;color:var(--accent);font:700 11px var(--mono)}.step .st{background:#fff;border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:13.5px;color:#3b4860}.step .st b{color:var(--ink)}
+  details{border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 14px;margin:10px 0}summary{cursor:pointer;font-weight:600;color:var(--ink)}details .ans{margin-top:8px;color:var(--dim);font-size:14px}footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2)}footer p{margin:0 0 6px}footer a{color:var(--accent);text-decoration:none}
+  @media(max-width:760px){.grid{grid-template-columns:minmax(0,1fr)}}
+  @media(max-width:640px){body{padding:26px 12px 60px}h1{font-size:23px}.nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}.nav::-webkit-scrollbar{height:0}.nav a{flex:none}table,tbody,tr,td{display:block;width:100%}thead{display:none}tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}td{border:0;padding:4px 0;display:block;text-align:right;overflow-wrap:anywhere}td::before{content:attr(data-label);float:left;max-width:52%;padding-right:16px;color:var(--dim2);font-size:12px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}td.k{display:block;text-align:left;font-size:14.5px;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px;white-space:normal}td.k::before{content:none}}
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#tooling" style="--sm-cat:#a35a06" title="工具与方法"><i class="sm-dot" aria-hidden="true"></i><span>工具与方法</span></a><div class="sm-right"><span class="sm-min">6 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-16</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 2 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../tooling/show-me-knowledge-base-review/index.html" style="--sm-cat:#a35a06" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">show-me 知识库体检：先修发布契约，再优化检索与导览</span><span class="sm-rail-m">6 分钟</span></a><a class="sm-rail-a" href="../../tooling/torchrun-launch-internals/index.html" style="--sm-cat:#a35a06"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-rail-m">20 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<main class="wrap">
+  <div class="crumb"><a href="../../index.html">show-me</a><span class="sep">/</span><span>tooling</span><span class="sep">/</span><span>知识库体检</span></div>
+  <h1>show-me 知识库体检：先修发布契约，再优化检索与导览</h1>
+  <p class="lead">结论不是重做站点。现有视觉、移动端和单文件架构已经稳；下一轮应集中修发布可靠性、搜索有效性和内容可扫读性。</p>
+  <div class="metarow"><span>2026-11-16</span><span>信息架构</span><span>全库搜索</span><span>发布检查</span><span>18 篇实测审查</span></div>
+  <nav class="nav"><a href="#tldr">结论</a><a href="#baseline">01 保留什么</a><a href="#p0">02 P0 可靠性</a><a href="#search">03 搜索</a><a href="#reading">04 首页与卡片</a><a href="#taxonomy">05 标签与路线</a><a href="#plan">06 调整顺序</a></nav>
+  <p class="hint">范围：线上门户、18 份 <code>meta.json</code>、文章外壳、搜索代码与构建验收脚本。数字来自本地复算和 headless Chrome；未逐条核验各文章的技术结论。</p>
+
+  <section class="tldr" id="tldr"><h4>TL;DR · 六项判断</h4><ul>
+    <li><b>视觉不需要推倒重来。</b>完整验收为 67 PASS / 0 FAIL / 1 SKIP，六档宽度均未发现整页横向溢出。</li>
+    <li><b>先修真实缺陷。</b>23 处分类片段链接指向不存在的锚点；5 篇公开页面仍标 <code>internal</code>，4 份公开元数据仍含本机绝对路径。</li>
+    <li><b>搜索要加排序与词边界。</b>当前按归档顺序返回、每篇最多带两个小节；<code>TP</code> 复算出 44 处结果，短缩写会误入其他单词。</li>
+    <li><b>卡片摘要偏长。</b><code>one_liner</code> 为 119–475 字符，平均 262；它更像完整 abstract，不利于横向比较。</li>
+    <li><b>标签需要受控词表。</b>18 篇已有 95 个标签，其中 75 个只出现一次，并存在 <code>AllReduce / allreduce / all-reduce</code> 分裂。</li>
+    <li><b>路线与进度语义要一致。</b>阅读路线覆盖 12/18 篇；“已打开”只记录门户卡片点击，从推荐路线、搜索结果或直达文章进入均不记录。</li>
+  </ul></section>
+
+  <h2 id="baseline"><span class="n">01</span>现有基础：这些应该保留</h2>
+  <p><b>一句话：</b>当前问题不在页面是否漂亮，而在内容变多之后，规则是否仍然可靠。</p>
+  <div class="grid">
+    <div class="card"><div class="num">67 / 0</div><h3>自动化验收基础良好</h3><p>完整运行 <code>verify_site.py</code> 得到 67 PASS、0 FAIL、1 个桌面限定 SKIP。结构、布局、门户交互与外壳幂等均有覆盖。</p></div>
+    <div class="card"><div class="num">小节级</div><h3>搜索能落到正文位置</h3><p>搜索不是只扫标题；它能返回小节标题、上下文片段并深链到锚点，这个方向正确。</p></div>
+    <div class="card"><div class="num">单文件</div><h3>不要急于换技术栈</h3><p>文章自包含、离线可读、便于直接分享。18 篇规模下，没有引入 React、搜索服务或双主题的必要。</p></div>
+  </div>
+  <p>源码锚点、证据类型、真实数字、常见误解和自测也构成了内容辨识度。调整应减少选择成本，而不是把这些特点磨平。</p>
+
+  <h2 id="p0"><span class="n">02</span>P0：先修发布契约与失效锚点</h2>
+  <p><b>一句话：</b>这些问题会让读者点不到目标，或让公开仓库的实际状态与自身规则不一致。</p>
+  <table>
+    <thead><tr><th>问题</th><th>证据</th><th>建议</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="问题">分类链接锚点失效</td><td data-label="证据"><code>shell.py: _bar()</code> 生成 <code>index.html#inference-systems</code>；门户分类区块实际为 <code>id="cat-inference-systems"</code>。静态审计共发现 23 处。</td><td data-label="建议">统一为 <code>#cat-&lt;category&gt;</code>；同时让链接检查解析 <code>#fragment</code> 并验证目标页面存在对应 id。</td></tr>
+      <tr><td class="k" data-label="问题">发布状态含义冲突</td><td data-label="证据">线上可访问的条目中有 5 篇写 <code>visibility: internal</code>；全库同时使用 <code>public</code>、<code>public-ok</code>、<code>internal</code> 三种值。</td><td data-label="建议">明确它表示“当前页面可否公开”还是“原始材料敏感度”。前者应只构建 <code>public-ok</code>；后者应改名并另设 <code>publish</code> 状态，不能直接批量翻值。</td></tr>
+      <tr><td class="k" data-label="问题">脱敏约定未覆盖元数据</td><td data-label="证据">4 份线上 <code>meta.json</code> 的 <code>cwd</code> 保留本机绝对路径，与 README 的公开仓库约定冲突。</td><td data-label="建议">公开构建清空或拒绝绝对路径；同时检查完整 session id、内部 URL、主机名与 IP。审查报告不复述这些值。</td></tr>
+      <tr><td class="k" data-label="问题">同步脚本允许带病发布</td><td data-label="证据"><code>sync.sh</code> 对坏链接只告警；push 失败也返回 0。</td><td data-label="建议">链接或快速验收失败时不提交；push 失败返回非零。把“命令执行过”与“线上发布成功”分开。</td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn"><b>最小验收：</b>修复后，片段链接审计应为 0；公开构建不得包含 <code>internal</code> 或绝对路径；人为制造一个坏锚点时，<code>sync.sh</code> 必须失败且不能提交。</div>
+
+  <h2 id="search"><span class="n">03</span>P1：搜索从“匹配很多”变成“最相关在前”</h2>
+  <p><b>一句话：</b>保留现有的小节级索引，只改 normalize、score 和结果分组即可，不必引入搜索服务。</p>
+  <table>
+    <thead><tr><th>查询</th><th>当前结果数</th><th>暴露的问题</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="查询">TP</td><td class="v" data-label="当前结果数">44</td><td data-label="暴露的问题">纯 substring 匹配，短缩写可命中其他英文单词内部。</td></tr>
+      <tr><td class="k" data-label="查询">SGLang</td><td class="v" data-label="当前结果数">39</td><td data-label="暴露的问题">结果按分类与日期排列，不按相关度；每篇还可追加两个小节。</td></tr>
+      <tr><td class="k" data-label="查询">KV</td><td class="v" data-label="当前结果数">32</td><td data-label="暴露的问题">缺少默认结果上限，常见主题需要长距离扫读。</td></tr>
+      <tr><td class="k" data-label="查询">AllReduce</td><td class="v" data-label="当前结果数">25</td><td data-label="暴露的问题">标题直接讲 AllReduce 的条目不一定排在最前；另一种拼写 <code>all-reduce</code> 得到不同结果集。</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">以上数字按当前 JavaScript 搜索算法对同一份构建数据复算，不是搜索质量评分。</p>
+<pre><code>normalize
+  lowercase
+  unify allreduce / all-reduce / all_reduce through aliases
+  match short ASCII identifiers on token boundaries
+
+rank
+  exact title match &gt; title token &gt; tag &gt; section heading &gt; body
+
+present
+  one article + its best section
+  expand more sections on demand
+  show the first 10–20 articles, not every matching section</code></pre>
+  <p>验收应固定一组查询：例如 <code>AllReduce</code> 的同名文章必须进入前三，<code>TP</code> 不得只因其他单词包含这两个字母而命中，<code>all-reduce</code> 与 <code>AllReduce</code> 应得到同一组核心结果。</p>
+
+  <h2 id="reading"><span class="n">04</span>P1：首页面向读者，卡片只保留决策信息</h2>
+  <p><b>一句话：</b>首屏先回答“适合谁、能解决什么、证据可靠到什么程度”，文件组织方式留给 README。</p>
+  <div class="flow">
+    <div class="step"><span class="sn">1</span><div class="st"><b>改 hero 文案。</b>当前 <code>index.html / notes.md / meta.json</code> 是维护者视角。可换成“面向推理与多卡通信实践者；每篇给出结论、机制、数字依据与适用边界”。</div></div>
+    <div class="step"><span class="sn">2</span><div class="st"><b>缩短 <code>one_liner</code>。</b>当前平均 262 字符，9/18 超过 240。建议正文用“读者问题 + 一个核心结论 + 一个关键数字”，其余细节留在文章 lead。</div></div>
+    <div class="step"><span class="sn">3</span><div class="st"><b>避免承诺固定模板。</b>门户写“每篇都按速览 → 机制 → 实测 → 常见误解 → 自测”，实际并非每篇都有所有模块。改成“常见结构”，不要为一致而补空节。</div></div>
+    <div class="step"><span class="sn">4</span><div class="st"><b>明确 notes 的定位。</b>目前 8/18 篇有 <code>notes.md</code>。若它是可选纯文字备份，文案写“部分条目附 notes”；若它承担无障碍或归档职责，再补齐并做一致性检查。</div></div>
+  </div>
+  <p>摘要不一定要更短到失去信息，而是不要在卡片里塞进整段推导。卡片负责帮助选择，文章负责完整论证。</p>
+
+  <h2 id="taxonomy"><span class="n">05</span>P1：治理标签、路线和“已打开”状态</h2>
+  <h3 class="mini">标签：从自由累加改为受控词表</h3>
+  <p>95 个标签中 75 个只出现一次，意味着多数标签不能形成有效分组。保留具体术语在正文可搜索即可；标签优先承担跨文章聚合。先合并大小写、连字符和中英文别名，再把配置值、一次性模型名、单个公式从标签中移出。</p>
+  <h3 class="mini">阅读路线：区分 path 与 collection</h3>
+  <p>三条路线共覆盖 12/18 篇，最近增加的 6 篇都未进入路线。不是每篇都必须进路线，但需要一个小型“最近更新”入口，否则非首分类的新文章会沉下去。</p>
+  <p>“源码走读与实践”目前更像同方法合集，<code>torchrun</code> 并不是 MoE 通信或 DFlash 的前置。建议给它标记 <code>kind: collection</code>，取消“前一篇是后一篇前置”的承诺；真正 path 才显示严格先后关系。</p>
+  <h3 class="mini">已打开：在文章页记录，而不是只在卡片上记录</h3>
+  <p>当前唯一写入 <code>showme:opened</code> 的位置是门户卡片点击监听。推荐路线、搜索结果、上一篇/下一篇和直接 URL 都不会更新。最小修法是在文章 shell 初始化时写入当前 <code>dir</code>，门户继续只负责展示。</p>
+
+  <h2 id="plan"><span class="n">06</span>建议的调整顺序与验收</h2>
+  <table class="plan">
+    <thead><tr><th>级别</th><th>做什么</th><th>完成判据</th></tr></thead>
+    <tbody>
+      <tr><td class="k" data-label="级别"><span class="pri p0">P0</span></td><td data-label="做什么">统一分类锚点；明确 visibility；清理公开元数据；让同步失败可阻断。</td><td data-label="完成判据">0 个坏片段；公开构建无 internal / 绝对路径；故障注入会阻止提交。</td></tr>
+      <tr><td class="k" data-label="级别"><span class="pri p1">P1</span></td><td data-label="做什么">搜索排序、词边界、别名与按文章分组；补固定查询回归。</td><td data-label="完成判据">AllReduce、all-reduce、TP、KV 四组验收通过，首屏结果可直接选择。</td></tr>
+      <tr><td class="k" data-label="级别"><span class="pri p1">P1</span></td><td data-label="做什么">缩短卡片摘要；hero 改为读者视角；标签归一；路线区分合集；文章页记录打开状态。</td><td data-label="完成判据">卡片可快速比较；路线描述与实际依赖一致；四种进入方式都更新进度。</td></tr>
+      <tr><td class="k" data-label="级别"><span class="pri p2">P2</span></td><td data-label="做什么">为源码型文章增加 <code>applies_to</code> / <code>verified_at</code>；内容继续增长后再拆分搜索索引。</td><td data-label="完成判据">读者能区分写作日期、源码版本与最近核对日期；50+ 篇时再评估懒加载。</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><b>不建议现在做：</b>全面换肤、React/Vite 重构、深色模式、服务端搜索、为了分类齐全而拆出空分类。这些都不解决当前最影响使用的问题。</div>
+
+  <details><summary>这份审查没有断言什么？</summary><div class="ans">没有断言各篇文章的技术结论正确或错误，也没有把 <code>internal</code> 直接等同于“正文未脱敏”。发布项指出的是状态语义和公开元数据的一致性问题，需要由维护者确认原始材料与发布意图后再调整。</div></details>
+  <details><summary>为什么不建议马上拆搜索索引？</summary><div class="ans">当前门户约 594 KiB、gzip 后约 236 KiB，已经值得观察，但 18 篇下仍能工作，而且内联索引满足本地直接打开与离线搜索。等条目继续增长、首屏成本成为实际测量问题后，再做按需加载更合适。</div></details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</b></span></a><a class="sm-pn-a sm-next" href="../../tooling/torchrun-launch-internals/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#a35a06" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../tooling/torchrun-launch-internals/index.html"><span class="sm-more-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-more-m">20 分钟<i aria-hidden="true"></i>2026-10-13</span></a></div></section>
+<!-- show-me:shell:end -->  <footer>
+    <p>来源：show-me 线上门户与 18 份公开元数据；本地 <code>templates/portal.html</code>、<code>build_index.py</code>、<code>shell.py</code>、<code>check_links.py</code>、<code>verify_site.py</code>、<code>sync.sh</code>、<code>curation.json</code>。</p>
+    <p>审查：2026-11-16。完整 <code>verify_site.py</code> 实测 67 PASS / 0 FAIL / 1 SKIP；另做片段锚点、元数据、搜索数量与路线覆盖静态复算。未逐条核验文章内容，未复述本机路径或内部条目内容。</p>
+    <p>内容 CC BY 4.0。本页无外部资源、无数据图表模板。</p>
+  </footer>
+</main>
+</body>
+</html>
