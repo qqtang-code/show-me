@@ -306,6 +306,14 @@ __TOKENS__
     .hero h1{font-size:27px}
     .stat b{font-size:15px}
   }
+  /* 最近更新：窄屏把标题拿满宽度，日期降到第二行，分钟让位 */
+  @media (max-width:640px){
+    .recent-a{grid-template-columns:7px minmax(0,1fr);gap:2px 9px;padding:10px 13px}
+    .recent-a .rc{grid-row:1;grid-column:1;margin-top:6px}
+    .recent-a .rt{grid-row:1;grid-column:2}
+    .recent-a .rd{grid-row:2;grid-column:2}
+    .recent-a .rm{display:none}
+  }
   @media (prefers-reduced-motion:reduce){
     html{scroll-behavior:auto}
     *{animation:none!important;transition:none!important}
