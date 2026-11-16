@@ -215,7 +215,7 @@ e.preventDefault();g()}})})()}catch(e){}
   <p class="hint">范围：线上门户、18 份 <code>meta.json</code>、文章外壳、搜索代码与构建验收脚本。数字来自本地复算和 headless Chrome；未逐条核验各文章的技术结论。</p>
 
   <section class="tldr" id="tldr"><h4>TL;DR · 六项判断</h4><ul>
-    <li><b>视觉不需要推倒重来。</b>完整验收为 67 PASS / 0 FAIL / 1 SKIP，六档宽度均未发现整页横向溢出。</li>
+    <li><b>视觉不需要推倒重来。</b>完整验收 0 FAIL（18 篇状态 67 项 PASS，加入本篇后 70 项），六档宽度均未发现整页横向溢出。</li>
     <li><b>先修真实缺陷。</b>23 处分类片段链接指向不存在的锚点；5 篇公开页面仍标 <code>internal</code>，4 份公开元数据仍含本机绝对路径。</li>
     <li><b>搜索要加排序与词边界。</b>当前按归档顺序返回、每篇最多带两个小节；<code>TP</code> 复算出 44 处结果，短缩写会误入其他单词。</li>
     <li><b>卡片摘要偏长。</b><code>one_liner</code> 为 119–475 字符，平均 262；它更像完整 abstract，不利于横向比较。</li>
@@ -226,7 +226,7 @@ e.preventDefault();g()}})})()}catch(e){}
   <h2 id="baseline"><span class="n">01</span>现有基础：这些应该保留</h2>
   <p><b>一句话：</b>当前问题不在页面是否漂亮，而在内容变多之后，规则是否仍然可靠。</p>
   <div class="grid">
-    <div class="card"><div class="num">67 / 0</div><h3>自动化验收基础良好</h3><p>完整运行 <code>verify_site.py</code> 得到 67 PASS、0 FAIL、1 个桌面限定 SKIP。结构、布局、门户交互与外壳幂等均有覆盖。</p></div>
+    <div class="card"><div class="num">67 / 0</div><h3>自动化验收基础良好</h3><p>完整运行 <code>verify_site.py</code> 得到 0 FAIL（18 篇状态 67 项 PASS，加入本篇后 70 项；另有桌面限定项 SKIP）。结构、布局、门户交互与外壳幂等均有覆盖。</p></div>
     <div class="card"><div class="num">小节级</div><h3>搜索能落到正文位置</h3><p>搜索不是只扫标题；它能返回小节标题、上下文片段并深链到锚点，这个方向正确。</p></div>
     <div class="card"><div class="num">单文件</div><h3>不要急于换技术栈</h3><p>文章自包含、离线可读、便于直接分享。18 篇规模下，没有引入 React、搜索服务或双主题的必要。</p></div>
   </div>
@@ -309,7 +309,7 @@ present
 <nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-prev" href="../../comm-parallel/allreduce-1stage-vs-2stage/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3 5 8l5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#0b6b3f" aria-hidden="true"></i>上一篇</span><b class="sm-pn-t">1-stage → 2-stage AllReduce：为什么省下的是 4 倍字节</b></span></a><a class="sm-pn-a sm-next" href="../../tooling/torchrun-launch-internals/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#a35a06" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../tooling/torchrun-launch-internals/index.html"><span class="sm-more-t">torchrun 启动流程与进程管理：从一条命令到 N 个训练进程</span><span class="sm-more-m">20 分钟<i aria-hidden="true"></i>2026-10-13</span></a></div></section>
 <!-- show-me:shell:end -->  <footer>
     <p>来源：show-me 线上门户与 18 份公开元数据；本地 <code>templates/portal.html</code>、<code>build_index.py</code>、<code>shell.py</code>、<code>check_links.py</code>、<code>verify_site.py</code>、<code>sync.sh</code>、<code>curation.json</code>。</p>
-    <p>审查：2026-11-16。完整 <code>verify_site.py</code> 实测 67 PASS / 0 FAIL / 1 SKIP；另做片段锚点、元数据、搜索数量与路线覆盖静态复算。未逐条核验文章内容，未复述本机路径或内部条目内容。</p>
+    <p>审查：2026-11-16。完整 <code>verify_site.py</code> 实测 0 FAIL（18 篇状态 67 项 PASS，加入本篇后 70 项，另有桌面限定项 SKIP）；另做片段锚点、元数据、搜索数量与路线覆盖静态复算。未逐条核验文章内容，未复述本机路径或内部条目内容。</p>
     <p>内容 CC BY 4.0。本页无外部资源、无数据图表模板。</p>
   </footer>
 </main>
