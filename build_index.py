@@ -449,16 +449,38 @@ def portal_payload(entries: list[dict]) -> dict:
     return {"entries": out}
 
 
-def load_paths(entries: list[dict]) -> list[dict]:
+def load_paths(entries: list[dict]) -> tuple[list[dict], list[str], int]:
+    """读 curation.json，返回 (渲染用的路线, 未收录且已登记的条目, 路线覆盖的条目数)。
+
+    阅读路线是手工清单 —— 新文章不会自己进去。所以这里做三件事：
+      1. 丢掉路线里已不存在的目录（重构/改名后的残留）；
+      2. 承认 unlisted：横向对比、站点自身文档这类「确定不进路线」的条目显式登记，
+         否则它们会一直被当成漏收录；
+      3. 剩下的（既不在 routes 也不在 unlisted）交回调用方告警 —— 让漏收录自己冒出来。
+    """
     if not CURATION.exists():
         print(f"  ⚠ 没有 {CURATION.name}，门户不带阅读路线", file=sys.stderr)
-        return []
+        return [], [], 0
+
     raw = json.loads(CURATION.read_text(encoding="utf-8"))
+    # 兼容两种写法：老的纯数组，以及带 unlisted 的对象
+    if isinstance(raw, list):
+        raw_routes, raw_unlisted = raw, []
+    elif isinstance(raw, dict):
+        raw_routes = raw.get("routes") or []
+        raw_unlisted = raw.get("unlisted") or []
+    else:
+        raise SystemExit(f"{CURATION.name}: 顶层必须是数组或带 routes/unlisted 的对象")
+
     known = {e["_dir"] for e in entries}
-    paths = []
-    for p in raw:
-        items = [d for d in p.get("items", []) if d in known]
-        dropped = [d for d in p.get("items", []) if d not in known]
+    paths: list[dict] = []
+    covered: set[str] = set()
+    for p in raw_routes:
+        if not isinstance(p, dict):
+            raise SystemExit(f"{CURATION.name}: routes 里每一项都必须是对象，遇到 {type(p).__name__}")
+        wanted = list(p.get("items", []))
+        items = [d for d in wanted if d in known]
+        dropped = [d for d in wanted if d not in known]
         if dropped:
             print(f"  ⚠ 路线「{p.get('name')}」里有不存在的条目，已跳过：{dropped}",
                   file=sys.stderr)
@@ -471,7 +493,24 @@ def load_paths(entries: list[dict]) -> list[dict]:
                     "items": items,
                 }
             )
-    return paths
+            covered.update(items)
+
+    unlisted = [d for d in raw_unlisted if d in known]
+    for d in raw_unlisted:
+        if d not in known:
+            print(f"  ⚠ unlisted 里的条目不存在：{d}", file=sys.stderr)
+    both = sorted(covered & set(unlisted))
+    if both:
+        print(f"  ⚠ 这些条目既在路线里又在 unlisted 里，已按「进路线」处理：{both}",
+              file=sys.stderr)
+
+    uncovered = [e["_dir"] for e in entries
+                 if e["_dir"] not in covered and e["_dir"] not in unlisted]
+    for d in uncovered:
+        print(f"  ⚠ 未收录进任何阅读路线：{d}（确认不该进就写进 {CURATION.name} 的 unlisted）",
+              file=sys.stderr)
+
+    return paths, unlisted, len(covered)
 
 
 def render_stats(entries: list[dict]) -> str:
@@ -637,7 +676,8 @@ def _json_literal(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
 
 
-def render_portal(entries: list[dict], paths: list[dict], built: str) -> str:
+def render_portal(entries: list[dict], paths: list[dict], built: str,
+                  path_cover: int = 0) -> str:
     if not PORTAL_TEMPLATE.exists():
         raise SystemExit(
             f"找不到门户模板 {PORTAL_TEMPLATE.relative_to(ROOT)} —— "
@@ -656,6 +696,7 @@ def render_portal(entries: list[dict], paths: list[dict], built: str) -> str:
         "TABS_HTML": render_tabs(entries),
         "STATS": render_stats(entries),
         "TOTAL": str(len(entries)),
+        "PATH_COVER": f"{path_cover} / {len(entries)}",
         "START_HREF": f'{_esc(start_entry["_dir"])}/{_esc(start_entry["artifact"])}',
         "START_TITLE": _esc(start_entry["title"]),
         "BUILD": built,
@@ -748,7 +789,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"小节 id 已补齐：{len(touched)} 页")
 
     entries = load_entries()
-    paths = load_paths(entries)
+    paths, _unlisted, path_cover = load_paths(entries)
 
     if args.dry_run:
         for e in entries:
@@ -756,14 +797,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"  {e['date']}  {e['category']}/{e['slug']:<30} "
                 f"{e['_minutes']:>3} 分钟  {len(e['_sections']):>2} 节  {e['title']}"
             )
-        print(f"\n共 {len(entries)} 篇，{len(paths)} 条阅读路线（dry-run，未写文件）")
+        print(f"\n共 {len(entries)} 篇，{len(paths)} 条阅读路线覆盖 {path_cover} 篇"
+              f"（dry-run，未写文件）")
         return 0
 
     if not args.only_shell:
-        portal = render_portal(entries, paths, built)
+        portal = render_portal(entries, paths, built, path_cover)
         (ROOT / "index.html").write_text(portal, encoding="utf-8")
         (ROOT / "README.md").write_text(render_readme(entries), encoding="utf-8")
-        print(f"门户已重建：{len(entries)} 篇 / {len(paths)} 条路线 → index.html")
+        print(f"门户已重建：{len(entries)} 篇 / {len(paths)} 条路线（覆盖 {path_cover} 篇）"
+              f" → index.html")
 
     if not args.only_portal:
         changed = inject_shells(entries, built)

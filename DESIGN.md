@@ -81,7 +81,8 @@ entry = {
 |---|---|
 | `__TOKENS__` | `theme.TOKENS_CSS` 原样 |
 | `__SITE__` | 下面的 SITE JSON（`json.dumps(..., ensure_ascii=False)`） |
-| `__PATHS__` | 阅读路线 JSON |
+| `__PATHS__` | 阅读路线 HTML（由 `curation.json` 的 `routes` 渲染） |
+| `__PATH_COVER__` | 路线覆盖计数，如 `17 / 19` |
 | `__STATS__` | 已渲染好的统计条 HTML |
 | `__BUILD__` | 构建日期 `YYYY-MM-DD` |
 
@@ -104,7 +105,7 @@ entry = {
 `n`（页内编号）可能为空字符串——有些页面用小节标题排版成的小节本身不编号，原样尊重。
 
 ```jsonc
-// PATHS: curation.json 原样，门户渲染成若干条阅读路线
+// PATHS: curation.json 的 routes 渲染成若干条阅读路线；unlisted 不进页面
 [{"name": "推理链路主线", "desc": "一条请求从进到出，先把主链路上的机制看全",
   "items": ["inference-systems/sglang-request-lifecycle", "…"]}]
 ```
@@ -155,7 +156,7 @@ def inject(html: str, ctx: dict) -> str:
                      ┌ 吸顶站点头：品牌 · 条目 · 阅读路线 · 标签 ┐
 hero（浅渐变）        │ kicker / h1 / 一句话 / 说明 / CTA 按钮组      │
                      │ stats：11 篇 · 3 分类 · 59 标签 · 最近更新    │
-阅读路线             │ 2–3 条路线，每条 3–5 篇，显示 01→02→03 顺序   │
+阅读路线             │ 3–4 条路线，每条 3–6 篇，显示 01→02→03 顺序   │
 全部条目             │ 吸顶工具条：搜索 / 分类页签(带计数) / 标签抽屉 │
                      │ 分类标题：色点 + 中文名 + 一句话 + 篇数 · 最新 │
                      │ 卡片网格 2 列（移动端 1 列）                  │

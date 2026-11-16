@@ -33,7 +33,7 @@ show-me/
 ├── theme.py                   # 全站设计令牌（颜色/尺寸的唯一来源，门户与文章页外壳共用）
 ├── shell.py                   # 给每个文章页注入站点外壳（吸顶条 / 分类侧栏 / 上一篇下一篇），幂等
 ├── templates/portal.html      # 门户模板（占位符由 build_index.py 填充，别改根目录的 index.html）
-├── curation.json              # 门户上的阅读路线（哪几篇按什么顺序读）
+├── curation.json              # 阅读路线（routes，手工维护）与「确认不进路线」清单（unlisted）
 ├── check_links.py             # 校验相对链接**与页内锚点**是否可达（sync.sh 会自动跑，失败即中止）
 ├── taxonomy.json              # 标签受控词表：同义写法在构建期归并到规范写法
 ├── verify_site.py             # 验收：链接 / 六档宽度溢出 / 门户交互 / 外壳幂等
@@ -83,11 +83,14 @@ show-me/
 ```bash
 open index.html                 # 打开门户（全库检索 ⌘K + 分类 + 标签筛选 + 阅读路线）
 python3 build_index.py          # 新增/修改 meta.json 或文章页后重建（门户 + 外壳 + README 表格）
-python3 build_index.py --dry-run    # 只看解析结果：每篇多少分钟、多少小节
+python3 build_index.py --dry-run    # 只看解析结果：每篇多少分钟、多少小节、路线覆盖几篇
 python3 verify_site.py          # 验收：链接、六档宽度、门户交互、外壳幂等
 python3 check_links.py          # 链接与锚点体检（sync.sh 里也会自动跑，失败不提交）
 bash sync.sh "show-me: <主题>"   # 提交并推送（幂等；无改动时不产生空提交）
 ```
+
+新增条目后要决定它进哪条路线：`build_index.py` 会对「既不在 `routes` 也没写进 `unlisted`」的条目告警，
+漏收录不会再悄悄发生（这个清单是手工的，没有任何自动收录规则）。
 
 **别手改根目录的 `index.html`** —— 它由 `templates/portal.html` 渲染生成，下次构建会被覆盖。
 要改门户就去改模板。文章页里的站点外壳同样由 `shell.py` 生成，用

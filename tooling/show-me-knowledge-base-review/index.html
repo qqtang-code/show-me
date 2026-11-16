@@ -291,15 +291,17 @@ present
     <div class="step"><span class="sn">1</span><div class="st"><b>hero 改成读者视角。</b>原来首屏在讲 <code>index.html</code> / <code>notes.md</code> / <code>meta.json</code> 怎么组织——那是维护者视角，已移到页脚；首屏改成「写给做推理与多卡部署的实践者」。</div></div>
     <div class="step"><span class="sn">2</span><div class="st"><b>去掉没有兑现的模板承诺。</b>门户原写「每篇都按速览 → 机制 → 实测 → 常见误解 → 自测」，实际并非每篇都有。改成「常见结构，具体小节以页面为准」。</div></div>
     <div class="step"><span class="sn">3</span><div class="st"><b>压缩卡片摘要。</b><code>one_liner</code> 平均 <b>262 → 186</b> 字符，最长 <b>475 → 234</b>，超过 240 字符的从 <b>9 篇降到 0 篇</b>，关键数字一个没删。</div></div>
-    <div class="step"><span class="sn">4</span><div class="st"><b>加「最近更新」。</b>路线只覆盖 12/18 篇，新文章原来只能靠翻到某个分类底部才被发现；现在首屏有 5 条固定入口。</div></div>
+    <div class="step"><span class="sn">4</span><div class="st"><b>加「最近更新」，并让漏收录自己冒出来。</b>审查时路线只覆盖 12/18 篇，且 <code>curation.json</code> 自 2026-10-21 起没再改过——之后发布的 6 篇一篇都没被考虑。现在路线覆盖 <b>17/19</b>，构建期还会对「既不在 <code>routes</code> 也没登记进 <code>unlisted</code>」的条目告警。</div></div>
   </div>
 
   <h2 id="taxonomy"><span class="n">05</span>标签、路线与「已打开」</h2>
   <h3 class="mini">标签：从自由累加改为受控词表</h3>
   <p>新增 <code>taxonomy.json</code>，构建期把同义写法归并到规范写法，各篇 <code>meta.json</code> 保留作者原词。结果：唯一标签 <b>95 → 92</b>，只出现一次的 <b>75 → 69</b>；<code>AllReduce</code> 从 3 篇变 5 篇（<code>allreduce</code> / <code>all-reduce</code> 合并），<code>DSA</code> 与 <code>GLM 系列</code> 同样收敛。</p>
   <p class="hint">代价说清楚：归并会让某些具体写法在标签列表里消失（例如 <code>GLM-5.3</code>），它们仍保留在各自的 <code>meta.json</code> 与正文里，只是不再各自占一个标签位。</p>
-  <h3 class="mini">路线：区分 path 与 collection</h3>
-  <p><code>curation.json</code> 增加 <code>kind</code>。前两条是 <code>path</code>，按顺序读；「源码走读与实践」标为 <code>collection</code>——<code>torchrun</code> 并不是 MoE 通信或 DFlash 的前置，原来那句「前一篇是后一篇的前置」对它不成立。门户按 kind 显示「路线 · N 篇」或「合集 · N 篇」。</p>
+  <h3 class="mini">路线：区分 path 与 collection，并补上漏收录</h3>
+  <p><code>curation.json</code> 增加 <code>kind</code>：<code>path</code> 表示前一篇是后一篇的前置，<code>collection</code> 表示同方法合集、可挑读。门户按 kind 显示「路线 · N 篇」或「合集 · N 篇」。</p>
+  <p>补成员时发现「多卡通信」一条路线塞不下（<code>DESIGN.md</code> 约定每条 3–5 篇），于是按问题拆成两条：<b>集合通信怎么省时间</b>（原语 → 少搬字节 → 砍固定开销 → 藏进计算 → MoE 的 A2A 内核）与 <b>并行切分与跨机通信</b>（CP 换算子 → EP 改权重排布 → TP16 跨机分层）。<code>stream-interval</code> 移入「源码走读与实践」——它本来就是对着一个开关走源码。</p>
+  <p>清单改成了对象形态：<code>routes</code> 之外新增 <code>unlisted</code>，显式登记「确认不进路线」的两篇（横向对比、站点自身的体检页）。否则构建期会一直把它们当漏收录，告警噪声一多就没人看了。</p>
   <h3 class="mini">「已打开」：把记账点从卡片挪到目的地</h3>
   <p>原来唯一写入 <code>showme:opened</code> 的地方是门户卡片的点击监听，从推荐路线、搜索结果、上一篇/下一篇或外链进来都不记录。现在文章页 shell 加载时按 <code>&lt;cat&gt;/&lt;slug&gt;/</code> 自己落一次盘，门户只负责展示；门户侧也改成按 <code>data-dir</code> 统一监听，路线与最近更新的链接一并覆盖。</p>
 

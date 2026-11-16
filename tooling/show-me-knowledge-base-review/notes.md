@@ -66,13 +66,17 @@ present
 1. **hero 改成读者视角。** 首屏原来在讲目录结构（维护者视角），已移到页脚；改成「写给做推理与多卡部署的实践者」。
 2. **去掉没兑现的模板承诺。** 「每篇都按速览 → 机制 → 实测 → 常见误解 → 自测」改为「常见结构，具体小节以页面为准」。
 3. **压缩卡片摘要。** `one_liner` 平均 262 → 186 字符，最长 475 → 234，超过 240 的从 9 篇降到 0 篇，关键数字一个没删。
-4. **加「最近更新」。** 路线只覆盖 12/18 篇，新文章原来只能翻分类；现在首屏 5 条固定入口。
+4. **加「最近更新」，并让漏收录自己冒出来。** 审查时路线只覆盖 12/18 篇，且 `curation.json` 自 2026-10-21 起没再改过——之后发布的 6 篇一篇都没被考虑。现在覆盖 17/19，构建期还会对「既不在 `routes` 也没登记进 `unlisted`」的条目告警。
 
 ## 05 标签、路线与「已打开」
 
 **标签**：新增 `taxonomy.json`，构建期归并同义写法，各篇 `meta.json` 保留原词。唯一标签 95 → 92，单例 75 → 69；`AllReduce` 3 → 5 篇，`DSA`、`GLM 系列` 同样收敛。代价：`GLM-5.3` 这类具体写法不再各自占一个标签位，但仍留在 `meta.json` 与正文里。
 
-**路线**：`curation.json` 增加 `kind`。前两条 `path` 按顺序读；「源码走读与实践」标 `collection`——`torchrun` 不是 MoE 通信或 DFlash 的前置，原句对它不成立。门户显示「路线 · N 篇」/「合集 · N 篇」。
+**路线**：`curation.json` 增加 `kind`——`path` 表示前一篇是后一篇的前置，`collection` 表示同方法合集、可挑读。门户显示「路线 · N 篇」/「合集 · N 篇」。
+
+补成员时发现「多卡通信」一条塞不下（`DESIGN.md` 约定每条 3–5 篇），按问题拆成两条：**集合通信怎么省时间**（原语 → 少搬字节 → 砍固定开销 → 藏进计算 → MoE 的 A2A 内核）与**并行切分与跨机通信**（CP 换算子 → EP 改权重排布 → TP16 跨机分层）。`stream-interval` 移入「源码走读与实践」。
+
+清单改为对象形态：`routes` 之外新增 `unlisted`，显式登记「确认不进路线」的两篇（横向对比、站点自身体检页），否则告警会一直响。
 
 **已打开**：原来唯一写入点 `showme:opened` 是门户卡片点击监听，从路线、搜索、翻页、外链进入都不记录。现在文章页 shell 按 `<cat>/<slug>/` 自己落盘，门户只负责展示，并按 `data-dir` 统一监听路线与最近更新的链接。
 
@@ -111,4 +115,4 @@ present
 
 show-me 线上门户与各篇 `meta.json`；本地 `templates/portal.html`、`build_index.py`、`shell.py`、`check_links.py`、`verify_site.py`、`sync.sh`、`curation.json`、`taxonomy.json`。
 
-改动后完整 `verify_site.py` 70 PASS / 0 FAIL / 1 SKIP（19 篇）；`check_links.py` 20 个页面 0 失效锚点；搜索与折叠行为在 900px iframe 内用 headless Chrome 逐条断言；标签筛选修复前后卡片计数为本机实测。
+改动后完整 `verify_site.py` 70 PASS / 0 FAIL / 1 SKIP（19 篇）；路线覆盖 17/19，其余 2 篇登记在 `unlisted`；`check_links.py` 20 个页面 0 失效锚点；搜索与折叠行为在 900px iframe 内用 headless Chrome 逐条断言；标签筛选修复前后卡片计数为本机实测。
