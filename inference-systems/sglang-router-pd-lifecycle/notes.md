@@ -77,7 +77,8 @@ sequenceDiagram
     R->>D: POST /generate ＋ 同一 room（并发，不等 prefill）
     D->>D: decode radix 命中 → decode_prefix_len
     D->>P: GET /route?prefill_dp_rank=room%dp
-    D->>P: ZMQ 注册 KV 地址 ＋ metadata(kv_indices, decode_prefix_len)
+    D->>P: ZMQ 注册接收缓冲（每层 KV 指针）
+    D->>P: ZMQ metadata（目的页号 kv_indices ＋ decode_prefix_len）
     P->>P: start_send_idx = decode_prefix_len
     P->>P: forward（只算未命中部分）
     P->>D: RDMA 写 KV 页 [d, L)

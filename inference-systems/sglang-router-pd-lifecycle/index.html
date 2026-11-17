@@ -463,7 +463,7 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
 <div class="fig">
 <div class="ttl">PD 模式下的一次请求：router 的两条腿与 prefill→decode 的 KV 通道</div>
 <div class="svgwrap">
-<svg viewBox="0 0 900 560" role="img" aria-label="PD 请求时序：client、router、prefill、decode 四条泳道">
+<svg viewBox="0 0 920 690" role="img" aria-label="PD 请求时序：client、router、prefill、decode 四条泳道；router 同时派发两条腿，prefill 与 decode 之间完成地址交换、metadata 与 RDMA 传输">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#4a5871"/>
@@ -475,85 +475,106 @@ if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(se
   <style>
     .hd{fill:#eef2f9;stroke:#d5dce8}
     .ht{font:600 11.5px ui-monospace,Menlo,monospace;fill:#1b2740}
-    .ll{stroke:#d5dce8;stroke-dasharray:3 4}
+    .ll{stroke:#d5dce8;stroke-dasharray:3 5}
     .m{stroke:#4a5871;stroke-width:1.2;fill:none;marker-end:url(#ar)}
     .mr{stroke:#b23a10;stroke-width:1.4;fill:none;marker-end:url(#ar2)}
-    .t{font:11px -apple-system,"PingFang SC",sans-serif;fill:#26334a}
-    .tm{font:10.5px ui-monospace,Menlo,monospace;fill:#657389}
-    .self{fill:#f8fafc;stroke:#dde3ee}
-    .num{font:600 10px ui-monospace,Menlo,monospace;fill:#1d4ed8}
+    .self{stroke:#4a5871;stroke-width:1.2;fill:none;marker-end:url(#ar)}
+    .t{font:11.5px -apple-system,"PingFang SC",sans-serif;fill:#26334a;
+       paint-order:stroke;stroke:#fff;stroke-width:4px;stroke-linejoin:round}
+    .tm{font:10.5px ui-monospace,Menlo,monospace;fill:#5a6780;
+        paint-order:stroke;stroke:#fff;stroke-width:4px;stroke-linejoin:round}
+    .n{font:10.5px ui-monospace,Menlo,monospace;fill:#9aa6b8}
+    .br{fill:#fff}
   </style>
 
-  <rect class="hd" x="20" y="8" width="120" height="30" rx="7"/><text class="ht" x="80" y="28" text-anchor="middle">client</text>
-  <rect class="hd" x="235" y="8" width="130" height="30" rx="7"/><text class="ht" x="300" y="28" text-anchor="middle">sgl-router</text>
-  <rect class="hd" x="490" y="8" width="140" height="30" rx="7"/><text class="ht" x="560" y="28" text-anchor="middle">prefill worker</text>
-  <rect class="hd" x="735" y="8" width="140" height="30" rx="7"/><text class="ht" x="805" y="28" text-anchor="middle">decode worker</text>
+  <rect class="hd" x="24"  y="8" width="112" height="30" rx="7"/><text class="ht" x="80"  y="28" text-anchor="middle">client</text>
+  <rect class="hd" x="236" y="8" width="128" height="30" rx="7"/><text class="ht" x="300" y="28" text-anchor="middle">sgl-router</text>
+  <rect class="hd" x="520" y="8" width="140" height="30" rx="7"/><text class="ht" x="590" y="28" text-anchor="middle">prefill worker</text>
+  <rect class="hd" x="760" y="8" width="140" height="30" rx="7"/><text class="ht" x="830" y="28" text-anchor="middle">decode worker</text>
 
-  <line class="ll" x1="80"  y1="38" x2="80"  y2="540"/>
-  <line class="ll" x1="300" y1="38" x2="300" y2="540"/>
-  <line class="ll" x1="560" y1="38" x2="560" y2="540"/>
-  <line class="ll" x1="805" y1="38" x2="805" y2="540"/>
+  <line class="ll" x1="80"  y1="38" x2="80"  y2="668"/>
+  <line class="ll" x1="300" y1="38" x2="300" y2="668"/>
+  <line class="ll" x1="590" y1="38" x2="590" y2="668"/>
+  <line class="ll" x1="830" y1="38" x2="830" y2="668"/>
 
-  <text class="num" x="10" y="62">1</text>
-  <line class="m" x1="80" y1="62" x2="294" y2="62"/>
-  <text class="t" x="88" y="56">POST /v1/chat/completions</text>
+  <!-- 1 -->
+  <text class="n" x="18" y="88">1</text>
+  <line class="m" x1="80" y1="84" x2="294" y2="84"/>
+  <text class="t" x="92" y="75" text-anchor="start">POST /v1/chat/completions</text>
 
-  <text class="num" x="232" y="90">2</text>
-  <rect class="self" x="228" y="72" width="176" height="30" rx="5"/>
-  <text class="t" x="236" y="91">prepare · tokenize · prefix lookup</text>
+  <!-- 2 -->
+  <text class="n" x="18" y="130">2</text>
+  <path class="self" d="M300,115 h12 v22 h-12"/>
+  <text class="t" x="322" y="125" text-anchor="start">prepare · tokenize · 前缀查询 · 选路</text>
+  <text class="tm" x="322" y="141" text-anchor="start">ModelRouting::lookup → select_workers</text>
 
-  <text class="num" x="232" y="126">3</text>
-  <line class="m" x1="300" y1="126" x2="554" y2="126"/>
-  <text class="t" x="308" y="120">POST /generate ＋ room</text>
-  <text class="tm" x="308" y="140">bootstrap_host/port/room</text>
+  <!-- 3 -->
+  <text class="n" x="18" y="172">3</text>
+  <line class="m" x1="300" y1="168" x2="584" y2="168"/>
+  <text class="t" x="312" y="159" text-anchor="start">POST /generate（带 room 与 bootstrap 地址）</text>
 
-  <text class="num" x="468" y="170">4</text>
-  <line class="m" x1="300" y1="170" x2="799" y2="170"/>
-  <text class="t" x="308" y="164">POST /generate ＋ 同一个 room（并发，不等 prefill）</text>
+  <!-- 4 -->
+  <text class="n" x="18" y="214">4</text>
+  <rect class="br" x="584" y="204" width="12" height="12"/>
+  <line class="m" x1="300" y1="210" x2="824" y2="210"/>
+  <text class="t" x="312" y="201" text-anchor="start">POST /generate（同一 room，与 3 并发）</text>
 
-  <text class="num" x="640" y="202">5</text>
-  <rect class="self" x="640" y="184" width="196" height="30" rx="5"/>
-  <text class="t" x="648" y="203">decode radix 命中 → decode_prefix_len</text>
+  <!-- 5 -->
+  <text class="n" x="18" y="256">5</text>
+  <path class="self" d="M830,241 h-12 v22 h12"/>
+  <text class="t" x="808" y="251" text-anchor="end">decode radix 命中</text>
+  <text class="tm" x="808" y="267" text-anchor="end">→ d = decode_prefix_len</text>
 
-  <text class="num" x="470" y="238">6</text>
-  <line class="m" x1="805" y1="238" x2="566" y2="238"/>
-  <text class="t" x="560" y="232" text-anchor="end">GET /route?prefill_dp_rank=room%dp</text>
+  <!-- 6 -->
+  <text class="n" x="18" y="298">6</text>
+  <line class="m" x1="830" y1="294" x2="596" y2="294"/>
+  <text class="t" x="812" y="285" text-anchor="end">GET /route?prefill_dp_rank=room%dp</text>
 
-  <text class="num" x="470" y="272">7</text>
-  <line class="mr" x1="805" y1="272" x2="566" y2="272"/>
-  <text class="t" x="560" y="266" text-anchor="end">ZMQ 注册 KV 地址 ＋ metadata</text>
-  <text class="tm" x="560" y="286" text-anchor="end">kv_indices · decode_prefix_len</text>
+  <!-- 7 -->
+  <text class="n" x="18" y="340">7</text>
+  <line class="mr" x1="830" y1="336" x2="596" y2="336"/>
+  <text class="t" x="812" y="327" text-anchor="end">ZMQ 注册接收缓冲（每层 KV 指针）</text>
 
-  <text class="num" x="492" y="316">8</text>
-  <rect class="self" x="492" y="298" width="176" height="30" rx="5"/>
-  <text class="t" x="500" y="317">start_send_idx = decode_prefix_len</text>
+  <!-- 8 -->
+  <text class="n" x="18" y="382">8</text>
+  <line class="mr" x1="830" y1="378" x2="596" y2="378"/>
+  <text class="t" x="812" y="369" text-anchor="end">ZMQ 发 metadata（目的页号 ＋ d）</text>
 
-  <text class="num" x="492" y="352">9</text>
-  <rect class="self" x="492" y="334" width="200" height="30" rx="5"/>
-  <text class="t" x="500" y="353">prefill forward（只算未命中部分）</text>
+  <!-- 9 -->
+  <text class="n" x="18" y="424">9</text>
+  <path class="self" d="M590,409 h12 v22 h-12"/>
+  <text class="t" x="612" y="419" text-anchor="start">finalize_bootstrap（起点 = d）</text>
+  <text class="tm" x="612" y="435" text-anchor="start">forward 只算未命中部分</text>
 
-  <text class="num" x="620" y="388">10</text>
-  <line class="mr" x1="560" y1="388" x2="799" y2="388"/>
-  <text class="t" x="566" y="382">RDMA 写 KV 页 [decode_prefix_len, end)</text>
+  <!-- 10 -->
+  <text class="n" x="18" y="466">10</text>
+  <line class="mr" x1="590" y1="462" x2="824" y2="462"/>
+  <text class="t" x="602" y="453" text-anchor="start">RDMA 写 KV 页 [d, L) ＋ 首 token</text>
 
-  <text class="num" x="640" y="420">11</text>
-  <rect class="self" x="640" y="402" width="200" height="30" rx="5"/>
-  <text class="t" x="648" y="421">KVPoll.Success → 提交首个 token</text>
+  <!-- 11 -->
+  <text class="n" x="18" y="508">11</text>
+  <path class="self" d="M830,493 h-12 v22 h12"/>
+  <text class="t" x="808" y="508" text-anchor="end">KVPoll.Success → 提交首 token</text>
 
-  <text class="num" x="640" y="456">12</text>
-  <rect class="self" x="640" y="438" width="176" height="30" rx="5"/>
-  <text class="t" x="648" y="457">decode loop（逐 token）</text>
+  <!-- 12 -->
+  <text class="n" x="18" y="550">12</text>
+  <path class="self" d="M830,535 h-12 v22 h12"/>
+  <text class="t" x="808" y="550" text-anchor="end">decode loop（逐 token）</text>
 
-  <text class="num" x="468" y="492">13</text>
-  <line class="m" x1="805" y1="492" x2="306" y2="492"/>
-  <text class="t" x="540" y="486">SSE token 流</text>
+  <!-- 13 -->
+  <text class="n" x="18" y="592">13</text>
+  <rect class="br" x="584" y="582" width="12" height="12"/>
+  <line class="m" x1="830" y1="588" x2="306" y2="588"/>
+  <text class="t" x="812" y="579" text-anchor="end">SSE token 流</text>
 
-  <text class="num" x="10" y="528">14</text>
-  <line class="m" x1="300" y1="528" x2="86" y2="528"/>
-  <text class="t" x="96" y="522">SSE 转发（首字节时释放 decode 配额）</text>
+  <!-- 14 -->
+  <text class="n" x="18" y="634">14</text>
+  <line class="m" x1="300" y1="630" x2="86" y2="630"/>
+  <text class="t" x="96" y="621" text-anchor="start">SSE 转发给客户端</text>
+
 </svg>
 </div>
-<div class="cap">实线 = 请求/响应；红线 = PD 内部的握手与 KV 通道，这两步 router 只提供 <code>room</code> 与 <code>bootstrap_host/port</code>，不参与。序号 3/4 之间没有 await：<code>spawn_prefill_request</code> 先起任务，decode 腿紧接着发出。</div>
+<div class="cap">灰线 = 请求/响应；红线 = PD 内部的握手与 KV 通道，这两步 router 只提供 <code>room</code> 与 <code>bootstrap_host/port</code>，不参与。序号 3 与 4 之间没有 await：<code>spawn_prefill_request</code> 先起任务，decode 腿紧接着发出；<code>d</code> = <code>decode_prefix_len</code>，<code>L</code> = prompt 长度。跨泳道的箭头在 prefill 竖线处断开，表示只是经过、不是与 prefill 交互。</div>
 </div>
 
 <h3 class="mini">为什么 prefill 与 decode 可以并发发出</h3>
