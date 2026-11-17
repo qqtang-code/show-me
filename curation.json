@@ -1,69 +1,70 @@
 {
- "_comment": "阅读路线是手工清单，不自动收录。routes 里是给读者的建议顺序；unlisted 登记「确认不进任何路线」的条目（横向对比、站点自身的体检页等）。构建期会检查：routes 里引用了不存在的条目、unlisted 里的条目其实不存在或又被塞进了 routes、以及有条目两边都没登记 —— 最后一种会告警，提醒你决定它该进哪条路线。kind: path 表示前一篇是后一篇的前置，collection 表示同方法合集、可按需挑读。",
- "routes": [
-  {
-   "name": "一条请求的主线",
-   "kind": "path",
-   "desc": "从一条请求进到出，再把 KV 复用、分层存储、容量模型与 1M 上下文的三种切法依次算清 —— 后面大多数篇目都挂在这条主线上。",
-   "items": [
-    "inference-systems/sglang-request-lifecycle",
-    "inference-systems/sglang-prefix-cache-three-attentions",
-    "inference-systems/hicache-mooncake",
-    "inference-systems/kv-pool-parallel-strategies",
-    "inference-systems/decode-dp-attention-dcp",
-    "inference-systems/kv-prefetch-prediction"
-   ]
-  },
-  {
-   "name": "集合通信怎么省时间",
-   "kind": "path",
-   "desc": "同一组集合通信，先分清省的是带宽还是固定开销：少搬字节、砍掉固定开销、把通信藏进计算，最后落到 MoE 的 A2A 内核。",
-   "items": [
-    "comm-parallel/a2a-ar-ag-sglang",
-    "comm-parallel/allreduce-1stage-vs-2stage",
-    "comm-parallel/cuda-ipc-direct-push",
-    "comm-parallel/ar-compute-overlap-moe-chunk",
-    "inference-systems/moe-a2a-megamoe"
-   ]
-  },
-  {
-   "name": "并行切分与跨机通信",
-   "kind": "path",
-   "desc": "换切分是把收益换到另一处开销上：CP 换掉按 token 重复的算子、EP 改权重排布，TP16 跨机后要把全组通信拆成两层；而 CP 边界与 P 端还有另一条路 —— 把通信的精度换成线上字节。LayerSplit 则用一次整层广播换 72% 的 KV 显存。",
-   "items": [
-    "comm-parallel/prefill-cp8-decode-tp8",
-    "comm-parallel/cp-boundary-fp8-comm",
-    "comm-parallel/sglang-tp8-ep1-4-8-mixtral",
-    "comm-parallel/decode-tp16-2level-comm",
-    "comm-parallel/prefill-cp4-quantized-comm",
-    "inference-systems/sglang-layer-split"
-   ]
-  },
-  {
-   "name": "源码走读与实践",
-   "kind": "collection",
-   "desc": "同一套方法的三篇：对着源码把一件事走完 —— 启动器怎么组进程、一个流式开关砍掉了什么、新特性怎么绕过上游护栏适配进来。彼此没有先后顺序，按当前问题挑一篇读。",
-   "items": [
-    "tooling/torchrun-launch-internals",
-    "inference-systems/sglang-stream-interval",
-    "inference-systems/dflash-pp-adaptation"
-   ]
-  },
-  {
-   "name": "调优取舍：哪些改动值得开",
-   "kind": "collection",
-   "desc": "同一套部署上的一批候选优化：每篇都先说门控（什么形状、什么版本下才成立），再说代价与证据强度。没有先后顺序，按当前问题挑一篇读——也有几篇是「先别急着试」的判负记录。",
-   "items": [
-    "inference-systems/decode-small-m-w4a4",
-    "tooling/host-side-knobs",
-    "inference-systems/prefill-online-w8a8",
-    "inference-systems/dsa-prepare-six-opts",
-    "inference-systems/sm120-sparse-mla-my-prefill"
-   ]
-  }
- ],
- "unlisted": [
-  "inference-systems/deepinfer-vs-sglang",
-  "tooling/show-me-knowledge-base-review"
- ]
+  "_comment": "阅读路线是手工清单，不自动收录。routes 里是给读者的建议顺序；unlisted 登记「确认不进任何路线」的条目（横向对比、站点自身的体检页等）。构建期会检查：routes 里引用了不存在的条目、unlisted 里的条目其实不存在或又被塞进了 routes、以及有条目两边都没登记 —— 最后一种会告警，提醒你决定它该进哪条路线。kind: path 表示前一篇是后一篇的前置，collection 表示同方法合集、可按需挑读。",
+  "routes": [
+    {
+      "name": "一条请求的主线",
+      "kind": "path",
+      "desc": "从一条请求进到出，再把 KV 复用、分层存储、容量模型与 1M 上下文的三种切法依次算清 —— 后面大多数篇目都挂在这条主线上。",
+      "items": [
+        "inference-systems/sglang-request-lifecycle",
+        "inference-systems/sglang-prefix-cache-three-attentions",
+        "inference-systems/hicache-mooncake",
+        "inference-systems/kv-pool-parallel-strategies",
+        "inference-systems/decode-dp-attention-dcp",
+        "inference-systems/kv-prefetch-prediction"
+      ]
+    },
+    {
+      "name": "集合通信怎么省时间",
+      "kind": "path",
+      "desc": "同一组集合通信，先分清省的是带宽还是固定开销：少搬字节、砍掉固定开销、把通信藏进计算，最后落到 MoE 的 A2A 内核。",
+      "items": [
+        "comm-parallel/a2a-ar-ag-sglang",
+        "comm-parallel/allreduce-1stage-vs-2stage",
+        "comm-parallel/cuda-ipc-direct-push",
+        "comm-parallel/ar-compute-overlap-moe-chunk",
+        "inference-systems/moe-a2a-megamoe"
+      ]
+    },
+    {
+      "name": "并行切分与跨机通信",
+      "kind": "path",
+      "desc": "换切分是把收益换到另一处开销上：CP 换掉按 token 重复的算子、EP 改权重排布，TP16 跨机后要把全组通信拆成两层；而 CP 边界与 P 端还有另一条路 —— 把通信的精度换成线上字节。LayerSplit 则用一次整层广播换 72% 的 KV 显存。",
+      "items": [
+        "comm-parallel/prefill-cp8-decode-tp8",
+        "comm-parallel/cp-boundary-fp8-comm",
+        "comm-parallel/sglang-tp8-ep1-4-8-mixtral",
+        "comm-parallel/decode-tp16-2level-comm",
+        "comm-parallel/prefill-cp4-quantized-comm",
+        "inference-systems/sglang-layer-split"
+      ]
+    },
+    {
+      "name": "源码走读与实践",
+      "kind": "collection",
+      "desc": "同一套方法的四篇：对着源码把一件事走完 —— 启动器怎么组进程、一个流式开关砍掉了什么、router 怎么为 PD 配对生成 room、新特性怎么绕过上游护栏适配进来。彼此没有先后顺序，按当前问题挑一篇读。",
+      "items": [
+        "tooling/torchrun-launch-internals",
+        "inference-systems/sglang-stream-interval",
+        "inference-systems/sglang-router-pd-lifecycle",
+        "inference-systems/dflash-pp-adaptation"
+      ]
+    },
+    {
+      "name": "调优取舍：哪些改动值得开",
+      "kind": "collection",
+      "desc": "同一套部署上的一批候选优化：每篇都先说门控（什么形状、什么版本下才成立），再说代价与证据强度。没有先后顺序，按当前问题挑一篇读——也有几篇是「先别急着试」的判负记录。",
+      "items": [
+        "inference-systems/decode-small-m-w4a4",
+        "tooling/host-side-knobs",
+        "inference-systems/prefill-online-w8a8",
+        "inference-systems/dsa-prepare-six-opts",
+        "inference-systems/sm120-sparse-mla-my-prefill"
+      ]
+    }
+  ],
+  "unlisted": [
+    "inference-systems/deepinfer-vs-sglang",
+    "tooling/show-me-knowledge-base-review"
+  ]
 }

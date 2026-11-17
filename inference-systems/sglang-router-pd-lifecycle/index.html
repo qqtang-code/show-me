@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>SGLang Router 的调度与 PD 请求生命周期</title><!-- show-me:shell:begin -->
+<meta name="description" content="对照 sgl-router 的选路阶梯与 prefill/decode 的 bootstrap 握手，把 PD 部署下三种缓存命中情况拆到具体函数：router 只发一个 room，KV 从不经过它；命中只缩短 prefill 的 forward，真正减少传输量的是 decode 侧的 decode_prefix_len。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="SGLang Router 的调度与 PD 请求生命周期">
+<meta property="og:description" content="对照 sgl-router 的选路阶梯与 prefill/decode 的 bootstrap 握手，把 PD 部署下三种缓存命中情况拆到具体函数：router 只发一个 room，KV 从不经过它；命中只缩短 prefill 的 forward，真正减少传输量的是 decode 侧的 decode_prefix_len。">
+<meta property="og:url" content="https://qqtang-code.github.io/show-me/inference-systems/sglang-router-pd-lifecycle/index.html">
+<link rel="canonical" href="https://qqtang-code.github.io/show-me/inference-systems/sglang-router-pd-lifecycle/index.html">
+<meta name="twitter:card" content="summary">
+<!-- show-me:shell:end -->
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#f7f9ff; --accent-line:#d9e2f5;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  [id]{scroll-margin-top:20px}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:40px 20px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto}
+  .crumb{font:12px var(--mono);color:var(--dim2);margin-bottom:12px;display:flex;gap:7px;flex-wrap:wrap}
+  .crumb a{color:var(--accent);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:#c3ccdb}
+  h1{font-size:27px;line-height:1.38;margin:0 0 10px;letter-spacing:-.01em;color:var(--ink)}
+  h2{font-size:19px;margin:42px 0 6px;color:var(--ink);padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:#94a3b8;font-weight:400;margin-right:8px;font-family:var(--mono);font-size:15px}
+  h3.mini{font-size:15.5px;margin:26px 0 4px;color:var(--ink)}
+  h4.micro{font-size:13px;margin:18px 0 4px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+  h2:first-of-type{margin-top:32px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .lead{color:var(--dim)}
+  .hint{color:var(--dim);font-size:13.5px}
+  b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:.92em;background:#eef2f9;color:#12489c;padding:1.5px 5px;border-radius:4px}
+  pre{background:var(--lane);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;
+      font:12.5px/1.75 var(--mono);color:#28374f}
+  pre code{background:none;color:inherit;padding:0}
+  .metarow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .metarow span{font:11.5px var(--mono);background:#eef2f9;border:1px solid #dbe2ee;
+                border-radius:999px;padding:4px 10px;color:#3f4c63}
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+  .nav a{font:12.5px var(--mono);text-decoration:none;color:#3f4c63;background:#eef2f9;
+         border:1px solid #dbe2ee;padding:5px 11px;border-radius:999px;transition:all .14s ease}
+  .nav a:hover{color:var(--accent);border-color:#bcd0f0;background:#e6eefb}
+  .tldr{margin:0 0 10px;border:1px solid var(--accent-line);background:var(--accent-soft);
+        border-radius:12px;padding:16px 20px}
+  .tldr h4{margin:0 0 8px;font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  .tldr ul{margin:0;padding-left:18px}
+  .tldr li{margin:7px 0;font-size:14px;color:#3b4860}
+  .tldr b{color:var(--ink)}
+
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e6ebf3;vertical-align:top}
+  th{font:600 11.5px var(--mono);letter-spacing:.05em;color:#4d5b73;text-transform:uppercase;background:#f4f7fc}
+  tr:last-child td{border-bottom:0}
+  td.k{font:600 12px var(--mono);color:#28374f;white-space:nowrap}
+  td.v{font-family:var(--mono);font-size:12.5px;color:#12489c}
+  @media (min-width:601px){ td code,th code{white-space:nowrap} }
+  .tbl{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:14px}
+  .tbl table{margin-top:0}
+
+  /* ---------- 页内组件 ---------- */
+  .note{font-size:13.5px;color:#26334a;border-left:3px solid var(--warn);background:#fdf7ec;
+        padding:11px 14px;border-radius:0 8px 8px 0;margin:16px 0}
+  .note b{color:#7a4405}
+  .term{font-size:13px;color:#3b4860;background:var(--panel2);border:1px solid var(--line);
+        border-radius:10px;padding:12px 16px;margin:0 0 6px}
+  .term b{font-family:var(--mono);font-size:12.5px;color:#12489c}
+  .badge{display:inline-block;font:600 10px/1.7 var(--mono);letter-spacing:.05em;padding:0 6px;
+         border-radius:4px;vertical-align:1px;white-space:nowrap}
+  .badge.src{background:#e7f6ee;color:#0b6b3f;border:1px solid #bfe6d3}
+  .badge.inf{background:#fdf3e4;color:#8a5209;border:1px solid #f0d9b5}
+  .fig{margin:16px 0;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .fig .ttl{font:600 12px var(--mono);color:#3f4c63;letter-spacing:.03em;margin-bottom:10px}
+  .fig .cap{font-size:12px;color:var(--dim2);margin-top:10px}
+  .svgwrap{overflow-x:auto}
+  .svgwrap svg{display:block;width:100%;min-width:660px;height:auto}
+  .cols2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+  @media(max-width:760px){.cols2{grid-template-columns:1fr}}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card h4{margin:0 0 8px;font:600 12.5px var(--mono);color:#1b2740}
+  .card ul{margin:0;padding-left:17px;font-size:13.5px;color:#3b4860}
+  .card li{margin:5px 0}
+  .rungs{display:flex;flex-direction:column;gap:8px;margin:14px 0}
+  .rung{display:grid;grid-template-columns:30px 138px 1fr;gap:12px;align-items:center;
+        background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px}
+  .rung .i{font:600 11px var(--mono);color:#94a3b8}
+  .rung .t{font:600 12px var(--mono);color:#1b2740}
+  .rung .d{font-size:13px;color:#3b4860}
+  .rung.hit{border-color:#bfe6d3;background:#f4fbf7}
+  .rung.out{border-color:#f0d9b5;background:#fefaf3}
+  @media(max-width:640px){
+    .rung{grid-template-columns:24px 1fr}
+    .rung .d{grid-column:1 / -1}
+  }
+  .kvmap{margin:6px 0 2px}
+  .kvrow{display:grid;grid-template-columns:132px 1fr;gap:12px;align-items:center;margin:6px 0}
+  .kvrow .lab{font:600 11.5px var(--mono);color:#28374f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .track{display:flex;height:24px;border-radius:6px;overflow:hidden;border:1px solid #d5dce8;background:#fff;min-width:0}
+  .track i{display:block;height:100%}
+  .seg-cache{background:#a9e3c6}
+  .seg-comp{background:#b9d0f2}
+  .seg-xfer{background:#f3c168}
+  .seg-none{background:#f1f4f9}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font:11.5px var(--mono);color:#526078}
+  .legend em{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+  .axis{display:flex;justify-content:space-between;font:10.5px var(--mono);color:#8a97ad;margin:1px 0 6px;padding-left:144px}
+  .axis .r{text-align:right}
+  summary{cursor:pointer;font-weight:600;color:#1b2740}
+  details{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+          padding:12px 16px;margin:10px 0}
+  details p{font-size:14px;color:#3b4860;margin:8px 0 0}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--dim2);text-align:left}
+  footer p{margin:0 0 6px}
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+  @media (max-width:640px){
+    .nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+    .nav::-webkit-scrollbar{height:0}.nav a{flex:none}
+  }
+  @media (max-width:600px){
+    code{overflow-wrap:anywhere}
+    pre.eqdef{white-space:pre-wrap;overflow-wrap:anywhere}
+    .kvrow{grid-template-columns:1fr;gap:4px}
+    .axis{padding-left:0}
+    .kvrow .lab{white-space:normal}
+    .tbl{background:none;border:0;border-radius:0}
+    table,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin:0 0 12px}
+    td{border:0;padding:7px 0;display:block;text-align:left;overflow-wrap:anywhere}
+    td::before{content:attr(data-label);display:block;float:none;max-width:100%;padding:0 0 2px;
+               color:var(--dim2);font-size:11px;letter-spacing:.04em;text-transform:uppercase;
+               font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    td[data-label]{border-top:1px dashed #eef1f7;margin-top:2px}
+    td.k,td:first-child{display:block;text-align:left;font-size:15px;font-weight:600;white-space:normal;
+      border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:7px;font-family:var(--mono)}
+    td.k::before,td:first-child::before{content:none;float:none}
+  }
+</style>
+<!-- show-me:shell:begin -->
+<style id="sm-shell">
+  :root{
+    --bg:#f5f7fb; --panel:#fff; --panel2:#f8fafc; --lane:#f3f6fb; --line:#dde3ee; --line2:#e9eef6;
+    --fg:#131c2e; --ink:#0d1526; --dim:#4a5871; --dim2:#657389;
+    --accent:#1d4ed8; --accent-soft:#eef4fd; --accent-line:#d5e2f6;
+    --chip:#eef2f9; --chipb:#dbe2ee;
+    --good:#0b6b3f; --waste:#b23a10; --warn:#a35a06;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --shadow-1:0 1px 2px rgba(16,24,40,.04);
+    --shadow-2:0 10px 28px -12px rgba(16,24,40,.22), 0 2px 6px rgba(16,24,40,.05);
+    --bar-h:52px;
+    --measure:980px;
+  }
+
+  /* ════════ show-me 文章页外壳 · 由 shell.py 注入，勿手改 ════════ */
+
+  /* 11 页的 body 都是 padding:40px 20px 80px。吸顶条高 var(--bar-h)，
+     差多少补多少，否则它会压住第一行 .crumb；除此之外正文几何不动。 */
+  body::before{content:"";display:block;height:max(0px,calc(var(--bar-h) - 40px))}
+  /* 页内锚点（.nav 的 #s1 …）落到吸顶条下方，而不是被它裁掉 */
+  [id]{scroll-margin-top:calc(20px + var(--bar-h))}
+
+  /* ---------- 吸顶条 ---------- */
+  .sm-bar{position:fixed;top:0;left:0;right:0;z-index:60;height:var(--bar-h);
+    background:rgba(245,247,251,.84);
+    -webkit-backdrop-filter:saturate(150%) blur(12px);backdrop-filter:saturate(150%) blur(12px);
+    border-bottom:1px solid var(--line)}
+  .sm-bar-in{height:100%;max-width:1020px;margin:0 auto;padding:0 20px;
+    display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-brand{flex:none;font-size:14px;font-weight:650;letter-spacing:-.015em;
+    color:var(--ink);text-decoration:none}
+  .sm-brand:hover{color:var(--accent)}
+  .sm-div{flex:none;width:1px;height:16px;background:var(--line)}
+  .sm-cat{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:190px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+  .sm-cat:hover{color:var(--ink);border-color:var(--line2);background:var(--panel2)}
+  .sm-cat>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sm-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sm-cat,var(--accent))}
+  .sm-right{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .sm-min,.sm-date{font:11.5px var(--mono);white-space:nowrap}
+  .sm-min{color:var(--dim)}
+  .sm-date{color:var(--dim2)}
+  .sm-sep{font:10px var(--mono);color:#c3ccdb}
+  .sm-search{flex:none;display:inline-flex;align-items:center;gap:6px;
+    font:11.5px var(--mono);color:var(--dim);text-decoration:none;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .sm-search:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .sm-search svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round}
+  .sm-kbd{font:10px var(--mono);line-height:15px;color:var(--dim2);background:var(--chip);
+    border:1px solid var(--chipb);border-radius:4px;padding:0 4px}
+  .sm-prog{position:absolute;left:0;bottom:0;width:100%;height:2px;background:var(--accent);
+    opacity:.85;pointer-events:none;transform:scaleX(0);transform-origin:0 50%;
+    transition:transform .12s linear}
+  @media (prefers-reduced-motion:reduce){.sm-prog{transition:none}}
+
+  /* ---------- 分类侧栏：只在 ≥1280px 的左侧空白边栏里 ---------- */
+  :root{--sm-rail-w:clamp(120px,calc(50vw - 512px),208px)}
+  .sm-rail{display:none}
+  @media (min-width:1280px){
+    .sm-rail{display:block;position:fixed;z-index:55;pointer-events:auto;
+      top:calc(var(--bar-h) + 24px);left:max(6px,calc(50% - 490px - var(--sm-rail-w) - 12px));
+      width:var(--sm-rail-w);
+      max-height:calc(100vh - var(--bar-h) - 48px);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-width:thin;padding:12px 9px;
+      background:rgba(255,255,255,.7);border:1px solid var(--line2);border-radius:12px;
+      box-shadow:var(--shadow-1)}
+  }
+  .sm-rail-h{font:10px var(--mono);letter-spacing:.07em;color:var(--dim2);
+    padding:0 5px 8px;margin-bottom:7px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .sm-rail-list{display:flex;flex-direction:column;gap:1px}
+  .sm-rail-a{display:grid;grid-template-columns:7px minmax(0,1fr);column-gap:7px;
+    align-items:start;min-width:0;padding:6px 5px;border-radius:7px;
+    text-decoration:none;color:var(--dim)}
+  .sm-rail-a:hover{background:var(--chip);color:var(--ink)}
+  .sm-rail-a[aria-current]{background:var(--accent-soft);color:var(--ink)}
+  .sm-rail-d{width:6px;height:6px;margin-top:5px;border-radius:50%;opacity:.55;
+    background:var(--sm-cat,var(--accent))}
+  .sm-rail-a[aria-current] .sm-rail-d{opacity:1}
+  .sm-rail-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:11.5px;line-height:1.45;overflow-wrap:anywhere}
+  .sm-rail-a[aria-current] .sm-rail-t{font-weight:600}
+  .sm-rail-m{grid-column:2;margin-top:2px;font:9.5px var(--mono);color:var(--dim2)}
+
+  /* ---------- 页尾导航（在 .wrap 内，跟着 980px 量宽） ---------- */
+  .sm-foot{margin:54px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+  .sm-pn{display:flex;gap:16px;justify-content:space-between;align-items:flex-start}
+  .sm-pn-a{display:flex;align-items:flex-start;gap:9px;min-width:0;max-width:48%;
+    text-decoration:none;color:var(--dim)}
+  .sm-pn-a svg{flex:none;width:14px;height:14px;margin-top:3px;fill:none;stroke:#b0bacb;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .sm-pn-a:hover{color:var(--accent)}
+  .sm-pn-a:hover svg{stroke:var(--accent)}
+  .sm-pn-b{display:block;min-width:0}
+  .sm-pn-l{display:flex;align-items:center;gap:6px;margin-bottom:3px;
+    font:10px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-pn-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:13px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-next{flex-direction:row-reverse;margin-left:auto;text-align:right}
+  .sm-next .sm-pn-b{text-align:right}
+  .sm-next .sm-pn-l{justify-content:flex-end}
+  .sm-more{margin:26px 0 0}
+  .sm-more-h{display:block;margin:0 0 10px;padding:0;border:0;
+    font:600 11px var(--mono);letter-spacing:.06em;color:var(--dim2)}
+  .sm-more-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  /* 同类条目为奇数时，最后一张横跨两列，不留半个空格子 */
+  .sm-more-grid>a:last-child:nth-child(odd){grid-column:1/-1}
+  .sm-more-a{display:block;min-width:0;padding:10px 12px;text-decoration:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:9px}
+  .sm-more-a:hover{background:var(--panel2);border-color:var(--accent-line);box-shadow:var(--shadow-1)}
+  .sm-more-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    font-size:12.5px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere}
+  .sm-more-m{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;
+    font:10px var(--mono);color:var(--dim2)}
+  .sm-more-m i{width:3px;height:3px;border-radius:50%;background:#c3ccdb}
+
+  /* ---------- 阶梯：<1280 没有边栏可用；<900 收窄；<640 单列 ---------- */
+  @media (max-width:1279px){
+    .sm-bar-in{gap:8px}
+    .sm-cat{max-width:160px}
+  }
+  @media (max-width:899px){
+    .sm-date,.sm-sep{display:none}
+  }
+  @media (max-width:760px){
+    .sm-more-grid{grid-template-columns:minmax(0,1fr)}
+    .sm-more-grid>a:last-child:nth-child(odd){grid-column:auto}
+  }
+  @media (max-width:640px){
+    .sm-bar-in{gap:8px;padding:0 14px}
+    .sm-brand{font-size:13px}
+    .sm-cat{max-width:118px;padding:2px 8px 2px 7px;font-size:11px}
+    .sm-min{display:none}
+    .sm-search{padding:5px 7px}
+    .sm-kbd,.sm-search-t{display:none}
+    .sm-foot{margin-top:40px}
+    .sm-pn{flex-direction:column;gap:12px}
+    .sm-pn-a{max-width:100%}
+    .sm-next{margin-left:0;justify-content:flex-end}
+    .sm-next .sm-pn-b{text-align:left}
+    .sm-next .sm-pn-l{justify-content:flex-start}
+  }
+
+  /* 表格在 601–820px 之间的空档：各页自己的「卡片模式」断点有 600 也有 640，
+     中间这一带表格会按 min-content 撑开并把整页推出视口（实测 torchrun 的参数速查表
+     自然宽 658px，640px 视口下整页横向平移）。让表格自己横向滚动，不动列宽、
+     也不让 td.v / td.k 的标识符折行（试过 white-space:normal，`LocalElasticAgent`
+     会被切成 `LocalEla sticAgent`）。 */
+  @media (min-width:601px) and (max-width:820px){
+    .wrap table{display:block;overflow-x:auto;max-width:100%}
+  }
+</style>
+<!-- show-me:shell:end --></head>
+<body><!-- show-me:shell:begin -->
+<div class="sm-bar" id="sm-topbar"><div class="sm-bar-in"><a class="sm-brand" href="../../index.html">show-me</a><i class="sm-div" aria-hidden="true"></i><a class="sm-cat" href="../../index.html#cat-inference-systems" style="--sm-cat:#1d4ed8" title="推理系统"><i class="sm-dot" aria-hidden="true"></i><span>推理系统</span></a><div class="sm-right"><span class="sm-min">21 分钟</span><span class="sm-sep" aria-hidden="true">·</span><span class="sm-date">2026-11-17</span><a class="sm-search" id="sm-search" href="../../index.html" data-q="../../index.html?q=" aria-label="在全库中搜索（⌘K）"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.2"/><path d="M10.4 10.4 14 14"/></svg><span class="sm-search-t">搜索</span><kbd class="sm-kbd">⌘K</kbd></a></div></div><div class="sm-prog" id="sm-progress" aria-hidden="true"></div></div><script>
+try{(function(){var b=document.getElementById('sm-progress'),
+u=function(){var d=document.documentElement,m=d.scrollHeight-d.clientHeight,
+p=m>0?Math.min(1,Math.max(0,d.scrollTop/m)):0;if(b)b.style.transform='scaleX('+p+')'};
+addEventListener('scroll',u,{passive:true});addEventListener('resize',u);u();
+var s=document.getElementById('sm-search'),
+g=function(){if(s)location.href=s.getAttribute('data-q')||s.href};
+if(s)s.addEventListener('click',function(e){if(e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;
+e.preventDefault();g()});
+addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&(e.key||'').toLowerCase()==='k'){
+e.preventDefault();g()}})})()}catch(e){}
+</script>
+<script>
+/* 「已打开」记录在文章页落一次盘：从搜索结果、外链、或直接粘 URL 进来的读者
+   不会经过门户卡片，只在门户上记等于漏记。目录名从地址反推（<cat>/<slug>/）。 */
+try{(function(){var K='showme:opened',
+p=location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'').split('/').filter(Boolean),
+dir=p.slice(-2).join('/');
+if(!dir||dir.indexOf('/')<0)return;
+var set=[];try{set=JSON.parse(localStorage.getItem(K)||'[]')}catch(e){set=[]}
+if(!(set instanceof Array))set=[];
+if(set.indexOf(dir)===-1){set.push(dir);localStorage.setItem(K,JSON.stringify(set))}})()}catch(e){}
+</script>
+<!-- show-me:shell:end --><!-- show-me:shell:begin -->
+<nav class="sm-rail" aria-label="同分类条目"><div class="sm-rail-h">同分类 · 16 篇</div><div class="sm-rail-list"><a class="sm-rail-a" href="../../inference-systems/sglang-router-pd-lifecycle/index.html" style="--sm-cat:#1d4ed8" aria-current="page"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang Router 的调度与 PD 请求生命周期</span><span class="sm-rail-m">21 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/decode-dp-attention-dcp/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/decode-small-m-w4a4/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">Decode 小 M 的 W4A4：几何门控、跨层共享 workspace，以及 draft 与大 prefill 为什么留在 FP8</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dsa-prepare-six-opts/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DSA 的准备阶段六项小优化：条件窄、净值小，还有一项是负向</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/prefill-online-w8a8/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">P 端在线 W8A8：shared expert 与 attention 的 q_b_proj / o_proj</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-layer-split/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sm120-sparse-mla-my-prefill/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SM120 上的 sparse-MLA prefill 内核：直接读 656 B/key 的布局</span><span class="sm-rail-m">7 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-rail-m">32 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/deepinfer-vs-sglang/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-rail-m">43 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-rail-m">14 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-stream-interval/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-rail-m">8 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/moe-a2a-megamoe/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-rail-m">23 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/kv-prefetch-prediction/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-rail-m">17 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/sglang-request-lifecycle/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-rail-m">19 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/hicache-mooncake/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-rail-m">11 分钟</span></a><a class="sm-rail-a" href="../../inference-systems/dflash-pp-adaptation/index.html" style="--sm-cat:#1d4ed8"><i class="sm-rail-d" aria-hidden="true"></i><span class="sm-rail-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-rail-m">11 分钟</span></a></div></nav>
+<!-- show-me:shell:end -->
+<div class="wrap">
+
+<div class="crumb">
+  <a href="../../index.html">show-me</a><span class="sep">/</span>
+  <a href="../../index.html#cat-inference-systems">inference-systems</a><span class="sep">/</span>
+  <span>sglang-router-pd-lifecycle</span>
+</div>
+
+<h1>SGLang Router 的调度与 PD 请求生命周期</h1>
+
+<div class="metarow">
+  <span>2026-11-17</span>
+  <span>sgl-router</span><span>PD 分离</span><span>Radix Cache</span><span>KV 传输</span>
+</div>
+
+<p class="lead">本文对照 <code>sgl-project/sglang</code> 的 <code>main</code> 分支（commit <code>f534dba</code>，2026-11-17）逐层拆开两件事：router 怎么选出一个（或一对）engine，以及 PD 部署下一条请求如何从 <code>bootstrap_room</code> 走到 KV 传输完成。所有结论都标注了文件与行号；凡是没有在源码里读到的推论，一律标 <span class="badge inf">推断</span>。</p>
+
+<div class="term">
+  <b>术语约定</b>：下面这几个词在全文按此含义使用，不随上下文变化。<br>
+  <b>router</b> = <code>sgl-router</code> 进程（Rust，<code>sgl-router/src</code>），机群级入口，一个进程服务一个模型。<br>
+  <b>worker</b> / engine = 一个 SGLang 实例（HTTP 端口 + 内部 Scheduler + TP workers）。<br>
+  <b>prefill</b> / <b>decode</b> = worker 的角色，启动时由 <code>--disaggregation-mode</code> 固定，不是请求级开关。<br>
+  <b>room</b>（<code>bootstrap_room</code>）= router 为一次 PD 配对生成的正整数键，是 prefill 与 decode 之间唯一的关联标识。<br>
+  <b>bootstrap</b> 在仓库里有两个含义：PD 的 KV 引导握手（<code>bootstrap_host/port/room</code>、<code>/route</code>），以及 router 之间的 <b>peer bootstrap</b>（radix tree 快照同步）。本文分别写作 <b>PD bootstrap</b> 与 <b>peer bootstrap</b>，不混用。
+</div>
+
+<div class="nav">
+  <a href="#tldr">结论</a><a href="#roles">角色边界</a><a href="#chain">调度链</a><a href="#policies">策略矩阵</a>
+  <a href="#cache">缓存感知</a><a href="#pd">PD 配对</a><a href="#cases">三种命中</a><a href="#compare">对比</a>
+  <a href="#ops">超时与故障</a><a href="#myths">误解</a><a href="#quiz">自测</a>
+</div>
+
+<h2 id="tldr"><span class="n">01</span>五条结论</h2>
+
+<div class="tldr">
+<h4>TL;DR</h4>
+<ul>
+  <li><b>Router 是控制面，不是数据面。</b>它选 worker、生成一个 <code>room</code>、把同一份请求体同时发给 prefill 和 decode；KV 由 prefill 直连 decode 传，router 全程不碰（<code>src/server/routes/chat/forward.rs:216-244</code>）。</li>
+  <li><b>默认策略不是 cache_aware。</b>legacy 路径默认 <code>round_robin</code>，reorg 路径默认 <code>power_of_two</code>；cache_aware 要显式选，并且必须先有前缀信号（外部 KV indexer 或进程内 radix tree）（<code>src/config/cli.rs:250-258</code>、<code>src/config/cli.rs:884-890</code>）。</li>
+  <li><b>选路是一条阶梯，不是一次打分。</b>cache winner → 全局会话亲和 → 按 bucket 的准入 → capacity fallback，每一级失败落到下一级，全部落空才是 503（<code>src/policies/selection.rs:210-330</code>）。</li>
+  <li><b>PD 下 prefill 与 decode 是两次独立 dispatch，几乎同时发出。</b>prefill 的响应被丢弃（除 input logprobs 一种情况），客户端拿到的是 decode 的流；prefill 先失败会把错误归因给 prefill，并在还有重试预算时排除它（<code>src/server/routes/chat/forward.rs:890-950</code>）。</li>
+  <li><b>三种命中情况的差别不在 router 的配对逻辑</b>——PD 下它总是配对——<b>而在三处数字</b>：prefill 要 forward 多少 token、decode 通过 <code>decode_prefix_len</code> 声明自己已有多少、实际 RDMA 传多少页（<code>prefill.py:536-546</code>、<code>decode.py:1809-1830</code>）。</li>
+</ul>
+</div>
+
+<h2 id="roles"><span class="n">02</span>角色与边界：谁持有什么</h2>
+
+<p>把这四类进程各自"知道什么"分清，后面每一步才不会错位。关键点是：<b>router 只持有元数据</b>（哈希、计数、绑定），它既没有 KV 张量，也没有缓存块的 token 内容。</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>组件</th><th>持有的状态</th><th>明确不持有</th><th>源码</th></tr></thead>
+<tbody>
+<tr>
+  <td class="k">sgl-router</td>
+  <td data-label="持有的状态">worker 注册表与角色、每条请求的 in-flight 计数、可选的前缀索引（<code>block_hash → (worker_url, dp_rank, tier)</code>）、会话绑定、断路器状态、引擎自报负载快照</td>
+  <td data-label="明确不持有">KV 张量、显存地址、page 内容、缓存块的 token ids（LoRA 路径例外，仅用于重算键）、每块的真实 token 数</td>
+  <td data-label="源码" class="v">state/kv_events/tree.rs:489-507<br>policies/admission.rs:555-590</td>
+</tr>
+<tr>
+  <td class="k">prefill worker</td>
+  <td data-label="持有的状态">自己的 radix cache 与 KV pool、bootstrap HTTP server（<code>:8998</code>）、ZMQ 传输端点、每个 room 的 sender 状态</td>
+  <td data-label="明确不持有">decode 的页表；它只知道 decode 发来的目标地址与 <code>decode_prefix_len</code></td>
+  <td data-label="源码" class="v">disaggregation/prefill.py:500-546<br>disagg_service.py:17-45</td>
+</tr>
+<tr>
+  <td class="k">decode worker</td>
+  <td data-label="持有的状态">自己的 KV pool 与 <code>req_to_token_pool</code>、可选的 decode 侧 radix cache、receiver 与 room 状态机、采样出的 token 序列</td>
+  <td data-label="明确不持有">prefill 上某段前缀是刚算的还是缓存里的——它只按页收</td>
+  <td data-label="源码" class="v">disaggregation/decode.py:1806-1830<br>base/conn.py:141-147</td>
+</tr>
+<tr>
+  <td class="k">KV indexer（可选）</td>
+  <td data-label="持有的状态"><code>block hash → token 数 + (worker, tier)</code>、per-worker 缓存规格、累计命中数</td>
+  <td data-label="明确不持有">KV 本身；它是软状态索引，无持久化</td>
+  <td data-label="源码" class="v">sgl-kv-indexer/README.md:56-65</td>
+</tr>
+<tr>
+  <td class="k">HiCache / L3（可选）</td>
+  <td data-label="持有的状态">主机内存或远端存储里的 KV 页；decode 侧可由 <code>_commit_hicache_local_restore_to_req</code> 回填</td>
+  <td data-label="明确不持有">路由决策；router 完全不知道 L3 里有哪一页</td>
+  <td data-label="源码" class="v">decode.py:1820-1828<br>mem_cache/common.py:385-421</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<p class="hint">一句话记法：<b>router 认识"哪个 worker 可能有这段前缀"，prefill 认识"这段前缀的 KV 在哪几页"，decode 认识"我要把这些页放到哪几页"。</b>三者之间传递的全部是整数与地址，没有 token 内容。</p>
+
+<h2 id="chain"><span class="n">03</span>Router 内部：一条请求的调度链</h2>
+
+<p>Router 没有"队列"和"批处理"——它是 tokio 上的无状态转发器，组批发生在 engine 的 Scheduler 里。Router 侧唯一近似队列的东西，是 decode 准入用的信号量（<code>DecodeGate</code>）和 router 自算的 in-flight 计数。所以下面这条链是<b>每请求一遍</b>的，不存在攒批再发。</p>
+
+<pre><code>POST /v1/chat/completions
+└─ chat::route                                        src/server/routes/chat.rs:190
+   └─ prepare → prepare_now                           :275
+      ├─ parse_routing_fields / PreparedRequest::openai
+      ├─ request_tokens_for(…)                        policies/mod.rs:52
+      │    └─ 仅当 should_tokenize_request 为真        preparation.rs:1203
+      └─ ModelRouting::lookup                         chat.rs:371
+           ├─ Legacy(policy)     ← --chat-routing legacy（默认）
+           └─ Reorg(resolver)    ← --chat-routing reorg
+   └─ ModelRouting::dispatch                          chat.rs:398
+      │  for attempt in 0..--retry-max-attempts       （默认 1，即不重试）
+      ├─ sleep(backoff(attempt))                      chat.rs:404
+      ├─ select_workers                               chat.rs:442
+      │  ├─ PdPoolResolver::prefill_candidates        policies/registry.rs:173
+      │  ├─ lookup_prefix_matches                     chat.rs:691
+      │  │    ├─ ctx.prefix_index.match_prefix(hashes)       ← 外部 indexer
+      │  │    └─ radix_tree_prefix_provider.match_request_tokens ← 进程内树
+      │  ├─ capture_load_snapshot                     chat.rs:571
+      │  ├─ prefills_with_decode                      chat.rs:520   ← 版本组对齐
+      │  ├─ pick_prefill_worker → select_prefill_worker  selection.rs:137
+      │  └─ pick_decode_worker  → select_decode_peer     selection.rs:779
+      └─ forward_request → dispatch                   forward.rs:61 / :167
+         ├─ room = generate_room_id[_for_rank]        preparation.rs:1264
+         ├─ spawn_prefill_request(prefill, room)      forward.rs:812
+         └─ transport.send(decode)                    ← 客户端响应来自这条腿
+            └─ forward_pd(prefill_task, decode_future) forward.rs:905</code></pre>
+
+<p>两个容易被忽略的细节：</p>
+
+<ul>
+  <li><b>tokenize 是可选的。</b>只有当策略需要 token（cache_aware 恒为真）、或者开了 <code>--dp-aware</code>、或者 bucket 路由需要按长度分桶时才做；否则 router 直接把原始 body 转发，省掉一次分词（<code>preparation.rs:1203-1209</code>、<code>policies/mod.rs:538</code>）。</li>
+  <li><b><code>--no-tokenizer</code> 会让 cache_aware 静默退化。</b>没有 token 就没有 block hash，<code>lookup_prefix_matches</code> 返回 <code>None</code>，阶梯直接走 load 兜底。这不是报错，是降级。<span class="badge inf">推断</span>（由 <code>chat.rs:691-729</code> 的 <code>zip(tokens)</code> 分支推出）。</li>
+</ul>
+
+<div class="fig">
+<div class="ttl">PD 模式下的一次请求：router 的两条腿与 prefill→decode 的 KV 通道</div>
+<div class="svgwrap">
+<svg viewBox="0 0 900 560" role="img" aria-label="PD 请求时序：client、router、prefill、decode 四条泳道">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5871"/>
+    </marker>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b23a10"/>
+    </marker>
+  </defs>
+  <style>
+    .hd{fill:#eef2f9;stroke:#d5dce8}
+    .ht{font:600 11.5px ui-monospace,Menlo,monospace;fill:#1b2740}
+    .ll{stroke:#d5dce8;stroke-dasharray:3 4}
+    .m{stroke:#4a5871;stroke-width:1.2;fill:none;marker-end:url(#ar)}
+    .mr{stroke:#b23a10;stroke-width:1.4;fill:none;marker-end:url(#ar2)}
+    .t{font:11px -apple-system,"PingFang SC",sans-serif;fill:#26334a}
+    .tm{font:10.5px ui-monospace,Menlo,monospace;fill:#657389}
+    .self{fill:#f8fafc;stroke:#dde3ee}
+    .num{font:600 10px ui-monospace,Menlo,monospace;fill:#1d4ed8}
+  </style>
+
+  <rect class="hd" x="20" y="8" width="120" height="30" rx="7"/><text class="ht" x="80" y="28" text-anchor="middle">client</text>
+  <rect class="hd" x="235" y="8" width="130" height="30" rx="7"/><text class="ht" x="300" y="28" text-anchor="middle">sgl-router</text>
+  <rect class="hd" x="490" y="8" width="140" height="30" rx="7"/><text class="ht" x="560" y="28" text-anchor="middle">prefill worker</text>
+  <rect class="hd" x="735" y="8" width="140" height="30" rx="7"/><text class="ht" x="805" y="28" text-anchor="middle">decode worker</text>
+
+  <line class="ll" x1="80"  y1="38" x2="80"  y2="540"/>
+  <line class="ll" x1="300" y1="38" x2="300" y2="540"/>
+  <line class="ll" x1="560" y1="38" x2="560" y2="540"/>
+  <line class="ll" x1="805" y1="38" x2="805" y2="540"/>
+
+  <text class="num" x="10" y="62">1</text>
+  <line class="m" x1="80" y1="62" x2="294" y2="62"/>
+  <text class="t" x="88" y="56">POST /v1/chat/completions</text>
+
+  <text class="num" x="232" y="90">2</text>
+  <rect class="self" x="228" y="72" width="176" height="30" rx="5"/>
+  <text class="t" x="236" y="91">prepare · tokenize · prefix lookup</text>
+
+  <text class="num" x="232" y="126">3</text>
+  <line class="m" x1="300" y1="126" x2="554" y2="126"/>
+  <text class="t" x="308" y="120">POST /generate ＋ room</text>
+  <text class="tm" x="308" y="140">bootstrap_host/port/room</text>
+
+  <text class="num" x="468" y="170">4</text>
+  <line class="m" x1="300" y1="170" x2="799" y2="170"/>
+  <text class="t" x="308" y="164">POST /generate ＋ 同一个 room（并发，不等 prefill）</text>
+
+  <text class="num" x="640" y="202">5</text>
+  <rect class="self" x="640" y="184" width="196" height="30" rx="5"/>
+  <text class="t" x="648" y="203">decode radix 命中 → decode_prefix_len</text>
+
+  <text class="num" x="470" y="238">6</text>
+  <line class="m" x1="805" y1="238" x2="566" y2="238"/>
+  <text class="t" x="560" y="232" text-anchor="end">GET /route?prefill_dp_rank=room%dp</text>
+
+  <text class="num" x="470" y="272">7</text>
+  <line class="mr" x1="805" y1="272" x2="566" y2="272"/>
+  <text class="t" x="560" y="266" text-anchor="end">ZMQ 注册 KV 地址 ＋ metadata</text>
+  <text class="tm" x="560" y="286" text-anchor="end">kv_indices · decode_prefix_len</text>
+
+  <text class="num" x="492" y="316">8</text>
+  <rect class="self" x="492" y="298" width="176" height="30" rx="5"/>
+  <text class="t" x="500" y="317">start_send_idx = decode_prefix_len</text>
+
+  <text class="num" x="492" y="352">9</text>
+  <rect class="self" x="492" y="334" width="200" height="30" rx="5"/>
+  <text class="t" x="500" y="353">prefill forward（只算未命中部分）</text>
+
+  <text class="num" x="620" y="388">10</text>
+  <line class="mr" x1="560" y1="388" x2="799" y2="388"/>
+  <text class="t" x="566" y="382">RDMA 写 KV 页 [decode_prefix_len, end)</text>
+
+  <text class="num" x="640" y="420">11</text>
+  <rect class="self" x="640" y="402" width="200" height="30" rx="5"/>
+  <text class="t" x="648" y="421">KVPoll.Success → 提交首个 token</text>
+
+  <text class="num" x="640" y="456">12</text>
+  <rect class="self" x="640" y="438" width="176" height="30" rx="5"/>
+  <text class="t" x="648" y="457">decode loop（逐 token）</text>
+
+  <text class="num" x="468" y="492">13</text>
+  <line class="m" x1="805" y1="492" x2="306" y2="492"/>
+  <text class="t" x="540" y="486">SSE token 流</text>
+
+  <text class="num" x="10" y="528">14</text>
+  <line class="m" x1="300" y1="528" x2="86" y2="528"/>
+  <text class="t" x="96" y="522">SSE 转发（首字节时释放 decode 配额）</text>
+</svg>
+</div>
+<div class="cap">实线 = 请求/响应；红线 = PD 内部的握手与 KV 通道，这两步 router 只提供 <code>room</code> 与 <code>bootstrap_host/port</code>，不参与。序号 3/4 之间没有 await：<code>spawn_prefill_request</code> 先起任务，decode 腿紧接着发出。</div>
+</div>
+
+<h3 class="mini">为什么 prefill 与 decode 可以并发发出</h3>
+
+<p><code>dispatch</code> 先把 prefill 作为一个 <code>tokio::spawn</code> 任务起起来，再构造 decode 的请求并等待它；<code>forward_pd</code> 用 <code>tokio::select!</code> 同时盯两件事：decode 的响应，以及 prefill 的结果（<code>forward.rs:246-330</code>、<code>:905-950</code>）。语义如下：</p>
+
+<ul>
+  <li>decode 先返回 → 直接把 decode 的流交给客户端，prefill 任务继续在后台完成（<code>held = None</code> 分支）；</li>
+  <li>prefill 先失败 → 立即返回 prefill 的错误，并把这次失败归因给 prefill（<code>Blame</code>），有重试预算时排除它；</li>
+  <li>需要 input logprobs，或开了 <code>--pd-stream-after-prefill</code> 时，decode 的响应先被 <code>held</code> 住，等 prefill 完成后再合并（<code>wait_for_prefill</code>）。</li>
+</ul>
+
+<p>这也解释了一个常见现象：客户端只看到 decode 的 TTFT，但 prefill 的排队时间其实已经在里面——decode 要等 KV 到达才能出第一个 token。</p>
+
+<h2 id="policies"><span class="n">04</span>策略矩阵：八种 policy 与它们真正读的信号</h2>
+
+<p><code>--policy</code> 是<b>每个模型一份</b>（router 只服务一个模型，所以等价于全局）。legacy 默认 <code>round_robin</code>，<code>--chat-routing reorg</code> 时默认变成 <code>power_of_two</code>（<code>src/config/cli.rs:250-258</code>）。decode 侧是独立的一套：只有 <code>power_of_two</code> 与 <code>legacy_host_affinity</code> 两个取值（<code>src/config/types.rs:151-159</code>）。</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>policy</th><th>读什么</th><th>怎么排</th><th>什么时候被选中</th></tr></thead>
+<tbody>
+<tr><td class="k">round_robin</td><td data-label="读什么">无（原子计数器）</td><td data-label="怎么排">按注册顺序轮转</td><td data-label="什么时候被选中">legacy 默认；<code>sticky</code> 的未命中兜底也是它</td></tr>
+<tr><td class="k">random</td><td data-label="读什么">无</td><td data-label="怎么排">均匀随机</td><td data-label="什么时候被选中">显式指定；用于压测对照</td></tr>
+<tr><td class="k">power_of_two</td><td data-label="读什么">引擎自报负载快照</td><td data-label="怎么排">抽 2 个（<code>--min-load-choices</code>）取较轻者</td><td data-label="什么时候被选中">reorg 默认；cache_aware 的兜底；decode 默认</td></tr>
+<tr><td class="k">load_based</td><td data-label="读什么">负载快照</td><td data-label="怎么排">全池取最小</td><td data-label="什么时候被选中">显式指定；小池子比 P2 更准，但多副本会共振</td></tr>
+<tr><td class="k">cache_aware</td><td data-label="读什么">前缀命中（indexer 或 radix tree）＋负载</td><td data-label="怎么排">未命中 token 最少者优先，近似并列时看压力</td><td data-label="什么时候被选中">显式指定；PD 下只作用于 prefill/plain，decode 仍用 decode_policy</td></tr>
+<tr><td class="k">session_aware</td><td data-label="读什么">会话绑定 ＋ 负载</td><td data-label="怎么排">绑定优先，绑定满则 P2 换人并重绑</td><td data-label="什么时候被选中">多轮对话、需要 KV 复用</td></tr>
+<tr><td class="k">sticky</td><td data-label="读什么">请求头 routing key</td><td data-label="怎么排">key → worker 的稳定映射</td><td data-label="什么时候被选中">按业务 key 固定路由</td></tr>
+<tr><td class="k">score_policy / fused_score</td><td data-label="读什么"><code>--fuse</code> 指定的加权项</td><td data-label="怎么排">加权和</td><td data-label="什么时候被选中">需要把前缀、负载等混合打分</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 class="mini">prefill 选的不是"一个 worker"，是一条阶梯</h3>
+
+<p><code>select_prefill_worker</code> 把输入打包成 <code>PrefillSelectionInputs</code>，交给 <code>Selector::run</code>。后者按固定顺序尝试，前一级拿到人就返回（<code>selection.rs:210-330</code>）：</p>
+
+<div class="rungs">
+  <div class="rung hit"><div class="i">A</div><div class="t">cache winner</div><div class="d">cache_aware 专属：把候选截断到 <code>--cache-candidate-max-workers</code>，先过队头闸门，再过 KV 容量准入，然后在"未命中 token 近似并列"的集合里按压力决胜。<b>拿到即返回，后面几级不再执行。</b></div></div>
+  <div class="rung"><div class="i">B</div><div class="t">global affinity</div><div class="d">只有 <code>--policy session_aware</code> 且 bucket 模式不是 <code>bucket</code> 时才有：先在全局池里探一次会话绑定，再把绑定落到目标 bucket 的域里。</div></div>
+  <div class="rung"><div class="i">C</div><div class="t">per-domain 准入</div><div class="d">按 bucket 切成若干 <code>CandidateDomain</code>，每个域内跑一次策略提案，再过 <code>resolve_prefill</code> 的准入（<code>num_running+1 ≤ max_running</code> 且 <code>num_total_tokens+input ≤ max_total_num_tokens</code>）。</div></div>
+  <div class="rung"><div class="i">D</div><div class="t">capacity fallback</div><div class="d">所有域严格准入都失败后，整条阶梯再来一遍，这次允许"容量兜底"：先命中的域胜出。级间是两轮 <code>find_map</code>，不是一轮带 flag。</div></div>
+  <div class="rung out"><div class="i">E</div><div class="t">失败</div><div class="d">全部落空 → <code>PolicySelectionFailed</code> / <code>NoPrefillWorkersAvailable</code> → <b>503</b>（<code>src/server/error.rs:218-222</code>）。</div></div>
+</div>
+
+<p>decode 侧是同样的两轮结构，但只读负载：<code>select_decode_peer</code> 先对每个 decode 域做严格准入，再统一做 capacity fallback（<code>selection.rs:779-838</code>）。它连"没有负载快照"都不放过——没快照直接返回 <code>None</code>，而不是盲选（<code>selection.rs:782-784</code>）。</p>
+
+<h3 class="mini">负载怎么比：一个向量，逐字段定胜负</h3>
+
+<p>引擎通过自己的 ZMQ PUB 口周期发布 <code>LoadStat</code>，wire 形如 <code>[b"load", seq, msgpack]</code>，router 订过来按 URL 存表；超过 <b>5 秒</b>没更新就视为过期，退回 router 自算的 in-flight（<code>python/.../load_publisher.py:1-40</code>、<code>engine_reported_load.rs:294-297</code>）。比较规则（<code>engine_ranking.rs:15-59</code>）：</p>
+
+<pre><code>prefill：estimated_prefill_queue_ms ↑
+         → num_waiting_uncached_tokens ↑
+         → num_waiting_reqs ↑
+         → num_running_reqs ↑
+         → router 本地 in-flight ↑
+decode ：num_waiting_reqs ↑ → num_running_reqs ↑ → KV 占用率 ↑</code></pre>
+
+<p><b>逐字段字典序</b>，第一个不等的字段决定胜负，不做加权。这也是为什么 P2 只需要"两个样本里挑一个"：比较是 O(1) 的。</p>
+
+<h2 id="cache"><span class="n">05</span>缓存感知：三份信号、四道闸门</h2>
+
+<p><code>--policy cache_aware</code> 不是"打开 radix cache"，而是"让 router 去问谁有这段前缀"。信号有两个来源，二选一（<code>cli.rs:884-890</code>）：</p>
+
+<div class="cols2">
+  <div class="card">
+    <h4>① 外部 KV indexer（gRPC）</h4>
+    <ul>
+      <li><code>--kv-indexer-endpoint</code> 设了就默认用它；router 本地树被整体关掉，只订 load（<code>kv_events/index.rs:607-616</code>）。</li>
+      <li>请求是 <code>MatchExternalKvPrefix(hashes, max_blocks)</code>，返回每个 worker 的 <code>matched_prefix_blocks</code>（<code>sgl-kv-indexer/proto/kv_indexer.proto:125-163</code>）。</li>
+      <li><code>worker_address</code> 必须与 router 注册的 URL <b>逐字节</b>相同，否则静默不命中（<code>policies/cache_aware.rs:45-48</code>）。</li>
+      <li>Indexer 不可达/超时/过载 → 降级为 min-load，请求不失败（<code>chat.rs:754-774</code>）。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>② 进程内 radix tree（KV events）</h4>
+    <ul>
+      <li>engine 侧开 <code>--kv-events-config</code>，router 从 <code>/server_info</code> 的 <code>kv_events</code> 块发现地址并订阅（<code>kv_events/discovery.rs:116-127</code>）。</li>
+      <li>事件只有三种：<code>BlockStored</code> / <code>BlockRemoved</code> / <code>AllBlocksCleared</code>（<code>wire.rs:49-58</code>）。</li>
+      <li>节点存 <code>(block_hash, parent, workers{(url,dp_rank): tiers})</code>，<b>不存 token ids、不存 KV</b>（<code>tree.rs:489-507</code>）。</li>
+      <li>查询按"每个 worker 各自的最长连续深度"返回块数，不是全局最深节点持有者集合（<code>tree.rs:1608-1635</code>）。</li>
+    </ul>
+  </div>
+</div>
+
+<h3 class="mini">块哈希：把 prompt 变成可比对的整数</h3>
+
+<p>链式 SHA256：每块的摘要 = <code>SHA256(父块完整 32 字节摘要 ‖ 本块 token 的 4 字节小端)</code>，最后截前 8 字节成 <code>i64</code>（<code>hash.rs:137-163</code>）。三个输入决定"算不算同一段前缀"：</p>
+
+<ul>
+  <li><b>block_size</b>：来自 worker 的 <code>page_size</code>，进程级单例，第一个 worker 定调，后来者不一致就拒绝该 worker（<code>block_size_oracle.rs:120-123</code>、<code>index.rs:550-559</code>）。</li>
+  <li><b>cache_salt</b>：作为链首种子参与哈希，不同 salt 从第 0 块就分叉（<code>hash.rs:68-71</code>）。</li>
+  <li><b>lora_name / adapter</b>：对每个块哈希再做一次 keying（<code>hash.rs:77-84</code>）。</li>
+</ul>
+
+<p><code>CacheNamespace</code> 来自请求 <b>body</b>（<code>model: "base:adapter"</code>、<code>lora_path</code>、<code>cache_salt</code>），不来自 header；一个请求里多个值不一致时置 <code>ambiguous</code>，直接返回空哈希——宁可 miss，不猜（<code>preparation.rs:42-84</code>、<code>hash.rs:64-67</code>）。</p>
+
+<h3 class="mini">从"块数"到"token 数"：一次按比例折算</h3>
+
+<pre><code>matched_tokens = input_tokens × matched_prefix_blocks / query_blocks
+uncached_tokens = input_tokens − matched_tokens          policies/cache_aware.rs:202-217</code></pre>
+
+<p>代码里没有任何 <code>matched_blocks × block_size</code> 的乘法——router 并不知道每块真实有多少 token（尤其最后一块往往是残块），所以按"查询块数"等比折算。同一段逻辑在 reorg 路径里也有一份内联实现（<code>policies_reorg/cache_aware.rs:148-172</code>）。</p>
+
+<h3 class="mini">四道闸门，顺序不能换</h3>
+
+<div class="tbl">
+<table>
+<thead><tr><th>闸门</th><th>判据</th><th>默认值</th><th>源码</th></tr></thead>
+<tbody>
+<tr><td class="k">命中门限</td><td data-label="判据"><code>matched ≥ min_matched_tokens</code> 且（若设）<code>matched/input ≥ min_match_ratio</code></td><td data-label="默认值">1024 tokens；ratio 未设</td><td data-label="源码" class="v">cache_aware.rs:117-131</td></tr>
+<tr><td class="k">候选截断</td><td data-label="判据"><code>min(引擎数, max_workers, max(min_workers, ceil(ratio×引擎数)))</code></td><td data-label="默认值">8 / 0.05 / 32</td><td data-label="源码" class="v">cache_aware.rs:134-141</td></tr>
+<tr><td class="k">队头闸门</td><td data-label="判据"><code>num_waiting_reqs &lt; --worker-queue-limit</code>；无新鲜样本则放行</td><td data-label="默认值">未设（关闭）</td><td data-label="源码" class="v">admission.rs:185-200</td></tr>
+<tr><td class="k">容量准入</td><td data-label="判据"><code>running+1 ≤ max_running</code> 且 <code>used+input ≤ max_total</code></td><td data-label="默认值">由引擎上报决定</td><td data-label="源码" class="v">admission.rs:555-590</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>闸门之后还有两个"软"机制，它们决定"要不要为了负载放弃一点前缀"：</p>
+
+<ul>
+  <li><b>切换余量</b> <code>--cache-switch-margin-tokens</code>（默认 1024）：只有两个候选的未命中量差超过它，才允许用负载翻盘；否则按"未命中更少"稳定排序（<code>admission.rs:607-648</code>）。</li>
+  <li><b>压力守卫</b>（<code>--pressure-abs-threshold-tokens</code> 默认 1024、<code>--pressure-rel-threshold</code> 默认 1.5、可选的 ms 阈值）：在近似并列的集合内，如果 A 比 B 明显更受压，就把 A 排到后面（<code>admission.rs:659-692</code>）。</li>
+</ul>
+
+<p>最后是<b>饱和钉住</b>：如果队头闸门把所有候选都拒了，而全机群没有一个 worker 的队列低于 <code>--saturation-queue-floor</code>，那么"换个地方等"并不能少等，router 反而保留前缀所有者——同样的等待，至少 prefill 是命中而不是冷算（<code>admission.rs:283-345</code>，判决标签 <code>SaturationPin</code>）。这条路径的指标标签是 <code>AllQueued</code> 而不是 <code>CacheHit</code>，两者在监控里必须分开看。</p>
+
+<div class="note"><b>一个反直觉点：</b>cache_aware 的"命中"是<b>块粒度、页对齐</b>的。<code>match_prefix</code> 在 <code>page_size &gt; 1</code> 时会把长度截断到页的整数倍（<code>mem_cache/radix_cache.py:386-387</code>），所以哪怕引擎缓存了全部 token，router 看到的匹配长度也不会超过 <code>floor(L/page)×page</code>。</div>
+
+<h2 id="pd"><span class="n">06</span>PD 配对：room 是唯一的关联键</h2>
+
+<p>PD 部署下 router 只说三句话：<b>发给谁（prefill）</b>、<b>发给谁（decode）</b>、<b>你们用这个 room</b>。剩下的握手、寻址、传输、完成确认，全部由两个 engine 自己完成。理解这一点，后面所有"谁发起"的问题都会变得简单。</p>
+
+<h3 class="mini">room 的生成：把 router 的选择编码进一个整数</h3>
+
+<pre><code>pub(super) fn generate_room_id() -&gt; u64 {
+    rand::random::&lt;u64&gt;() &amp; (i64::MAX as u64)          // 引擎按 int64 存
+}
+
+/// A room with `room % dp_ranks == rank`, which is how decode finds the prefill rank.
+pub(super) fn generate_room_id_for_rank(rank: u32, dp_ranks: u32) -&gt; u64 {
+    let dp_ranks = u64::from(dp_ranks);
+    (generate_room_id() &gt;&gt; 1) / dp_ranks * dp_ranks + u64::from(rank)
+}                                                       preparation.rs:1264-1272</code></pre>
+
+<p>第二行是整个 PD 配对里最需要注意的一处：decode 默认<b>不</b>被额外告知 prefill 的 DP rank，它自己算 <code>room % dp_size</code>（<code>decode.py:1197-1199</code>）。所以当 router 开了 <code>--dp-aware</code> 并替 prefill 选定 rank 时，它必须反过来约束 room，让这个取模结果正好等于所选 rank——否则 decode 会去错误的 rank 取 KV。兜底的显式通道是请求体里的 <code>disagg_prefill_dp_rank</code>（<code>forward.rs:759-778</code>）。</p>
+
+<h3 class="mini">prefill 与 decode 各自怎么被"叫到"</h3>
+
+<div class="tbl">
+<table>
+<thead><tr><th>步骤</th><th>谁发起</th><th>方向 / 协议</th><th>携带什么</th><th>源码</th></tr></thead>
+<tbody>
+<tr><td class="k">① 拓扑注册</td><td data-label="谁发起">prefill（启动期，每 rank）</td><td data-label="方向 / 协议">HTTP <code>PUT /route</code></td><td data-label="携带什么"><code>dp/cp/tp/pp rank</code>、<code>rank_ip</code>、<code>rank_port</code>、<code>page_size</code>、<code>kv_cache_dtype</code>、<code>kv_layout</code>、<code>state_wire</code>、allocation policy</td><td data-label="源码" class="v">conn.py:3285-3406</td></tr>
+<tr><td class="k">② 请求到达</td><td data-label="谁发起">router</td><td data-label="方向 / 协议">HTTP POST，两条腿</td><td data-label="携带什么"><code>bootstrap_host</code>、<code>bootstrap_port</code>、<code>bootstrap_room</code>（decode 腿另可带 <code>disagg_prefill_dp_rank</code>）</td><td data-label="源码" class="v">forward.rs:216-244</td></tr>
+<tr><td class="k">③ 查对端地址</td><td data-label="谁发起">decode</td><td data-label="方向 / 协议">HTTP <code>GET /route?prefill_dp_rank&amp;…</code></td><td data-label="携带什么">返回该 rank 的 <code>rank_ip:rank_port</code> 与形状参数</td><td data-label="源码" class="v">conn.py:2874</td></tr>
+<tr><td class="k">④ 注册接收缓冲</td><td data-label="谁发起">decode → prefill</td><td data-label="方向 / 协议">ZMQ PUSH（multipart）</td><td data-label="携带什么"><code>local_ip</code>、<code>rank_port</code>、<code>session_id</code>、每层 <code>kv_data_ptrs</code>、aux/state 指针、<code>dst_kv_item_len</code>、层 id</td><td data-label="源码" class="v">mooncake/conn.py:3544-3617</td></tr>
+<tr><td class="k">⑤ 发布目的页</td><td data-label="谁发起">decode → prefill</td><td data-label="方向 / 协议">ZMQ PUSH</td><td data-label="携带什么"><code>room</code>、<code>kv_indices</code>（目的页号）、<code>aux_index</code>、<code>decode_prefix_len</code>、<code>required_dst_info_num</code></td><td data-label="源码" class="v">mooncake/conn.py:3619-3646</td></tr>
+<tr><td class="k">⑥ 定稿发送起点</td><td data-label="谁发起">prefill</td><td data-label="方向 / 协议">本地状态机</td><td data-label="携带什么"><code>start_send_idx = decode_prefix_len</code>；<code>num_pages = ceil((L−d)/P)</code></td><td data-label="源码" class="v">prefill.py:528-549</td></tr>
+<tr><td class="k">⑦ 传 KV</td><td data-label="谁发起">prefill → decode</td><td data-label="方向 / 协议">RDMA（mooncake / NIXL）</td><td data-label="携带什么">按层、按页、按 chunk 的批量写</td><td data-label="源码" class="v">mooncake/conn.py:2048</td></tr>
+<tr><td class="k">⑧ 交首个 token</td><td data-label="谁发起">prefill → decode</td><td data-label="方向 / 协议">RDMA 写 metadata buffer</td><td data-label="携带什么"><code>output_ids[0]</code>、logprobs、<code>bootstrap_room</code>（防串号）</td><td data-label="源码" class="v">utils.py:908-918</td></tr>
+<tr><td class="k">⑨ 完成确认</td><td data-label="谁发起">prefill → decode</td><td data-label="方向 / 协议">ZMQ PUSH 状态帧</td><td data-label="携带什么"><code>[room, status, prefill_rank]</code></td><td data-label="源码" class="v">conn.py:858-867</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>注意 ④⑤ 与 ⑦ 的方向是相反的：decode 先告诉 prefill "往我这里写"，prefill 再推数据。这就是为什么 bootstrap 必须发生在传输之前——它不是一次礼节性握手，而是<b>一次地址交换</b>。</p>
+
+<h3 class="mini">decode 侧状态机：什么时候算"可以开始解码"</h3>
+
+<p><code>KVPoll</code> 只有五个状态：<code>Failed=0 / Bootstrapping=1 / WaitingForInput=2 / Transferring=3 / Success=4</code>（<code>base/conn.py:141-147</code>）。decode 的推进条件是<b>三件事都到齐</b>：</p>
+
+<ol>
+  <li>所有目标 prefill rank 的状态帧都到（<code>apply_prefill_status</code> 按 <code>prefill_unique_rank</code> 去重计数，够 <code>required_prefill_response_num</code> 才置 <code>Success</code>，<code>conn.py:1053-1076</code>）；</li>
+  <li>metadata buffer 里确实已经写进了本 room 的首 token（读到 <code>bootstrap_room == 0</code> 就仍算 <code>Transferring</code>，<code>utils.py:339-354</code>）；</li>
+  <li>页数据按本轮 <code>kv_indices</code> 收齐（传输层保证）。</li>
+</ol>
+
+<p>第 2 条是防"状态帧比数据先到"的经典竞态：状态帧走 ZMQ/控制面，首 token 走 RDMA/数据面，两者没有共同时钟。所以 decode 用 metadata buffer 里的 room 字段做栅栏——这同时也防了 room 复用导致的串号（不匹配直接 <code>abort</code>，报 <code>Context corruption</code>，<code>decode.py:3420-3466</code>）。</p>
+
+<h3 class="mini">传输本身：谁在搬、怎么并行</h3>
+
+<ul>
+  <li><b>不在 scheduler 线程里搬。</b>scheduler 只把 <code>(src_page_indices, dst_page_indices)</code> 入队，prefill 每个 TP rank 有 <code>SGLANG_DISAGGREGATION_QUEUE_SIZE</code>（默认 4）个队列，每个队列一个 worker 线程 + 一个线程池（<code>mooncake/conn.py:354-402</code>）。</li>
+  <li><b>分片是确定性的：</b><code>shard = Σ(目的 session 端口的数字部分) % 队列数</code>，保证同一组目的端的请求落在同一队列（<code>mooncake/conn.py:3440-3450</code>）。</li>
+  <li><b>三个层次的并行：</b>rank 间（每 rank 独立进程与端口的 KVManager）／层间（每层一个 <code>executor.submit</code>，<code>mooncake/conn.py:1370-1379</code>）／页间（连续页合并成一次 <code>batch_transfer_sync</code>，<code>group_concurrent_contiguous</code>，<code>:1207-1209</code>）。</li>
+  <li><b>与计算的先后：</b>默认"算完再传"（<code>process_batch_result_disagg_prefill</code> 发最后一块）；但缓存命中部分可以在 forward 之前先发——<code>maybe_send_cached_prefix_chunk</code>，开关是 <code>SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX</code>（<code>prefill.py:1627-1666</code>）。这正是"部分命中"能进一步压 TTFT 的地方。</li>
+</ul>
+
+<h3 class="mini">失败与超时：两侧各有各的钟</h3>
+
+<div class="tbl">
+<table>
+<thead><tr><th>失败面</th><th>检测</th><th>默认</th><th>后果</th><th>源码</th></tr></thead>
+<tbody>
+<tr><td class="k">prefill 等不到 decode 的目的地</td><td data-label="检测"><code>_check_bootstrap_timeout</code></td><td data-label="默认">300s</td><td data-label="后果">room 置 Failed，请求 abort(500)，占用的 bootstrap 队列位释放</td><td data-label="源码" class="v">conn.py:2546-2568</td></tr>
+<tr><td class="k">decode 等不到 KV 完成</td><td data-label="检测"><code>_check_waiting_timeout</code></td><td data-label="默认">300s</td><td data-label="后果">Failed ＋ 发 abort 通知 ＋ 失效连接缓存</td><td data-label="源码" class="v">conn.py:3062-3086</td></tr>
+<tr><td class="k">prefill 节点消失</td><td data-label="检测">decode 心跳 <code>GET /health</code></td><td data-label="默认">5 s × 2 次</td><td data-label="后果">该地址下所有未完成 room 置 Failed</td><td data-label="源码" class="v">conn.py:2177-2267</td></tr>
+<tr><td class="k">RDMA 返回非 0</td><td data-label="检测">传输 worker 检查返回值</td><td data-label="默认">—</td><td data-label="后果">session 标记失败 → <code>conclude_failure</code> → 状态帧 Failed</td><td data-label="源码" class="v">mooncake/conn.py:3059-3076</td></tr>
+<tr><td class="k">客户端断开</td><td data-label="检测">decode 侧 abort</td><td data-label="默认">—</td><td data-label="后果">发 <code>ABORT</code> 帧；prefill 释放 sender；deferred 模式下等 drain 完再 ACK</td><td data-label="源码" class="v">conn.py:3129-3186</td></tr>
+<tr><td class="k">prefill 侧释放 KV</td><td data-label="检测">所有 rank 归约为 Success 之后</td><td data-label="默认">—</td><td data-label="后果"><code>release(checkpoint=True)</code>，KV 进 radix cache 可复用</td><td data-label="源码" class="v">prefill.py:1420-1429</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note"><b>两个 "bootstrap" 不要混。</b>本文这一节讲的是 PD bootstrap（prefill↔decode）。router 之间还有一个 <b>peer bootstrap</b>：新副本启动时从同级副本拉 radix tree 快照，避免"冷启动即全 miss"。它由 <code>--kv-peer-selector</code> 开启，默认预算 10 分钟，失败可让 <code>/readyz</code> 保持 503（<code>--kv-bootstrap-seed-required</code>）。两者除了名字没有任何关系。</div>
+
+<h2 id="cases"><span class="n">07</span>三种命中情况：完整运转流程</h2>
+
+<p>先把记号定下来，后面三个小节只是往同一组公式里代不同的数：</p>
+
+<pre class="eqdef"><code>L  prompt token 数
+P  page_size（引擎的 KV 页大小，也是 router 的 block_size）
+p  prefill 侧 radix 命中长度（page 对齐；0 ≤ p ≤ L）
+d  decode_prefix_len：decode 通过 metadata 告诉 prefill "这段我已有"
+             （仅当 decode 侧 radix cache 开启时可能 &gt; 0，默认 0）
+
+计算量 = L − p          只有 prefill 的 forward 处理未命中部分
+传输量 = L − d          prefill 把 [d, L) 的页写给 decode
+router 可见的是 p（决定"发给谁"）；d 由 decode 自己算，router 从不知道</code></pre>
+
+<p>最后一行是这一页最重要的结论：<b>router 的 cache-aware 优化的是"把计算放到有缓存的那台机器上"，它并不会减少 KV 传输量</b>。真正减少传输的是 decode 侧 radix cache（<code>--disaggregation-decode-enable-radix-cache</code>，默认 <b>关</b>，<code>fields/disagg.py:104-110</code>）。</p>
+
+<div class="fig">
+<div class="ttl">同一段 8192-token prompt 在四种情况下的 token 归属（按比例绘制，P = 64）</div>
+<div class="kvmap">
+  <div class="kvrow"><div class="lab">A 全未命中</div>
+    <div class="track"><i class="seg-comp" style="width:100%"></i></div>
+  </div>
+  <div class="axis"><span>0</span><span class="r">L = 8192</span></div>
+
+  <div class="kvrow"><div class="lab">B 部分命中</div>
+    <div class="track"><i class="seg-cache" style="width:50%"></i><i class="seg-comp" style="width:50%"></i></div>
+  </div>
+  <div class="axis"><span>0 &nbsp;·&nbsp; p = 4096</span><span class="r">L = 8192</span></div>
+
+  <div class="kvrow"><div class="lab">C 全部命中</div>
+    <div class="track"><i class="seg-cache" style="width:99.2%"></i><i class="seg-comp" style="width:0.8%"></i></div>
+  </div>
+  <div class="axis"><span>0 &nbsp;·&nbsp; p = 8128（最后一页仍要算）</span><span class="r">L = 8192</span></div>
+
+  <div class="kvrow"><div class="lab">C′ 开 decode 缓存</div>
+    <div class="track"><i class="seg-none" style="width:50%"></i><i class="seg-cache" style="width:49.2%"></i><i class="seg-comp" style="width:0.8%"></i></div>
+  </div>
+  <div class="axis"><span>0 &nbsp;·&nbsp; d = 4096，传输只剩 4096</span><span class="r">L = 8192</span></div>
+</div>
+<div class="legend">
+  <span><em class="seg-none"></em>decode 已有（d，不传不算）</span>
+  <span><em class="seg-cache"></em>prefill 缓存命中（算 0，但要传）</span>
+  <span><em class="seg-comp"></em>prefill 现算（算完再传）</span>
+</div>
+<div class="cap">示意图，不是实测。前 3 行对应题目的三种情况；第 4 行是开启 decode 侧 radix cache 后的变体，用来说明"真正缩短传输的是 d"。C 行留出最后一页，是因为 prefill 必须采出第一个 token（<code>prefill.py:1197</code>），而采样要有 logits，logits 要有一次 forward；具体少到多少由 prefill 的 checkpoint 边界决定，这里不逐行展开。</div>
+</div>
+
+<h3 class="mini">A. 完全未命中（p = 0, d = 0）</h3>
+
+<ol>
+  <li><b>Router：</b><code>lookup_prefix_matches</code> 拿到 <code>PrefixOutcome::Empty</code> 或全 0 匹配，cache_aware 的候选集为空 → 阶梯退回 P2（<code>selection.rs:210-240</code>）；选出 prefill、按容量选 decode，生成 room。</li>
+  <li><b>Prefill：</b>match 返回 0，<code>extend_end = L</code>，forward 全量 <code>L</code> 个 token（可能被 chunked prefill 切成多批）；每批 checkpoint 进 radix cache。</li>
+  <li><b>Bootstrap：</b>decode 的 metadata 带 <code>decode_prefix_len = 0</code>，prefill <code>finalize_bootstrap</code> 后 <code>start_send_idx = 0</code>、<code>num_pages = ceil(L/P)</code>（<code>prefill.py:536-549</code>）。</li>
+  <li><b>传输：</b>最后一块 <code>send_kv_chunk(last_chunk=True)</code> 把 <code>[0, L)</code> 全部页写给 decode。</li>
+  <li><b>完成：</b>prefill 采样出首个 token 写进 metadata buffer，发状态帧；decode 计数到齐 → <code>Success</code> → 提交首 token → 开始逐 token decode。</li>
+</ol>
+
+<p>开销构成：prefill 算 <code>L</code>、传 <code>L</code>，decode 等 <code>max(自己排队, prefill 算完 + 传完)</code>。这是三种情况里唯一"算与传都满"的。</p>
+
+<h3 class="mini">B. 部分命中（0 &lt; p &lt; L, d = 0）</h3>
+
+<ol>
+  <li><b>Router：</b>indexer / radix tree 返回 <code>matched_prefix_blocks &gt; 0</code>；折算成 <code>matched_tokens ≈ L × blocks/query_blocks</code>。过 1024-token 门限后成为 cache 候选，按"未命中最少"排序；若该 owner 队列超 <code>--worker-queue-limit</code>，先尝试换到别的 owner（放弃一部分前缀），换不到且全池饱和则 <code>SaturationPin</code> 钉回原 owner。</li>
+  <li><b>Prefill：</b><code>prefix_len = p</code>，forward 只算 <code>L − p</code>；已在 cache 的 <code>[0, p)</code> 不重算。</li>
+  <li><b>Bootstrap：</b>同 A，<code>d = 0</code> 所以 <code>start_send_idx = 0</code>、页数仍是 <code>ceil(L/P)</code>。</li>
+  <li><b>传输：</b>注意——<b>传输量没有减少</b>。decode 没有这段 KV，<code>[0, p)</code> 的页虽然"不用算"，但仍然要从 prefill 的 cache 里读出来发过去。开了 early-send 时，这段可以先发、与 forward 重叠（<code>prefill.py:1627-1666</code>）。</li>
+  <li><b>完成：</b>同 A。</li>
+</ol>
+
+<p>收益全在 prefill 的 <code>L − p</code> 上：TTFT 里"算"的那一段按比例缩短；传输时间不变。所以 B 的加速比大致是 <code>(L + 传输) / (L − p + 传输)</code>——<b>前缀越长、传输占比越高，命中带来的边际收益越小</b>。</p>
+
+<h3 class="mini">C. 全部命中（p ≈ L, d = 0）</h3>
+
+<ol>
+  <li><b>Router：</b>命中比接近 1，几乎必然选原 owner；此时它做的唯一有价值判断是"这个 owner 还收不收得下"。</li>
+  <li><b>Prefill：</b><code>extend</code> 只剩最后一页（甚至 0 个新 token）。即便如此，prefill 仍要跑一次 forward 才能采出第一个 token——<code>req.output_ids.append(next_token_id)</code> 发生在 prefill 的结果处理里（<code>prefill.py:1197</code>）。</li>
+  <li><b>Bootstrap：</b><b>仍然要握手</b>。协议上没有"decode 自行完成"的分支：decode 依旧发注册与 metadata，prefill 依旧回状态帧。差别只在传输页数。</li>
+  <li><b>传输：</b><code>[0, L)</code> 的页仍要发（d = 0）。只有 decode 已持有到 <code>L</code>（d = L）时传输区间才会空：<code>end_idx &lt; start_send_idx</code> 时 <code>_send_kv_chunk</code> 直接 return，相等时也只是零页（<code>prefill.py:1718-1723</code>）。</li>
+  <li><b>完成：</b>同 A。</li>
+</ol>
+
+<div class="note"><b>"全部命中"不等于"prefill 不参与"。</b>它只意味着 prefill 的 forward 退化成最后一段（或一页），而 bootstrap、首 token 采样、KV 传输三件事一件都没少。真正能让传输归零的是 <code>d = L</code>，也就是 decode 自己已经有整段前缀——这需要 decode 侧 radix cache，且该请求此前在同一台 decode 上跑过。</div>
+
+<h2 id="compare"><span class="n">08</span>三种情况对比</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>维度</th><th>A 全未命中</th><th>B 部分命中</th><th>C 全部命中</th></tr></thead>
+<tbody>
+<tr><td class="k">是否触发 prefill</td><td data-label="A 全未命中">是，算 <code>L</code></td><td data-label="B 部分命中">是，算 <code>L − p</code></td><td data-label="C 全部命中">是，但只算最后一页（采样所需）</td></tr>
+<tr><td class="k">是否需要 bootstrap</td><td data-label="A 全未命中">需要</td><td data-label="B 部分命中">需要</td><td data-label="C 全部命中"><b>仍需要</b>（即使 d = L、零页可传，握手与状态帧仍会发生）</td></tr>
+<tr><td class="k">KV 传输量</td><td data-label="A 全未命中"><code>L</code>（<code>ceil(L/P)</code> 页）</td><td data-label="B 部分命中"><code>L</code>（不变）</td><td data-label="C 全部命中"><code>L</code>（不变；<code>d = L</code> 时才为 0）</td></tr>
+<tr><td class="k">传输内容</td><td data-label="A 全未命中">prompt 全部层的 KV ＋ aux（首 token）</td><td data-label="B 部分命中">同上；其中 <code>[0,p)</code> 来自 cache、<code>[p,L)</code> 来自本次 forward</td><td data-label="C 全部命中">同上，几乎全部来自 cache</td></tr>
+<tr><td class="k">Router 决策差异</td><td data-label="A 全未命中">cache 候选为空 → P2／轮转</td><td data-label="B 部分命中">有候选 → 按未命中排序；可能被队列/压力守卫改判</td><td data-label="C 全部命中">候选唯一且命中比≈1；决策退化为"容量够不够"</td></tr>
+<tr><td class="k">延迟主要来源</td><td data-label="A 全未命中">prefill 计算 ≫ 传输</td><td data-label="B 部分命中">计算 <code>(L−p)/L</code> ＋ 传输</td><td data-label="C 全部命中">传输 ＋ 握手往返（计算≈0）</td></tr>
+<tr><td class="k">资源开销</td><td data-label="A 全未命中">prefill GPU 满载一段；decode GPU 空等</td><td data-label="B 部分命中">prefill GPU 部分负载；decode 空等变短</td><td data-label="C 全部命中">prefill GPU 几乎空闲；瓶颈转到网络与 decode 侧准入</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>把这张表和 §07 的公式并排看，会得到一个有点反直觉的工程结论：<b>当 p 很大时，继续优化 router 的 cache-aware 收益已经很小</b>，因为剩下的时间几乎全在"把 L 个 token 的 KV 搬过去"。要动这一段，只有三条路：开 decode 侧 radix cache 让 <code>d &gt; 0</code>、缩短 <code>L</code>（前缀复用/裁剪）、或者提高传输带宽与并行度。</p>
+
+<h2 id="ops"><span class="n">09</span>超时、重试、失败转移、健康与背压</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>机制</th><th>默认</th><th>行为</th><th>源码</th></tr></thead>
+<tbody>
+<tr><td class="k">重试次数</td><td data-label="默认"><b>1（不重试）</b></td><td data-label="行为">含首次共 N 次；<code>3 is typical</code> 只是注释建议</td><td data-label="源码" class="v">types.rs:60-72</td></tr>
+<tr><td class="k">退避</td><td data-label="默认">50 ms 起，×2，上限 2000 ms，半区间 jitter</td><td data-label="行为">首次重试实际等 25–50 ms；退避不超过 stale 预算剩余</td><td data-label="源码" class="v">types.rs:39-55<br>chat.rs:401-411</td></tr>
+<tr><td class="k">可重试判定</td><td data-label="默认">—</td><td data-label="行为">只在"尚无任何响应到达客户端"时：传输错误、5xx、429/503；4xx（除 429）与 2xx 不重试</td><td data-label="源码" class="v">forward.rs:365-371<br>metrics.rs:215-223</td></tr>
+<tr><td class="k">重试排除</td><td data-label="默认">—</td><td data-label="行为">排除给出响应的 worker；PD 下若判定 prefill 有责则排除该 prefill；客户端自带 rid 时两侧都排除</td><td data-label="源码" class="v">forward.rs:371-379</td></tr>
+<tr><td class="k">请求总寿命</td><td data-label="默认">600 s</td><td data-label="行为">超时返回 504 <code>stale_request_expired</code>；流已开始则只断流不改状态码</td><td data-label="源码" class="v">types.rs:81-83<br>error.rs:221</td></tr>
+<tr><td class="k">上游响应超时</td><td data-label="默认">300s</td><td data-label="行为">非流式=整个响应；流式=响应头（即首 token，含排队）</td><td data-label="源码" class="v">types.rs:56-58</td></tr>
+<tr><td class="k">流空闲</td><td data-label="默认">180 s</td><td data-label="行为">两个 chunk 之间的最大静默</td><td data-label="源码" class="v">types.rs:64</td></tr>
+<tr><td class="k">断路器</td><td data-label="默认">连续 3 次失败 / 冷却 30 s</td><td data-label="行为">打开后候选集里剔除该 worker；冷却后放一个探针（half-open）；<b>503/429 视为背压，不计失败</b></td><td data-label="源码" class="v">circuit_breaker.rs:34-42, 207-238</td></tr>
+<tr><td class="k">健康检查</td><td data-label="默认">—</td><td data-label="行为"><code>/healthz</code> 恒 200；<code>/readyz</code> 只看池子可用 ＋ peer bootstrap 是否结算，不含逐 worker 探测；worker 健康＝被动熔断器 ＋ 注册表</td><td data-label="源码" class="v">routes/health.rs:13-52</td></tr>
+<tr><td class="k">注册表 fail-open</td><td data-label="默认">—</td><td data-label="行为">全员熔断打开时重置所有 breaker 并返回全池（宁可试，不可全拒）</td><td data-label="源码" class="v">registry.rs:185-213</td></tr>
+<tr><td class="k">decode 闸门</td><td data-label="默认">未设</td><td data-label="行为"><code>--decode-dispatch-limit N</code>：每个 prefill DP rank 最多 N 个"首 token 前"的请求进 decode；超出<b>阻塞等待</b>（受 stale 预算约束），不返回错误</td><td data-label="源码" class="v">decode_gate.rs:9-34<br>forward.rs:398-413</td></tr>
+<tr><td class="k">主动探测</td><td data-label="默认">—</td><td data-label="行为"><b>不存在</b>：没有 <code>--health-*</code> 参数、没有探测循环；<code>get_load</code> 在 gRPC 里返回 UNIMPLEMENTED</td><td data-label="源码" class="v">grpc.rs:321-328</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><b>背压的出口只有两个：503 与 504。</b>router 自己<b>不生成 429</b>——<code>ApiError</code> 里没有这个变体；引擎返回的 429/503 会被原样转发，同时被归类为 <code>Backpressure</code>，既不打开熔断器、也不清空已有的失败连击（<code>circuit_breaker.rs:207-238</code>）。这条设计避免了"繁忙的 worker 被误判为坏 worker"。</p>
+
+<h2 id="myths"><span class="n">10</span>四个常见误解</h2>
+
+<details><summary>"router 会把 KV 转发给 decode"</summary>
+<p>不会。router 只传 <code>room</code> 和 <code>bootstrap_host/port</code>；KV 由 prefill 直接 RDMA 写到 decode 注册的地址（<code>forward.rs:216-244</code>、<code>mooncake/conn.py:2048</code>）。这也是为什么 router 的带宽不是 PD 部署的瓶颈——它只承载 token 流。</p></details>
+
+<details><summary>"cache_aware 看的是引擎 GPU 里的 radix tree"</summary>
+<p>它看的是<b>块哈希的持有关系</b>：要么来自外部 indexer 的 <code>block_hash → worker</code>，要么来自 router 自己维护的树（由引擎的 <code>BlockStored/BlockRemoved</code> 事件喂养）。router 既没有 KV，也不知道缓存块的 token 内容（<code>tree.rs:489-507</code>）。误判的代价是"发到了一个其实没有这段前缀的 worker"，后果是那次 prefill 退化成全量计算，不是错误。</p></details>
+
+<details><summary>"全部命中就不用 prefill，也不需要 bootstrap"</summary>
+<p>两件事都不成立。prefill 至少要跑一次 forward 才能采出第一个 token（<code>prefill.py:1197</code>），而 bootstrap 是 decode 获取"往哪写、写多少、首 token 是什么"的唯一通道，与命中率无关。命中只改变 <b>forward 的长度</b>。</p></details>
+
+<details><summary>"router 会探测健康状态，失败就摘除"</summary>
+<p>这个版本里没有主动探测：<code>src/health/</code> 下只有一个 <code>circuit_breaker.rs</code>，没有任何 <code>--health-*</code> 参数。健康判断完全是被动的：请求失败累计到阈值 → 熔断器打开 → 候选集剔除；冷却后放一个探针。全员打开时还会 fail-open 回全池（<code>registry.rs:200-212</code>）。</p></details>
+
+<h2 id="quiz"><span class="n">11</span>自测</h2>
+
+<details><summary>Q1：一个 8192-token 的 prompt，P=64，prefill 全命中。KV 要传多少 token？</summary>
+<p>仍然传 8192 个 token 的 KV（128 页）——除非 decode 侧 <code>decode_prefix_len &gt; 0</code>。传输量 = <code>L − d</code>，与 prefill 的命中长度 <code>p</code> 无关。</p></details>
+
+<details><summary>Q2：为什么 <code>generate_room_id_for_rank</code> 要先把随机数对齐到 dp 的整数倍、再加 rank？</summary>
+<p>因为 decode 默认用 <code>room % prefill_dp_size</code> 推断"该去哪个 prefill DP rank 取 KV"（<code>decode.py:1197-1199</code>）。router 既然已经替 prefill 选了 rank，就必须让 room 的取模结果等于它，否则 decode 会查错 rank；显式覆盖只有 <code>disagg_prefill_dp_rank</code> 一条路。</p></details>
+
+<details><summary>Q3：cache_aware 选了 A，但 A 的队列已满，B 有同样的前缀且空闲。会发生什么？</summary>
+<p><code>--worker-queue-limit</code> 打开时，A 先被队头闸门拒掉，请求转到 B（放弃一部分前缀局部性）；如果全池都在排队且没人低于 <code>--saturation-queue-floor</code>，则触发 <code>SaturationPin</code>，钉回压力最小的 owner——同样的等待，至少 prefill 是命中。指标上分别记 <code>CacheWorkerQueued</code> 与 <code>AllQueued</code>。</p></details>
+
+<details><summary>Q4：router 返回 503 和引擎返回 503 有什么区别？</summary>
+<p>router 的 503 是"没有可用的 worker / 全部候选被准入拒绝"（<code>no_healthy_workers</code>、<code>policy_selection_failed</code> 等），属于路由层结论；引擎的 503 是背压，会被原样转发、归入 <code>Backpressure</code>，不打开熔断器，并可能触发重试（若还有重试预算）。</p></details>
+
+<!-- show-me:shell:begin -->
+<nav class="sm-foot" aria-label="页面导航"><div class="sm-pn"><a class="sm-pn-a sm-next" href="../../inference-systems/decode-dp-attention-dcp/index.html"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg><span class="sm-pn-b"><span class="sm-pn-l"><i class="sm-dot" style="--sm-cat:#1d4ed8" aria-hidden="true"></i>下一篇</span><b class="sm-pn-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</b></span></a></div></nav><section class="sm-more" aria-labelledby="sm-more-h"><h2 class="sm-more-h" id="sm-more-h">同分类的其他条目</h2><div class="sm-more-grid"><a class="sm-more-a" href="../../inference-systems/decode-dp-attention-dcp/index.html"><span class="sm-more-t">把上下文做到 1M：DCP、DPAttention 与 HiSparse 的三种切法</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/decode-small-m-w4a4/index.html"><span class="sm-more-t">Decode 小 M 的 W4A4：几何门控、跨层共享 workspace，以及 draft 与大 prefill 为什么留在 FP8</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/dsa-prepare-six-opts/index.html"><span class="sm-more-t">DSA 的准备阶段六项小优化：条件窄、净值小，还有一项是负向</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/prefill-online-w8a8/index.html"><span class="sm-more-t">P 端在线 W8A8：shared expert 与 attention 的 q_b_proj / o_proj</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/sglang-layer-split/index.html"><span class="sm-more-t">SGLang 的 LayerSplit：把 DSA 的 KV/indexer cache 按层摊到 prefill CP 的各 rank</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/sm120-sparse-mla-my-prefill/index.html"><span class="sm-more-t">SM120 上的 sparse-MLA prefill 内核：直接读 656 B/key 的布局</span><span class="sm-more-m">7 分钟<i aria-hidden="true"></i>2026-11-16</span></a><a class="sm-more-a" href="../../inference-systems/sglang-prefix-cache-three-attentions/index.html"><span class="sm-more-t">SGLang prefix cache 的三类注意力：Linear · SWA · Sparse</span><span class="sm-more-m">32 分钟<i aria-hidden="true"></i>2026-10-27</span></a><a class="sm-more-a" href="../../inference-systems/deepinfer-vs-sglang/index.html"><span class="sm-more-t">DeepInfer × SGLang 深度对比：同一条请求，两种引擎</span><span class="sm-more-m">43 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-pool-parallel-strategies/index.html"><span class="sm-more-t">SGLang 并行策略怎样改变 KV 池容量：分子 B 与分母 b</span><span class="sm-more-m">14 分钟<i aria-hidden="true"></i>2026-10-21</span></a><a class="sm-more-a" href="../../inference-systems/sglang-stream-interval/index.html"><span class="sm-more-t">--stream-interval 为什么在长输出场景有提升</span><span class="sm-more-m">8 分钟<i aria-hidden="true"></i>2026-09-24</span></a><a class="sm-more-a" href="../../inference-systems/moe-a2a-megamoe/index.html"><span class="sm-more-t">MoE 的通信：MegaMoE 内核、A2A 开关，与各后端的真实差别</span><span class="sm-more-m">23 分钟<i aria-hidden="true"></i>2026-09-21</span></a><a class="sm-more-a" href="../../inference-systems/kv-prefetch-prediction/index.html"><span class="sm-more-t">KV 预取与预测：该不该提前搬，以及提前搬什么</span><span class="sm-more-m">17 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/sglang-request-lifecycle/index.html"><span class="sm-more-t">SGLang 推理全流程：一条请求从进到出的每一步</span><span class="sm-more-m">19 分钟<i aria-hidden="true"></i>2026-09-19</span></a><a class="sm-more-a" href="../../inference-systems/hicache-mooncake/index.html"><span class="sm-more-t">L1–L4 缓存与 LLM 推理的 KV 分层：HiCache 与 Mooncake 在 SGLang 里各管什么</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-18</span></a><a class="sm-more-a" href="../../inference-systems/dflash-pp-adaptation/index.html"><span class="sm-more-t">PP 适配 DFlash：伪造单例 PP 组 + 两条跨阶段数据流</span><span class="sm-more-m">11 分钟<i aria-hidden="true"></i>2026-09-16</span></a></div></section>
+<!-- show-me:shell:end --><footer>
+<p><b>源码基准：</b><code>sgl-project/sglang</code> <code>main</code> @ <code>f534dba</code>（2026-11-17），读取范围：<code>sgl-router/src</code>（116 个 .rs）、<code>python/sglang/srt/disaggregation</code>、<code>managers</code>、<code>mem_cache</code>、<code>arg_groups/fields/disagg.py</code>。稀疏检出，未编译、未运行。</p>
+<p><b>未做运行时实测。</b>文中所有默认值取自源码字面内容（CLI 的 <code>default_value_t</code> 与 <code>Default</code> 实现）；示意图中的 8192/64/4096 是为说明比例而选的示例值，不是任何实测配置。标注 <span class="badge inf">推断</span> 的段落是根据调用链与数据流推出、但没有在源码中读到直接断言的部分。</p>
+<p><b>边界：</b>仓库里另有一套 <code>rust/sglang-server</code>（单引擎的 Rust 前端，与 Python scheduler 通过 typed RPC 通信），它不是机群级 router，本文未涉及。Reorg 路由（<code>--chat-routing reorg</code>）与 legacy 路径并存，文中凡有差异处均已分别标注。</p>
+<p class="lic">内容 CC BY 4.0 · 代码片段归 SGLang 项目（Apache-2.0） · <a href="../../index.html">← 返回 show-me 知识库</a></p>
+</footer>
+
+</div>
+</body>
+</html>

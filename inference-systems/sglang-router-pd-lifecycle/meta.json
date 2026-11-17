@@ -1,0 +1,32 @@
+{
+  "title": "SGLang Router 的调度与 PD 请求生命周期",
+  "slug": "sglang-router-pd-lifecycle",
+  "category": "inference-systems",
+  "date": "2026-11-17",
+  "tags": [
+    "SGLang",
+    "Router",
+    "PD 分离",
+    "KV 传输",
+    "Radix Cache",
+    "bootstrap",
+    "调度策略"
+  ],
+  "one_liner": "对照 sgl-router 的选路阶梯与 prefill/decode 的 bootstrap 握手，把 PD 部署下三种缓存命中情况拆到具体函数：router 只发一个 room，KV 从不经过它；命中只缩短 prefill 的 forward，真正减少传输量的是 decode 侧的 decode_prefix_len。",
+  "artifact": "index.html",
+  "extra_files": [
+    "notes.md"
+  ],
+  "session_ref": "",
+  "cwd": "",
+  "sources": [
+    "sgl-project/sglang main @ f534dbae（2026-11-17）稀疏检出：sgl-router/src 全部 116 个 Rust 源文件",
+    "python/sglang/srt/disaggregation（prefill.py、decode.py、common/conn.py、common/bootstrap.py、mooncake/conn.py、nixl/conn.py）",
+    "python/sglang/srt/managers（tokenizer_manager.py、scheduler.py、scheduler_components/load_publisher.py、disagg_service.py）与 mem_cache/radix_cache.py、mem_cache/common.py",
+    "python/sglang/srt/arg_groups/fields/disagg.py 与 sgl-router/src/config/{cli,types}.rs（默认值来源）"
+  ],
+  "visibility": "public",
+  "publish": true,
+  "redactions": [],
+  "enriched": "2026-11-17"
+}
